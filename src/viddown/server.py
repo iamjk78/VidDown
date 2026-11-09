@@ -113,6 +113,7 @@ def create_app(app_state) -> FastAPI:
             "queue_paused": bool(S.db.kv_get("queue_paused", False)),
             "pause_reason": S.db.kv_get("queue_pause_reason"),
             "target_error": S.db.kv_get("target_error"),
+            "cookies_error": S.db.kv_get("cookies_error"),
             "schedule": {"enabled": s["schedule_enabled"], "start": s["schedule_start"], "end": s["schedule_end"]},
             "in_window": in_schedule(s),
             "disk": {"free": free_bytes(s["download_dir"]), "dir": s["download_dir"], "min_gb": s["min_free_gb"]},
@@ -248,6 +249,7 @@ def create_app(app_state) -> FastAPI:
         elif action == "resume":
             S.db.kv_set("queue_paused", False)
             S.db.kv_set("queue_pause_reason", None)
+            S.db.kv_set("cookies_error", None)
         else:
             raise HTTPException(404)
         return {"ok": True}
@@ -299,6 +301,9 @@ def create_app(app_state) -> FastAPI:
         body = await req.json()
         locked = S.settings.locked_keys()
         changes = {k: v for k, v in body.items() if k not in locked}
+        if changes.get("cookies_mode") == "browser" and in_docker():
+            raise HTTPException(400, "V Dockeru nelze číst cookies z prohlížeče – aplikace neběží na stejném počítači "
+                                     "jako prohlížeč. Exportujte cookies do souboru cookies.txt a nahrajte ho.")
         await validate_dirs(changes)
         if changes.get("network_access") and not S.secrets.has_password():
             raise HTTPException(400, "Nastavte nejdřív heslo do GUI.")

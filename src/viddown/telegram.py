@@ -278,6 +278,11 @@ class TelegramBot:
             await self.send(t(self.lang(), "done_job", title=job.get("title") or job["url"], path=job.get("filepath") or ""))
 
     async def on_notice(self, kind: str, **kw) -> None:
+        if kind == "cookies":
+            await self.send(("⚠️ Fronta pozastavena: cookies nejdou načíst ({e}). Opravte nastavení cookies a frontu obnovte v GUI."
+                             if self.lang() == "cs" else "⚠️ Queue paused: cookies can't be loaded ({e}). Fix the cookie settings and resume the queue in the GUI.")
+                            .format(e=kw.get("error", "")[:200]))
+            return
         if kind == "target":
             await self.send(("⚠️ Fronta pozastavena: cílová složka není dostupná ({e}). Po obnovení přístupu bude pokračovat."
                              if self.lang() == "cs" else "⚠️ Queue paused: download folder unavailable ({e}). It resumes when the folder is back.")

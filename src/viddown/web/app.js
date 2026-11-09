@@ -216,7 +216,10 @@ function renderQueueDyn() {
   let html = '';
   if (st.queue_paused) {
     const disk = st.pause_reason === 'disk';
-    const target = st.pause_reason === 'target';
+    const target = st.pause_reason === 'target', cook = st.pause_reason === 'cookies';
+    if (cook) html += `<div class="banner">${ic('cookie', 18)}<span class="grow">${T('Fronta je pozastavená: cookies nejdou načíst', 'Queue paused: cookies cannot be loaded')} – ${esc((st.cookies_error || '').slice(0, 200))}</span>
+      <button class="btn sm" data-go="settings">${T('Nastavení', 'Settings')}</button><button class="btn sm" data-q="resume">${ic('play', 12)} ${T('Pokračovat', 'Resume')}</button></div>`;
+    else
     html += `<div class="banner">${ic(disk ? 'hdd' : target ? 'folder' : 'pause', 18)}<span class="grow">${disk ? T('Fronta je pozastavená: na disku je málo místa', 'Queue paused: low disk space') + ` (${fmtBytes(st.disk.free)}, min. ${st.disk.min_gb} GB)`
       : target ? T('Fronta je pozastavená: cílová složka není dostupná', 'Queue paused: download folder is not available') + ` – ${esc(st.target_error || st.disk.dir)}`
       : T('Fronta je pozastavená', 'The queue is paused')}</span>${target ? `<button class="btn sm" data-go="settings">${T('Nastavení', 'Settings')}</button>` : ''}
@@ -399,6 +402,8 @@ function fieldHtml(f, S) {
     f = Object.assign({}, f, { hint: ['V Dockeru jen složky připojené do kontejneru (např. /downloads, /nas). Při uložení se ověří zápis.', 'In Docker only folders mounted into the container (e.g. /downloads, /nas). Write access is checked on save.'] });
   else if (f.type === 'path' && f.k === 'download_dir' && !f.hint)
     f = Object.assign({}, f, { hint: ['Může být i síťová složka. Při uložení se ověří zápis.', 'Network folders work too. Write access is checked on save.'] });
+  if (S.docker && (f.k === 'network_access' || f.k === 'port'))
+    return `<div class="fld"><div class="lab"><div class="b5">${L(f.label)}</div><div class="hint">${T('V Dockeru se řídí mapováním portů v docker-compose', 'In Docker this is set by the port mapping in docker-compose')}</div></div><span class="badge b-n">${ic('lock', 11)} Docker</span></div>`;
   const v = f.k ? S.values[f.k] : null; const lock = f.k && S.locked[f.k];
   const dis = lock ? 'disabled' : '';
   const lab = (extra = '') => `<div class="lab"><div class="b5">${L(f.label)}${lock ? ` <span class="lock" title="${T('Nastaveno proměnnou prostředí', 'Set by environment variable')} ${esc(lock)}">${ic('lock', 12)}</span>` : ''}</div>${f.hint ? `<div class="hint">${L(f.hint)}</div>` : ''}${extra}</div>`;
@@ -418,11 +423,11 @@ function fieldHtml(f, S) {
       <div class="row gap6 wrap" style="margin-top:8px">${['{název}', '{kanál}', '{playlist}', '{datum}', '{rozlišení}', '{id}', '{pořadí}'].map(x => `<button class="chip mono" style="height:22px;font-size:11px" data-ins="${f.k}" data-v="${x}">${x}</button>`).join('')}</div>
       <div class="fs12 t2" style="margin-top:8px">${T('Náhled', 'Preview')}: <span class="mono" style="color:var(--text)">${esc(previewName(v))}.mp4</span></div></div>`;
     case 'cookies': { const cf = S.cookies_file; const mode = S.values.cookies_mode;
-      return `<div class="fld"><div class="lab"><div class="b5">Cookies</div><div class="hint">${T('Pro členský a věkově omezený obsah', 'For members-only and age-restricted content')}</div></div>
-      <div class="row gap8 wrap" style="justify-content:flex-end"><span class="seg">${[['none', T('Ne', 'Off')], ['file', 'cookies.txt'], ['browser', T('Z prohlížeče', 'From browser')]].map(([o, l]) => `<button data-k="cookies_mode" data-t="seg" data-v="${o}" class="${mode === o ? 'on' : ''}">${l}</button>`).join('')}</span>
+      return `<div class="fld"><div class="lab"><div class="b5">Cookies</div><div class="hint">${mode === 'browser' ? T('Čte se z profilu prohlížeče na počítači, kde běží VidDown', 'Read from the browser profile on the computer running VidDown') : S.docker ? T('Exportujte cookies.txt z prohlížeče a nahrajte ho (viz Nápověda)', 'Export cookies.txt from your browser and upload it (see Help)') : T('Pro členský a věkově omezený obsah', 'For members-only and age-restricted content')}</div></div>
+      <div class="row gap8 wrap" style="justify-content:flex-end"><span class="seg">${[['none', T('Ne', 'Off')], ['file', 'cookies.txt'], ...(S.docker ? [] : [['browser', T('Z prohlížeče', 'From browser')]])].map(([o, l]) => `<button data-k="cookies_mode" data-t="seg" data-v="${o}" class="${mode === o ? 'on' : ''}">${l}</button>`).join('')}</span>
       ${mode === 'file' ? (cf.exists ? `<span class="badge b-ok">${ic('check', 11)} cookies.txt · ${new Date(cf.mtime * 1000).toLocaleDateString()}</span>` : `<span class="badge b-warn">${T('Soubor nenahrán', 'Not uploaded')}</span>`) + `<label class="btn sm">${T('Nahrát', 'Upload')}<input type="file" id="ckfile" accept=".txt" hidden></label>${cf.exists ? `<button class="ibtn" id="ckdel" title="${T('Smazat', 'Delete')}">${ic('trash', 14)}</button>` : ''}` : ''}
       ${mode === 'browser' ? `<select class="input sm" style="width:120px" data-k="cookies_browser" data-t="text">${['chrome', 'firefox', 'safari', 'edge', 'brave', 'opera', 'chromium', 'vivaldi'].map(b => `<option ${S.values.cookies_browser === b ? 'selected' : ''}>${b}</option>`).join('')}</select>` : ''}</div></div>`; }
-    case 'password': return `<div class="fld"><div class="lab"><div class="b5">${T('Heslo do GUI', 'GUI password')}</div><div class="hint">${S.has_password ? T('Nastaveno', 'Set') : T('Nenastaveno – GUI je přístupné bez hesla jen z tohoto počítače', 'Not set – GUI is only reachable from this computer')}</div></div>
+    case 'password': return `<div class="fld"><div class="lab"><div class="b5">${T('Heslo do GUI', 'GUI password')}</div><div class="hint">${S.has_password ? T('Nastaveno – GUI vyžaduje přihlášení', 'Set – the GUI requires sign-in') : T('Nenastaveno – GUI je přístupné bez hesla', 'Not set – the GUI opens without a password')}</div></div>
       <div class="row gap8">${S.has_password ? '<span class="mono t2">••••••••</span>' : ''}<button class="btn sm" id="pwbtn">${S.has_password ? T('Změnit', 'Change') : T('Nastavit', 'Set')}</button></div></div>`;
     case 'tgtoken': { const st = App.st ? App.st.telegram : {};
       return `<div class="fld"><div class="lab"><div class="b5">Bot</div><div class="hint">${S.telegram_token_set ? (st.username ? '@' + esc(st.username) : T('Token uložen', 'Token saved')) : T('Token od @BotFather (viz Nápověda)', 'Token from @BotFather (see Help)')}</div></div>
@@ -701,9 +706,10 @@ function renderHelp() {
       <li><b>Time window</b>: downloads only run in the given hours and days (may cross midnight, e.g. 22:00–06:00). When the window ends, downloads pause and continue next time.</li></ul>`)],
     ['cookies', T('Přihlášení a cookies', 'Login and cookies'), T(`
       <p>Pro členský nebo věkově omezený obsah potřebuje aplikace cookies z prohlížeče, ve kterém jste na webu přihlášení.</p>
-      <ol><li>Nainstalujte do prohlížeče rozšíření pro export <code>cookies.txt</code> (formát Netscape), např. „Get cookies.txt LOCALLY“.</li>
+      <ol><li>Nainstalujte do prohlížeče rozšíření pro export <code>cookies.txt</code> (formát Netscape) – ve Firefoxu např. „cookies.txt“, v Chrome „Get cookies.txt LOCALLY“.</li>
       <li>Na stránce, kde jste přihlášení, cookies exportujte.</li><li>V Nastavení › Přístup a síť zvolte <b>cookies.txt</b> a soubor nahrajte.</li></ol>
-      <p>Na Macu a Windows lze místo souboru zvolit <b>Z prohlížeče</b> – yt-dlp si cookies načte přímo (v Dockeru to nejde).</p>`, `
+      <p>Cookies časem vyprší (YouTube je navíc průběžně mění) – když se znovu objeví „vyžadováno přihlášení“, soubor exportujte a nahrajte znovu.</p>
+      <p>Když VidDown běží přímo na Macu nebo Windows (ne v Dockeru), lze místo souboru zvolit <b>Z prohlížeče</b> – yt-dlp si cookies přečte z profilu prohlížeče <b>na tom počítači, kde VidDown běží</b>. V Dockeru tato volba není.</p>`, `
       <p>Members-only or age-restricted content needs cookies from a browser where you're logged in.</p>
       <ol><li>Install a <code>cookies.txt</code> export extension (Netscape format), e.g. "Get cookies.txt LOCALLY".</li><li>Export cookies on the site where you're logged in.</li>
       <li>In Settings › Access and network choose <b>cookies.txt</b> and upload the file.</li></ol><p>On Mac and Windows you can pick <b>From browser</b> instead (not in Docker).</p>`)],

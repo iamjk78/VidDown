@@ -276,3 +276,15 @@ def test_playlist_videos_download_in_parallel_despite_pause(rt, monkeypatch):
     asyncio.run(run_until(rt, lambda: sum(1 for k in rt.db.children(p) if k["status"] == "done") == 4, timeout=15))
     assert peak[0] == 3
     assert all(k["status"] == "done" for k in rt.db.children(p))
+
+
+def test_cookies_error_pauses_queue_instead_of_failing_jobs(rt, monkeypatch):
+    err = ResolveError("could not find firefox cookies database in '/data/.mozilla/firefox'", "cookies")
+    monkeypatch.setattr(runner_mod, "probe_url", probe_video("V"))
+    monkeypatch.setattr(runner_mod.ytdlp, "download", fake_download(lambda u: err))
+    a, _ = rt.add("https://x/a")
+    b, _ = rt.add("https://x/b")
+    asyncio.run(run_until(rt, lambda: rt.queue_paused()))
+    assert rt.db.kv_get("queue_pause_reason") == "cookies"
+    assert rt.db.get(a)["status"] == "queued" and rt.db.get(b)["status"] in ("queued", "new", "probing")
+    assert not rt.db.history(status="failed")

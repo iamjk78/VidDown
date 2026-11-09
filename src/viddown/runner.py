@@ -140,7 +140,7 @@ class Runner:
 
         # 1) kontrola nových URL (vlastní limit, nezabírá sloty stahování)
         free = int(s.get("probe_concurrency", 2)) - len(self.probing)
-        if free > 0:
+        if free > 0 and self.db.kv_get("queue_pause_reason") != "cookies":
             for job in self.db.query("select * from jobs where status='new' order by pos limit ?", (free,)):
                 self.db.update(job["id"], status="probing")
                 self.probing[job["id"]] = asyncio.create_task(self._probe(job))
@@ -214,6 +214,15 @@ class Runner:
             self.running[job["id"]] = (asyncio.create_task(self._execute(job["id"], holder)), holder)
             slots -= 1
 
+    def _pause_for_cookies(self, msg: str) -> None:
+        if self.db.kv_get("queue_pause_reason") == "cookies":
+            return
+        self.db.kv_set("queue_paused", True)
+        self.db.kv_set("queue_pause_reason", "cookies")
+        self.db.kv_set("cookies_error", msg)
+        log.warning("fronta pozastavena – chyba cookies: %s", msg)
+        self.emit("on_notice", "cookies", error=msg)
+
     async def _check_target(self, s: dict) -> None:
         now = time.monotonic()
         if now - self._target_checked < 20:
@@ -260,6 +269,10 @@ class Runner:
     def apply_probe(self, job: dict, res: dict) -> None:
         jid = job["id"]
         s = self.settings.all()
+        if res["type"] == "none" and res.get("error_kind") == "cookies":
+            self.db.update(jid, status="new", error=res["error"], error_kind="cookies")
+            self._pause_for_cookies(res["error"])
+            return
         if res["type"] == "none":
             self.db.update(jid, status="failed", error=res["error"], error_kind=res.get("error_kind"),
                            finished_at=time.time(), method=None)
@@ -470,6 +483,10 @@ class Runner:
     def _failed(self, jid: int, msg: str, kind: str, staging: Path) -> None:
         job = self.db.get(jid)
         s = self.settings.all()
+        if kind == "cookies":  # chyba nastavení cookies by shodila celou frontu – pozastavit, úloha zůstane
+            self.db.update(jid, status="queued", error=msg, error_kind=kind, speed=None, eta=None)
+            self._pause_for_cookies(msg)
+            return
         if kind == "target":  # počká na dostupnost cílové složky, pokusy se nepočítají
             self.db.update(jid, status="queued", not_before=time.time() + 30, error=msg, error_kind=kind, speed=None, eta=None)
             return

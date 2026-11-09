@@ -176,6 +176,7 @@ def is_hls_response(url: str, content_type: str) -> bool:
 
 # ------------------------------------------------------------ chyby
 ERROR_PATTERNS = [
+    ("cookies", r"cookies database|could not (find|copy|open) .*cook|failed to decrypt|cookies-from-browser|unsupported browser|cookie file"),
     ("unsupported", r"unsupported url|no video formats found|unable to extract|no media|not a valid url|is not a valid url|no suitable"),
     ("drm", r"drm|widevine|playready|fairplay"),
     ("login", r"sign in|log in|login|members?[- ]only|cookies|authentication|age[- ]restricted|confirm your age|private video"),

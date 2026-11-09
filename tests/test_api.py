@@ -118,3 +118,14 @@ def test_download_dir_validated_on_save(client, tmp_path):
         ro.chmod(0o700)
     assert st.settings.get("download_dir") == str(good)  # neplatná cesta se neuložila
     assert c.put("/api/settings", json={"download_dir": "relativni"}).status_code == 400
+
+
+def test_browser_cookies_rejected_in_docker(client, monkeypatch):
+    import viddown.server as srv
+    c, st = client
+    monkeypatch.setattr(srv, "in_docker", lambda: True)
+    r = c.put("/api/settings", json={"cookies_mode": "browser"})
+    assert r.status_code == 400 and "cookies.txt" in r.json()["detail"]
+    assert st.settings.get("cookies_mode") == "none"
+    monkeypatch.setattr(srv, "in_docker", lambda: False)
+    assert c.put("/api/settings", json={"cookies_mode": "browser"}).status_code == 200

@@ -93,3 +93,10 @@ def test_check_dir_writable(tmp_path):
     f = tmp_path / "soubor.txt"
     f.write_text("x")
     assert not util.check_dir_writable(str(f), docker=False)[0]
+
+
+def test_cookies_error_classified_before_login():
+    msg = "could not find firefox cookies database in '/data/.mozilla/firefox'"
+    assert util.classify_error(msg) == "cookies"
+    assert not util.fallback_allowed("cookies") and not util.retry_allowed("cookies")
+    assert util.classify_error("Sign in to confirm you're not a bot. Use --cookies") == "login"
