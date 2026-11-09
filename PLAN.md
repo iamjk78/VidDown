@@ -1,6 +1,6 @@
 # VidDown – plán
 
-Stav: **plánování**. Vývoj se zatím nezačal. Tento dokument shrnuje potvrzené požadavky, pravidla chování a návrh.
+Stav: **etapy 1–4 implementovány** (listopad 2026). Tento dokument shrnuje potvrzené požadavky, pravidla chování a návrh. Odchylky a doplňky z vývoje jsou v kapitole 17.
 
 ## 1. Cíl
 
@@ -15,7 +15,8 @@ Aplikace pro Windows, macOS a Docker. Uživatel zadá URL stránky, videa, playl
 - Výchozí kvalita: **maximální** (nejvyšší rozlišení a datový tok). Kontejner MKV, pokud se kodeky nevejdou do MP4.
 - V nastavení lze přepnout na režim **Kompatibilita** (přednostně MP4/H.264 a AAC).
 - Volitelně: výběr kvality před stažením, seznam playlistu k odškrtnutí, jen audio (MP3/M4A), titulky.
-- Volitelně metadata: náhledový obrázek, kapitoly a popis vložené do souboru.
+- Miniatura se vždy ukládá vedle videa jako JPG se stejným názvem (viz kap. 9).
+- Volitelně metadata: náhledový obrázek, kapitoly a popis vložené přímo do souboru videa.
 - YouTube jde přes yt-dlp (vyžaduje Deno, viz kap. 7).
 
 ### Metody a fallback
@@ -41,13 +42,30 @@ Aplikace pro Windows, macOS a Docker. Uživatel zadá URL stránky, videa, playl
 
 ## 3. Fronta
 
+### Pořadí
+- Aplikace má **jednu frontu**. Úlohy se spouštějí postupně **v pořadí přidání** (FIFO), bez ohledu na to, odkud přišly (GUI, CLI, Telegram).
+- Žádné priority. Pořadí mění jen uživatel ručně v GUI.
+- **Počet souběžných stahování** (nastavení v GUI, platí za chodu) určuje, kolik úloh z čela fronty běží najednou. Při hodnotě 1 se stahuje přísně jedna po druhé.
+- Videa z playlistu nebo kanálu zaberou ve frontě místo své rodičovské položky a zachovají pořadí z playlistu.
+
+### Zásahy do fronty (pouze v GUI)
+- Jen v GUI lze:
+  - **změnit pořadí** úloh (přetažením),
+  - **odstranit** úlohu z fronty,
+  - **pozastavit** úlohu.
+- CLI a Telegram umí do fronty jen **přidávat** a **zobrazovat** ji.
+- **Pozastavená úloha** zůstává na svém místě a při výběru další úlohy se **přeskakuje**, dokud ji uživatel v GUI znovu nepovolí.
+- Pozastavení běžící úlohy přeruší stahování. Rozpracované soubory zůstanou a po povolení stahování naváže.
+- Pozastavení rodičovské položky playlistu platí pro všechna její dosud nestažená videa.
+- Odstranění úlohy smaže rozpracované soubory. Do historie se zapíše jako zrušená.
+
+### Stavy a průběh
 - Stavy: čeká, kontroluje se, stahuje se, pozastaveno, hotovo, chyba, zrušeno.
 - Průběh v procentech, rychlost, zbývající čas.
-- Akce: zrušit, opakovat, odstranit, změnit pořadí a prioritu, pozastavit položku i celou frontu.
-- **Počet souběžných stahování** se nastavuje v GUI a platí za chodu.
-- **Zrušení** smaže rozpracované soubory. **Pauza** je ponechá a umožní pokračovat.
-- **Po pádu nebo restartu** se rozběhnuté úlohy vrátí do fronty a navážou.
-- **Automatické opakování** neúspěšné úlohy: 2 pokusy s prodlevou 1 min a 5 min, potom stav chyba. Neplatí pro chyby, kde opakování nemá smysl (soukromé video, DRM, …).
+
+### Chyby a obnova
+- **Po pádu nebo restartu** se rozběhnuté úlohy vrátí do fronty na své místo a navážou.
+- **Automatické opakování** neúspěšné úlohy: 2 pokusy s prodlevou 1 min a 5 min, potom stav chyba. Úloha při tom zůstává na svém místě ve frontě. Neplatí pro chyby, kde opakování nemá smysl (soukromé video, DRM, …).
 - **Limit rychlosti** je celkový a dělí se mezi běžící stahování.
 - **Plánování (časové okno):** po skončení okna se běžící stahování pozastaví a v dalším okně naváže. yt-dlp umí navázat, sniffer (ffmpeg) začne znovu.
 
@@ -100,7 +118,8 @@ Aplikace pro Windows, macOS a Docker. Uživatel zadá URL stránky, videa, playl
   - Kontrolní odpověď po URL se posílá vždy a za oznámení se nepočítá.
   - Chyby jednoho playlistu se sloučí do jedné souhrnné zprávy na konci.
   - Hlásí se i selhaná aktualizace enginu a automatický návrat na předchozí verzi.
-- Příkazy: `/fronta`, `/historie`, `/zrusit <id>`, `/znovu <id>`, `/pauza`, `/pokracovat`, `/soubeh <n>`, `/engine`, `/aktualizovat`.
+- Příkazy: `/fronta`, `/historie`, `/engine`, `/aktualizovat`.
+- Bot frontu nemění: nemůže měnit pořadí, odstraňovat ani pozastavovat úlohy ani měnit počet souběžných stahování. To jde jen v GUI.
 - Soubory se do Telegramu neposílají (limit Bot API 50 MB). Bot hlásí jen cestu k souboru.
 
 ## 7. Enginy a aktualizace
@@ -151,27 +170,35 @@ src/viddown/
 
 ## 9. GUI (webové)
 
+**Zvolená varianta: B – postranní panel a přehled.** Vzor: `design/VidDown_navrhy_GUI.pdf`, strany 5–7 (zdroj `design/build_mockups.py`).
+
+- **Postranní panel vlevo:** logo, navigace **Fronta** (s počtem položek), **Historie**, **Nastavení**, **Enginy**. Dole stav disku (volné místo, cílová složka), stav Telegram bota, přepínač tmavého režimu, verze aplikace a jazyk.
+- **Fronta:**
+  - nahoře nadpis, pole pro URL a tlačítko Přidat,
+  - čtyři ukazatele: Probíhá (x / souběžnost), Ve frontě (počet, odhad velikosti, počet pozastavených), Rychlost (celkem a limit), Dnes staženo (počet, chyby, objem),
+  - sekce **Právě se stahuje**: velké řádky s miniaturou, názvem, metodou, kanálem, zdrojem (GUI / Telegram / CLI), průběhem, rychlostí, zbývajícím časem a tlačítky Pozastavit / Odstranit,
+  - sekce **Čeká ve frontě**: kompaktní řádky s úchytem pro přetažení, pořadím, miniaturou, metodou, odhadem velikosti a rozlišení. Playlist je jedna rozbalitelná položka. Pozastavená položka je zvýrazněná s tlačítkem Povolit.
+- **Nastavení:** karty ve dvou sloupcích (Stahování, Pojmenování a složky, Rychlost a plánování, Přístup a síť, Telegram, Vzhled a jazyk). Změny se ukládají automaticky. Export a import nastavení.
+- **Historie** a **Enginy** se v rámci varianty B zpracují ve stejném stylu (obsah podle stran 4 a 10 návrhů).
 - Světlý a tmavý režim, jazyk čeština / angličtina s možností přepnutí.
-- Záložky: **Fronta**, **Historie**, **Nastavení**, **Enginy**.
 - Živý průběh bez ručního obnovování.
 - Log každé úlohy je viditelný v detailu položky.
+- **Miniatury** u položek ve frontě i u právě stahovaných souborů:
+  - yt-dlp: miniatura z metadat videa,
+  - sniffer: `og:image` nebo `poster` přehrávače, jinak snímek z prvních sekund videa přes ffmpeg,
+  - získávají se při kontrole URL (probe), která proto běží u **každé** nově přidané položky, nejen u Telegramu,
+  - do jejich získání se zobrazí zástupný obrázek,
+  - během čekání a stahování jsou v mezipaměti v datové složce a GUI je načítá lokálně, ne z cizích webů,
+  - **po dokončení** se miniatura uloží jako **JPG se stejným názvem jako video do stejné složky** (`Název videa.mp4` a `Název videa.jpg`),
+  - miniatura v plném rozlišení. Formáty jako WebP nebo PNG se převedou na JPG,
+  - přípona proti přepsání `(2)`, `(3)`… platí pro video i miniaturu stejně,
+  - u zrušené nebo neúspěšné úlohy se do cílové složky nic neuloží a miniatura z mezipaměti se smaže.
 - V Dockeru a při vzdáleném přístupu se místo "Otevřít složku" nabízí stažení souboru přes prohlížeč.
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│ VidDown   [ Fronta ] Historie  Nastavení  Enginy     ⏸ Pauza │
-├──────────────────────────────────────────────────────────────┤
-│ [ Vložte URL videa, playlistu nebo kanálu...    ] [ Přidat ] │
-├──────────────────────────────────────────────────────────────┤
-│ Probíhá 2/2                                                  │
-│ ▶ Me at the zoo            yt-dlp   ████████░░ 78%  2,1 MB/s │
-│ ▶ Přednáška 3              sniffer  ███░░░░░░░ 31%  0,9 MB/s │
-│ Čeká 5                                                       │
-│ ⏳ Playlist: Kurz Python (12 videí)  ▸ rozbalit              │
-│                                                              │
-│ Volné místo: 84 GB          Cíl: ~/Downloads/VidDown         │
-└──────────────────────────────────────────────────────────────┘
-```
+
+### Nápověda a průvodce
+- Sekce **Nápověda** v postranním panelu: co aplikace umí, přidávání videí, fronta, playlisty a kanály, pojmenování, plánování, cookies, Telegram, enginy, CLI, řešení problémů. Česky i anglicky.
+- **Průvodce prvním spuštěním** (5 kroků): přehled funkcí, cílová složka a kvalita, souběžnost / limit / časové okno, Telegram (volitelně), shrnutí. Zobrazí se automaticky při prvním otevření GUI a jde ho spustit znovu z Nápovědy nebo z Nastavení.
 
 ## 10. Bezpečnost
 
@@ -214,13 +241,25 @@ src/viddown/
 - Stránky s přihlášením nebo ochranou proti botům vyžadují cookies.
 - Používejte jen pro obsah, ke kterému máte práva.
 
-## 15. Otevřené body
+## 15. Otevřené body (k 9. 11. 2026)
 
-- Přesná syntaxe šablony pojmenování a výchozí hodnoty.
-- Způsob zadání časového okna (jedno okno, nebo víc oken podle dne).
+- Šablona: tokeny `{název} {kanál} {playlist} {datum} {rozlišení} {id} {pořadí}` (i anglicky). Výchozí `{název}`, u kanálu `{kanál}_{název}`.
+- Časové okno: jedno okno (od–do, může přes půlnoc) + vybrané dny.
 - Zdroje binárek ffmpeg a Deno pro jednotlivé platformy a licence přibaleného ffmpeg (GPL/LGPL build).
-- Soubory z předchozího rozpracování (`pyproject.toml`, `src/viddown/config.py`, `db.py`, `__init__.py`, `__main__.py`) zatím leží ve složce necommitnuté. Rozhodne se, zda je ponechat, nebo smazat.
+- Telegram bot ověřen jen testy s podvrženým API – ověřit se skutečným botem.
+- Balíčky pro Windows a Docker obraz se ověřují v GitHub Actions.
 
-## 16. Inspirace
+## 16. Odchylky a doplňky z vývoje
+
+- **ffmpeg:** když je v systému novější ffmpeg než přibalený, používá se systémový. Přibalená verze se nainstaluje jen tam, kde žádný ffmpeg není (zabalená aplikace, Docker se starším ffmpeg), nebo když je novější.
+- **Chromium** se v zabalené aplikaci stáhne automaticky při prvním spuštění. V Enginech je tlačítko „Nainstalovat / opravit prohlížeč“.
+- **Chyba při fallbacku:** když selže yt-dlp i sniffer, zobrazí se chyby obou metod. O opakování rozhoduje chyba hlavní metody.
+- **Telegram:** bot frontu nemění (pořadí, pauzy, odstranění, souběžnost jen v GUI). Příkazy: `/fronta`, `/historie`, `/engine`, `/aktualizovat`, `/pomoc`. Kdo napíše z cizího chatu, dostane jen své chat ID (pro nastavení).
+- **Zrušení vs. vypnutí:** zrušení má vždy přednost; úlohy ve stavu „ruší se“ se po restartu dokončí a osiřelé dočasné složky se uklidí.
+- **Pauza během načítání metadat** se projeví před spuštěním stahování (stahování se vůbec nespustí).
+- **Sniffer a limit rychlosti:** limit rychlosti platí jen pro yt-dlp (ffmpeg ho neumí).
+- **Licence přibaleného ffmpeg** (GPL build z eugeneware/ffmpeg-static) – při veřejné distribuci balíčků je potřeba přiložit licenci a odkaz na zdrojový kód.
+
+## 17. Inspirace
 
 Myšlenky z projektu [puemos/hls-downloader](https://github.com/puemos/hls-downloader) (MIT): detekce HLS playlistů, parsování m3u8, fragmenty, AES-128, spojování.

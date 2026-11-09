@@ -7,3 +7,8 @@ downloads/
 .DS_Store
 .env
 .claude/
+.devdata/
+design/build/
+dist/
+build/
+*.spec.bak

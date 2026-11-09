@@ -1,39 +1,118 @@
 # VidDown
 
-Aplikace pro stahování videí z webových stránek. Zadáte URL, aplikace najde video a uloží ho do nastavené složky.
+Stahování videí z webových stránek, playlistů a celých kanálů do složky ve vašem počítači.
+Běží na **macOS, Windows i v Dockeru**. Ovládá se **webovým GUI**, **Telegram botem** i **příkazy v terminálu**.
 
-> Stav: návrh / kostra projektu. Zatím bez implementace.
+- **YouTube a tisíce dalších webů** přes [yt-dlp](https://github.com/yt-dlp/yt-dlp).
+- **Ostatní stránky** přes vestavěný **HLS sniffer**: neviditelný prohlížeč (Chromium) načte stránku, odposlechne stream (`.m3u8`, DASH, MP4) a ffmpeg ho stáhne a spojí. Když yt-dlp video nenajde, automaticky se zkusí sniffer.
+- **Jedna fronta**, stahuje se v pořadí přidání. V GUI jde měnit pořadí přetažením, pozastavit a odstranit položky.
+- **Nejvyšší kvalita** je výchozí. Vedle každého videa se uloží miniatura `Název videa.jpg`.
+- **Playlisty a kanály** se stáhnou celé (u kanálu jen záložka Videa, Shorts a živé přenosy volitelně), do vlastní složky.
+- **Telegram:** pošlete botovi odkaz, odpoví počtem nalezených videí a rozlišením prvního. Pak hlásí jen chyby.
+- **Enginy** (yt-dlp, Deno, ffmpeg) se aktualizují s testem. Když nová verze nefunguje, zůstane předchozí.
+- Nastavení: souběžná stahování, limit rychlosti, časové okno, šablona názvů, cookies, proxy, heslo do GUI, čeština i angličtina, světlý i tmavý režim.
+- V GUI je **nápověda** a **průvodce prvním spuštěním**.
 
-## Cíle
+> Používejte jen pro obsah, ke kterému máte práva. DRM (Netflix, Disney+ apod.) se neobchází.
 
-- Windows, macOS a běh v Dockeru
-- Zadání URL stránky s videem nebo playlistu, stažení všech videí
-- Dvoustupňové stahování s fallbackem:
-  1. **yt-dlp** (YouTube a tisíce dalších webů)
-  2. **vlastní HLS sniffer** (headless Chromium odposlouchává síť a hledá `.m3u8`)
-- Terminálový režim (CLI) i grafické rozhraní (web UI)
-- UI: fronta požadavků, historie, průběh aktuálních stahování, nastavení (cílová složka, počet souběžných stahování a další)
-- Aktualizace yt-dlp (a Chromia) se zálohou: nová verze se otestuje a při selhání se vrátí předchozí funkční verze
+## Instalace
 
-## Návrh aktualizací enginů
+### macOS a Windows (zabalená aplikace)
+
+Balíčky se sestavují v GitHub Actions při vydání verze (tag `v*`): `VidDown-macOS.zip` a `VidDown-Windows.zip` v artefaktech běhu.
+
+- **macOS:** rozbalte, přesuňte `VidDown.app` do Aplikací a spusťte. Při prvním spuštění: pravé tlačítko › Otevřít (aplikace není podepsaná).
+- **Windows:** rozbalte a spusťte `viddown.exe`.
+
+Při prvním spuštění se otevře GUI v prohlížeči (`http://127.0.0.1:8765`) a aplikace si stáhne yt-dlp, Deno, ffmpeg a Chromium (jednorázově, cca 250 MB).
+
+### Docker
+
+```bash
+docker compose up -d --build
+```
+
+GUI je na `http://127.0.0.1:8765`. Videa se ukládají do `./downloads`, data aplikace do `./data`.
+V `docker-compose.yml` nastavte `TZ` (plánování), `PUID`/`PGID` (vlastník souborů) a případně Telegram.
+Pro přístup ze sítě odstraňte `127.0.0.1:` z mapování portu a nastavte `VIDDOWN_PASSWORD`.
+
+### Ze zdrojového kódu
+
+Vyžaduje Python 3.10+.
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -e .
+.venv/bin/python -m playwright install chromium-headless-shell
+.venv/bin/viddown
+```
+
+## Použití
+
+| Příkaz | Co dělá |
+|---|---|
+| `viddown` | spustí aplikaci a otevře GUI |
+| `viddown serve [--open]` | spustí aplikaci (fronta, GUI, Telegram) |
+| `viddown add URL [URL…] [--yes]` | přidá do fronty, `--yes` potvrdí velké playlisty; když aplikace neběží, spustí ji na pozadí |
+| `viddown queue` / `viddown history` | vypíše frontu / historii |
+| `viddown engine status\|update\|test\|rollback [engine] [verze]` | správa enginů |
+| `viddown config get [klíč]` / `viddown config set klíč hodnota` | nastavení |
+| `viddown password` | heslo do GUI |
+| `viddown telegram --token … --chat …` | Telegram bot |
+| `viddown autostart on\|off\|status` | spouštění po přihlášení (LaunchAgent / registr / systemd) |
+| `viddown doctor` | kontrola závislostí |
+
+Frontu zpracovává vždy jen jeden proces (zámek). CLI zapisuje do stejné databáze, takže běžící aplikace převezme úlohy okamžitě.
+
+### Telegram bot
+
+1. V Telegramu otevřete **@BotFather**, pošlete `/newbot` a zkopírujte token.
+2. Token vložte v **Nastavení › Telegram** (nebo `viddown telegram --token …`).
+3. Napište botovi. Odpoví vaším chat ID – vložte ho do pole **Povolené chat ID**.
+
+Použijte samostatného bota: jeden token nemůže číst zprávy ve dvou aplikacích zároveň.
+
+## Kde jsou data
+
+| Systém | Datová složka |
+|---|---|
+| macOS | `~/Library/Application Support/VidDown` |
+| Windows | `%APPDATA%\VidDown` |
+| Linux | `~/.local/share/viddown` |
+| Docker | `/data` |
+
+Obsahuje `settings.json`, `secrets.json` (token a hash hesla, práva 600), `viddown.db`, `engines/`, `thumbs/`, `logs/` a `archive.txt` (už stažená videa). Jinou složku nastavíte proměnnou `VIDDOWN_DATA`.
+
+Proměnné prostředí (mají přednost před nastavením v GUI): `VIDDOWN_DOWNLOAD_DIR`, `VIDDOWN_TEMP_DIR`, `VIDDOWN_CONCURRENCY`, `VIDDOWN_PORT`, `VIDDOWN_HOST`, `VIDDOWN_LANGUAGE`, `VIDDOWN_PASSWORD`, `VIDDOWN_TELEGRAM_TOKEN`, `VIDDOWN_TELEGRAM_CHAT_ID`, `VIDDOWN_ALLOW_NO_PASSWORD`.
+
+## Vývoj
+
+```bash
+.venv/bin/pip install -e ".[dev]"
+.venv/bin/python -m pytest -q          # testy (integrační test snifferu potřebuje ffmpeg a Chromium)
+VIDDOWN_DATA=$PWD/.devdata .venv/bin/viddown serve
+.venv/bin/pyinstaller packaging/viddown.spec   # balíček pro aktuální systém
+```
+
+Struktura:
 
 ```
-data/engines/yt-dlp/
-  <verze>/      každá verze ve vlastní složce
-  current       ukazatel na aktivní verzi
+src/viddown/
+  config.py      nastavení a citlivé údaje
+  db.py          SQLite: fronta, historie
+  engines.py     verzované enginy s testem a návratem
+  probe.py       kontrola URL (počet videí, rozlišení, miniatura)
+  resolvers/     yt-dlp a HLS sniffer
+  runner.py      fronta: pořadí, souběžnost, pauzy, plánování, opakování
+  server.py      HTTP API
+  web/           GUI (HTML, CSS, JS bez build kroku)
+  telegram.py    Telegram bot
+  daemon.py      jeden proces: fronta + GUI + bot
+  cli.py         příkazy
 ```
 
-1. Nová verze se stáhne vedle staré.
-2. Self-test nové i staré verze (`--version`, načtení metadat bez stahování).
-3. Selžou-li obě, je to síť nebo web: nic se nepřepne.
-4. Selže-li jen nová, smaže se a zůstane stará.
-5. Uchovává se posledních N verzí, ruční návrat přes `viddown engine rollback`.
+Plán a pravidla chování jsou v [PLAN.md](PLAN.md). Návrhy GUI v [design/](design/).
 
 ## Inspirace
 
-Návrh vychází z myšlenek projektu [puemos/hls-downloader](https://github.com/puemos/hls-downloader) (MIT): detekce HLS playlistů, parsování m3u8, stahování fragmentů, dešifrování AES-128 a spojování pomocí ffmpeg.
-
-## Omezení
-
-- DRM (Widevine, FairPlay) se neobchází.
-- Určeno pro obsah, ke kterému máte práva.
+Detekce HLS a práce s m3u8 vychází z myšlenek projektu [puemos/hls-downloader](https://github.com/puemos/hls-downloader) (MIT).

@@ -1,0 +1,2 @@
+[console_scripts]
+viddown = viddown.cli:main

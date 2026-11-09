@@ -1,0 +1,12 @@
+.venv
+.devdata
+.git
+.claude
+design
+dist
+build
+tests
+**/__pycache__
+*.pyc
+data
+downloads

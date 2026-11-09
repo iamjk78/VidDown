@@ -1,0 +1,21 @@
+services:
+  viddown:
+    build: .
+    image: viddown:latest
+    container_name: viddown
+    restart: unless-stopped
+    ports:
+      # GUI jen z tohoto počítače. Pro přístup ze sítě odstraňte "127.0.0.1:" a nastavte VIDDOWN_PASSWORD.
+      - "127.0.0.1:8765:8765"
+    environment:
+      TZ: Europe/Prague          # časové pásmo pro plánované stahování
+      PUID: "1000"               # vlastník stažených souborů (id -u)
+      PGID: "1000"               # skupina stažených souborů (id -g)
+      VIDDOWN_ALLOW_NO_PASSWORD: "1"   # port je výše vázaný jen na 127.0.0.1
+      # VIDDOWN_PASSWORD: "silne-heslo"
+      # VIDDOWN_TELEGRAM_TOKEN: "123456789:AA..."
+      # VIDDOWN_TELEGRAM_CHAT_ID: "123456789"
+      # VIDDOWN_CONCURRENCY: "2"
+    volumes:
+      - ./data:/data             # databáze, nastavení, enginy, logy
+      - ./downloads:/downloads   # stažená videa
