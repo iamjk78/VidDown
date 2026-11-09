@@ -129,3 +129,13 @@ def test_browser_cookies_rejected_in_docker(client, monkeypatch):
     assert st.settings.get("cookies_mode") == "none"
     monkeypatch.setattr(srv, "in_docker", lambda: False)
     assert c.put("/api/settings", json={"cookies_mode": "browser"}).status_code == 200
+
+
+def test_history_marks_deleted_files(client, tmp_path):
+    c, st = client
+    f = tmp_path / "v.mkv"
+    f.write_bytes(b"x")
+    a = st.db.add("https://a", status="done", filepath=str(f), finished_at=1.0)
+    b = st.db.add("https://b", status="done", filepath=str(tmp_path / "smazane.mkv"), finished_at=2.0)
+    items = {i["id"]: i for i in c.get("/api/history").json()["items"]}
+    assert items[a]["file_exists"] is True and items[b]["file_exists"] is False

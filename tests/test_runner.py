@@ -288,3 +288,17 @@ def test_cookies_error_pauses_queue_instead_of_failing_jobs(rt, monkeypatch):
     assert rt.db.kv_get("queue_pause_reason") == "cookies"
     assert rt.db.get(a)["status"] == "queued" and rt.db.get(b)["status"] in ("queued", "new", "probing")
     assert not rt.db.history(status="failed")
+
+
+def test_retry_of_deleted_file_forgets_archive(rt):
+    (rt.data / "archive.txt").write_text("youtube jNQXAC9IVRw\nyoutube OTHER123456\n", encoding="utf-8")
+    j = rt.db.add("https://www.youtube.com/watch?v=jNQXAC9IVRw", status="done", filepath="/neexistuje/v.mkv",
+                  info={"id": "jNQXAC9IVRw", "extractor_key": "Youtube"})
+    new = rt.retry(j)
+    assert new != j and rt.db.get(new)["status"] == "new" and rt.db.get(new)["auto_confirm"] == 1
+    assert (rt.data / "archive.txt").read_text() == "youtube OTHER123456\n"
+    # bez info se ID vezme z URL
+    (rt.data / "archive.txt").write_text("youtube abcdefghijk\n", encoding="utf-8")
+    k = rt.db.add("https://youtu.be/abcdefghijk", status="skipped")
+    rt.retry(k)
+    assert (rt.data / "archive.txt").read_text() == ""

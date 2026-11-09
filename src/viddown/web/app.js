@@ -307,14 +307,17 @@ async function loadHistory() {
   const badge = { done: `<span class="badge b-ok">${ic('check', 11)} ${T('Hotovo', 'Done')}</span>`, failed: `<span class="badge b-err">${ic('alert', 11)} ${T('Chyba', 'Failed')}</span>`,
     cancelled: `<span class="badge b-n">${ic('x', 11)} ${T('Zrušeno', 'Cancelled')}</span>`, skipped: `<span class="badge b-warn">${T('Přeskočeno', 'Skipped')}</span>` };
   const rows = r.items.map(h => {
-    const sub = h.status === 'done' ? `<div class="mm"><span class="ell">${esc(h.channel || '')}${h.height ? ' · ' + h.height + 'p' : ''} · </span>${srcIcon(h.source)} ${srcName(h.source)}</div>`
+    const gone = h.status === 'done' && h.file_exists === false;
+    const sub = gone ? `<div class="mm"><span class="ell">${T('Soubor už na úložišti není', 'The file is no longer on the storage')} · ${esc(h.filepath || '')}</span></div>`
+      : h.status === 'done' ? `<div class="mm"><span class="ell">${esc(h.channel || '')}${h.height ? ' · ' + h.height + 'p' : ''} · </span>${srcIcon(h.source)} ${srcName(h.source)}</div>`
       : `<div class="mm ${h.status === 'failed' ? 'err' : ''}" style="white-space:normal">${h.status === 'failed' ? ic('alert', 12) : ''} ${esc(h.error || '')}</div>`;
-    const acts = h.status === 'done'
+    const acts = gone ? `<button class="btn sm" data-h="retry" data-id="${h.id}" title="${T('Vyřadí video z archivu stažených a zařadí ho do fronty', 'Removes the video from the download archive and queues it')}">${ic('download', 12)} ${T('Stáhnout znovu', 'Download again')}</button>`
+      : h.status === 'done'
       ? (local ? `<button class="ibtn" title="${T('Zobrazit ve složce', 'Show in folder')}" data-h="open" data-id="${h.id}">${ic('folder', 15)}</button>` : '') +
         `<a class="ibtn" title="${T('Stáhnout / přehrát', 'Download / play')}" href="/api/file/${h.id}" target="_blank">${local ? ic('play', 15) : ic('download', 15)}</a>`
       : `<button class="btn sm" data-h="retry" data-id="${h.id}">${ic('refresh', 12)} ${T('Znovu', 'Retry')}</button>`;
     return `<div class="hr">${thumbHtml(h, 104, 58)}<div style="min-width:0"><div class="b6 fs14 ell" title="${esc(h.filepath || h.url)}">${esc(h.title || h.url)}</div>${sub}</div>
-     <div>${badge[h.status] || ''}</div><div class="hide-s">${methodBadge(h.method)}</div><div class="b5 hide-s">${h.status === 'done' ? fmtBytes(h.filesize) : '—'}</div><div class="t2">${fmtDate(h.finished_at)}</div>
+     <div>${gone ? `<span class="badge b-warn">${ic('trash', 11)} ${T('Soubor smazán', 'File deleted')}</span>` : badge[h.status] || ''}</div><div class="hide-s">${methodBadge(h.method)}</div><div class="b5 hide-s">${h.status === 'done' && !gone ? fmtBytes(h.filesize) : '—'}</div><div class="t2">${fmtDate(h.finished_at)}</div>
      <div class="acts">${acts}<button class="ibtn" title="${T('Smazat záznam', 'Delete record')}" data-h="del" data-id="${h.id}">${ic('trash', 14)}</button></div></div>`;
   }).join('');
   $('#hlist').innerHTML = r.items.length ? `<div class="hr h"><span></span><span>Video</span><span>${T('Stav', 'Status')}</span><span class="hide-s">${T('Metoda', 'Method')}</span><span class="hide-s">${T('Velikost', 'Size')}</span><span>${T('Dokončeno', 'Finished')}</span><span></span></div>${rows}`
@@ -322,7 +325,7 @@ async function loadHistory() {
   $$('[data-h]', $('#hlist')).forEach(b => b.onclick = async () => {
     const id = +b.dataset.id, a = b.dataset.h;
     if (a === 'open') act(() => api(`/api/jobs/${id}/open`, { method: 'POST' }));
-    if (a === 'retry') { await act(() => api(`/api/jobs/${id}/retry`, { method: 'POST' }), T('Přidáno znovu do fronty', 'Added to the queue again')); }
+    if (a === 'retry') { const ok = await act(() => api(`/api/jobs/${id}/retry`, { method: 'POST' }), T('Přidáno znovu do fronty', 'Added to the queue again')); if (ok) loadHistory(); }
     if (a === 'del') { await act(() => api('/api/history', { method: 'DELETE', body: { ids: [id] } })); loadHistory(); }
   });
 }
@@ -683,13 +686,15 @@ function renderHelp() {
       <li>U kanálu se stahuje jen záložka <b>Videa</b>. Shorts a živé přenosy zapnete v Nastavení › Stahování.</li>
       <li>Playlist nebo kanál s více videi než nastavený práh (výchozí 50) se nejdřív <b>potvrdí</b>.</li>
       <li>Mezi videi z jednoho playlistu je krátká náhodná pauza (5–15 s), aby web stahování nezablokoval. Platí pro každé souběžné stahování zvlášť, takže souběžnost se tím nesnižuje.</li>
-      <li>Už stažená videa se znovu nestahují. Opakované vložení kanálu stáhne jen nová videa.</li>
+      <li>Už stažená videa se znovu nestahují. Opakované vložení kanálu stáhne jen nová videa – i když jste některá videa mezitím ručně smazali.</li>
+      <li>Když soubor na úložišti ručně smažete, historie ho označí <b>Soubor smazán</b>. Tlačítkem <b>Stáhnout znovu</b> video vyřadíte z archivu stažených a zařadíte do fronty.</li>
       <li>Videa z playlistu/kanálu se ukládají do <b>samostatné složky</b> pojmenované podle playlistu/kanálu (lze vypnout).</li></ul>`, `
       <ul><li>Playlist and channel links expand into individual videos, grouped under one row in the queue (expand it with the arrow).</li>
       <li>Channels download only the <b>Videos</b> tab. Enable Shorts and live streams in Settings › Downloading.</li>
       <li>Playlists larger than the threshold (default 50) ask for <b>confirmation</b> first.</li>
       <li>There's a short random pause (5–15 s) between videos of one playlist so the site doesn't block you. It applies per parallel download, so it doesn't reduce parallelism.</li>
-      <li>Already downloaded videos are skipped. Re-adding a channel only fetches new videos.</li>
+      <li>Already downloaded videos are skipped. Re-adding a channel only fetches new videos – even if you deleted some files meanwhile.</li>
+      <li>If you delete a file on the storage, history marks it <b>File deleted</b>. <b>Download again</b> removes it from the download archive and queues it.</li>
       <li>Playlist/channel videos go to a <b>separate folder</b> named after it (can be turned off).</li></ul>`)],
     ['naming', T('Pojmenování souborů', 'File naming'), T(`
       <p>Šablonu nastavíte v Nastavení › Pojmenování a složky. U kanálů se použije zvláštní šablona (výchozí <code>{kanál}_{název}</code>).</p>

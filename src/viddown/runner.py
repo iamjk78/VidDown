@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import random
+import re
 import shutil
 import time
 from pathlib import Path
@@ -552,8 +553,35 @@ class Runner:
             self.db.update_where("parent_id=? and status in ('queued','running')", (jid,), paused=1 if paused else 0)
 
     def retry(self, jid: int) -> int | None:
+        """Znovu zařadí URL do fronty. U staženého (např. ručně smazaného) nebo přeskočeného videa
+        ho nejdřív vyřadí z archivu yt-dlp, jinak by se nové stažení přeskočilo jako „již staženo“."""
         job = self.db.get(jid)
         if not job:
             return None
+        if job["status"] in ("done", "skipped"):
+            self.archive_forget(job)
         new_id, _ = self.add(job["url"], source=job["source"], auto_confirm=True)
         return new_id
+
+    def archive_forget(self, job: dict) -> bool:
+        """Odebere video z archivu stažených (archive.txt, řádky „extractor id“)."""
+        try:
+            info = json.loads(job["info"] or "{}")
+        except ValueError:
+            info = {}
+        vid, ext = info.get("id"), (info.get("extractor_key") or "").lower()
+        if not vid:
+            m = re.search(r"(?:v=|youtu\.be/|/shorts/)([\w-]{11})", job["url"] or "")
+            vid, ext = (m.group(1), "youtube") if m else (None, ext)
+        arch = self.data / "archive.txt"
+        if not vid or not arch.exists():
+            return False
+        lines = arch.read_text(encoding="utf-8").splitlines()
+        keep = [l for l in lines if not (l.split(" ", 1)[-1].strip() == vid and (not ext or l.lower().startswith(ext + " ")))]
+        if len(keep) == len(lines):
+            return False
+        tmp = arch.with_suffix(".tmp")
+        tmp.write_text("".join(l + "\n" for l in keep), encoding="utf-8")
+        os.replace(tmp, arch)
+        log.info("video %s %s vyřazeno z archivu (stáhne se znovu)", ext, vid)
+        return True

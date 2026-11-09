@@ -259,7 +259,16 @@ def create_app(app_state) -> FastAPI:
     async def history(q: str = "", status: str = "", days: int = 0, offset: int = 0):
         rows = S.db.history(q=q, status=status, days=days, offset=offset)
         total = S.db.query("select count(*) n, coalesce(sum(filesize),0) b from jobs where status='done'")[0]
-        return {"items": [job_out(r) for r in rows], "total_done": total["n"], "total_bytes": total["b"]}
+
+        def out():
+            items = []
+            for r in rows:
+                o = job_out(r)
+                if r["status"] == "done":
+                    o["file_exists"] = bool(r.get("filepath")) and Path(r["filepath"]).exists()
+                items.append(o)
+            return items
+        return {"items": await asyncio.to_thread(out), "total_done": total["n"], "total_bytes": total["b"]}
 
     @app.delete("/api/history")
     async def clear_history(req: Request):
