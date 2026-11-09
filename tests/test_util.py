@@ -100,3 +100,11 @@ def test_cookies_error_classified_before_login():
     assert util.classify_error(msg) == "cookies"
     assert not util.fallback_allowed("cookies") and not util.retry_allowed("cookies")
     assert util.classify_error("Sign in to confirm you're not a bot. Use --cookies") == "login"
+
+
+def test_free_space_unreliable_for_docker_desktop_volumes(tmp_path, monkeypatch):
+    monkeypatch.setattr(util, "_mount_source", lambda p: "/run/host_mark/Volumes")
+    assert util.free_space(tmp_path) == (None, False)
+    monkeypatch.setattr(util, "_mount_source", lambda p: "/run/host_mark/Users")
+    free, ok = util.free_space(tmp_path)
+    assert ok and free > 0

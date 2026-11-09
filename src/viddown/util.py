@@ -121,6 +121,42 @@ def free_bytes(path: str | Path) -> int:
         return 0
 
 
+def _mount_source(path: Path) -> str | None:
+    """Zdroj připojení (sloupec 1 v /proc/mounts) pro nejdelší odpovídající přípojný bod. Jen Linux."""
+    try:
+        lines = Path("/proc/mounts").read_text().splitlines()
+    except OSError:
+        return None
+    p = str(path.resolve())
+    best, src = "", None
+    for l in lines:
+        parts = l.split()
+        if len(parts) < 2:
+            continue
+        mp = parts[1].replace("\\040", " ")
+        if (p == mp or p.startswith(mp.rstrip("/") + "/")) and len(mp) > len(best):
+            best, src = mp, parts[0]
+    return src
+
+
+def free_space(path: str | Path) -> tuple[int | None, bool]:
+    """Volné místo (bajty, spolehlivé?).
+
+    Docker Desktop na macOS zpřístupňuje složky z /Volumes (síťová sdílení, externí disky) tak,
+    že statvfs vrací volné místo interního disku Macu – takový údaj je nespolehlivý a vrací se None.
+    """
+    p = Path(path)
+    while not p.exists() and p != p.parent:
+        p = p.parent
+    src = _mount_source(p)
+    if src and src.startswith("/run/host_mark/Volumes"):
+        return None, False
+    try:
+        return shutil.disk_usage(p).free, True
+    except OSError:
+        return None, False
+
+
 def fmt_bytes(n: float | None) -> str:
     if not n:
         return "—"

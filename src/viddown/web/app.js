@@ -133,7 +133,10 @@ function renderSide() {
   <div class="col gap4 navs">${nav.map(([v, i, l, c]) => `<button class="nav ${App.view === v ? 'on' : ''}" data-go="${v}">${ic(i, 17)}${l}${c ? `<span class="n">${c}</span>` : ''}</button>`).join('')}</div>
   <div class="grow"></div>
   <div class="sfoot col gap8">
-   ${disk ? `<div class="card" style="padding:12px;background:var(--surface2)"><div class="row fs12 t2" style="justify-content:space-between"><span class="row gap6">${ic('hdd', 14)} ${T('Disk', 'Disk')}</span><span><b style="color:var(--text)">${fmtBytes(disk.free)}</b> ${T('volno', 'free')}</span></div>
+   ${disk ? `<div class="card" style="padding:12px;background:var(--surface2)">${disk.same_disk
+      ? `<div class="row fs12 t2" style="justify-content:space-between"><span class="row gap6">${ic('hdd', 14)} ${T('Disk', 'Disk')}</span><span><b style="color:var(--text)">${fmtBytes(disk.target_free)}</b> ${T('volno', 'free')}</span></div>`
+      : `<div class="row fs12 t2" style="justify-content:space-between" title="${esc(disk.dir)}"><span class="row gap6">${ic('folder', 14)} ${T('Cíl', 'Target')}</span>${disk.target_reliable ? `<span><b style="color:var(--text)">${fmtBytes(disk.target_free)}</b> ${T('volno', 'free')}</span>` : `<span class="muted" title="${T('Docker Desktop na macOS u složek z /Volumes (síťové disky) hlásí místo interního disku Macu, proto se nezobrazuje.', 'Docker Desktop on macOS reports the Mac disk for folders from /Volumes (network shares), so it is not shown.')}">${T('nelze zjistit', 'unknown')} ⓘ</span>`}</div>
+       <div class="row fs12 t2" style="justify-content:space-between;margin-top:4px" title="${T('Rozpracovaná stahování', 'Downloads in progress')}: ${esc(disk.temp_dir)}"><span class="row gap6">${ic('hdd', 14)} ${T('Dočasná', 'Temp')}</span><span><b style="color:var(--text)">${fmtBytes(disk.temp_free)}</b> ${T('volno', 'free')}</span></div>`}
    <div class="fs11 muted ell" style="margin-top:6px" title="${esc(disk.dir)}">${esc(disk.dir)}</div></div>` : ''}
    <div class="row gap8 fs12 t2" style="padding:6px 6px 0"><span class="dot ${tg.state === 'ok' ? 'g' : tg.state === 'error' ? 'r' : ''}"></span>${tgTxt}</div>
    <div class="row gap8 fs12 t2" style="padding:2px 6px"><span class="row gap6">${ic('moon', 14)} ${T('Tmavý režim', 'Dark mode')}</span><span class="grow"></span><button class="toggle ${dark ? 'on' : ''}" id="darkt" aria-label="dark mode"></button></div>
@@ -220,7 +223,7 @@ function renderQueueDyn() {
     if (cook) html += `<div class="banner">${ic('cookie', 18)}<span class="grow">${T('Fronta je pozastavená: cookies nejdou načíst', 'Queue paused: cookies cannot be loaded')} – ${esc((st.cookies_error || '').slice(0, 200))}</span>
       <button class="btn sm" data-go="settings">${T('Nastavení', 'Settings')}</button><button class="btn sm" data-q="resume">${ic('play', 12)} ${T('Pokračovat', 'Resume')}</button></div>`;
     else
-    html += `<div class="banner">${ic(disk ? 'hdd' : target ? 'folder' : 'pause', 18)}<span class="grow">${disk ? T('Fronta je pozastavená: na disku je málo místa', 'Queue paused: low disk space') + ` (${fmtBytes(st.disk.free)}, min. ${st.disk.min_gb} GB)`
+    html += `<div class="banner">${ic(disk ? 'hdd' : target ? 'folder' : 'pause', 18)}<span class="grow">${disk ? (st.disk.low_kind === 'temp' ? T('Fronta je pozastavená: v dočasné složce je málo místa', 'Queue paused: low space in the temp folder') + ` (${fmtBytes(st.disk.temp_free)}, ${esc(st.disk.temp_dir)}, min. ${st.disk.min_gb} GB)` : T('Fronta je pozastavená: v cílové složce je málo místa', 'Queue paused: low space in the download folder') + ` (${fmtBytes(st.disk.target_free)}, min. ${st.disk.min_gb} GB)`)
       : target ? T('Fronta je pozastavená: cílová složka není dostupná', 'Queue paused: download folder is not available') + ` – ${esc(st.target_error || st.disk.dir)}`
       : T('Fronta je pozastavená', 'The queue is paused')}</span>${target ? `<button class="btn sm" data-go="settings">${T('Nastavení', 'Settings')}</button>` : ''}
     <button class="btn sm" data-q="resume">${ic('play', 12)} ${T('Pokračovat', 'Resume')}</button></div>`;
@@ -431,7 +434,7 @@ const SECTIONS = () => [
     { k: 'probe_concurrency', type: 'number', min: 1, max: 8, label: ['Souběžné kontroly URL', 'Parallel URL checks'] },
     { k: 'retries', type: 'number', min: 0, label: ['Opakování síťových chyb', 'Network retries'] },
     { k: 'auto_retry_attempts', type: 'number', min: 0, max: 5, label: ['Automatické opakování úlohy', 'Automatic job retries'] },
-    { k: 'min_free_gb', type: 'number', min: 0, step: 0.5, suffix: 'GB', label: ['Minimum volného místa', 'Minimum free space'] },
+    { k: 'min_free_gb', type: 'number', min: 0, step: 0.5, suffix: 'GB', label: ['Minimum volného místa', 'Minimum free space'], hint: ['Hlídá dočasnou i cílovou složku', 'Checks temp and download folder'] },
     { k: 'temp_dir', type: 'path', label: ['Dočasná složka', 'Temporary folder'], hint: ['Prázdné = datová složka aplikace', 'Empty = app data folder'] },
     { k: 'history_days', type: 'number', min: 0, suffix: [ 'dní', 'days'], label: ['Uchovávat historii', 'Keep history'], hint: ['0 = neomezeně', '0 = forever'] },
     { k: 'log_level', type: 'seg', opts: [['DEBUG', 'Debug'], ['INFO', 'Info'], ['WARNING', T('Varování', 'Warning')], ['ERROR', T('Chyby', 'Errors')]], label: ['Úroveň logů', 'Log level'] },

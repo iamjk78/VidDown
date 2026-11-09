@@ -22,7 +22,7 @@ from .i18n import t
 from .probe import probe_url, trim_info
 from .resolvers import Cancelled, Ctx, ProcHolder, ResolveError
 from .resolvers import sniffer, ytdlp
-from .util import (classify_error, fallback_allowed, free_bytes, in_schedule, render_template, retry_allowed,
+from .util import (classify_error, fallback_allowed, free_space, in_schedule, render_template, retry_allowed,
                    sanitize_filename, unique_target)
 
 PENDING = ".viddown-pending.json"  # hotové stažení čekající na přesun do cílové složky
@@ -150,7 +150,8 @@ class Runner:
         await self._check_target(s)
 
         # 3) dohled nad běžícími stahováními
-        disk_low = free_bytes(s["download_dir"]) < float(s.get("min_free_gb", 2)) * 1024 ** 3
+        disk = self.disk_status(s)
+        disk_low = disk["low"] is not None
         qpaused = self.queue_paused()
         window = in_schedule(s, now)
         for jid, (task, holder) in list(self.running.items()):
@@ -175,7 +176,8 @@ class Runner:
                 self._disk_warned = True
                 self.db.kv_set("queue_paused", True)
                 self.db.kv_set("queue_pause_reason", "disk")
-                self.emit("on_notice", "disk", free=free_bytes(s["download_dir"]))
+                self.db.kv_set("disk_low", disk["low"])
+                self.emit("on_notice", "disk", free=disk["temp_free"] if disk["low"] == "temp" else disk["target_free"])
             return
         self._disk_warned = False
 
@@ -214,6 +216,28 @@ class Runner:
             self.db.update(job["id"], status="running", started_at=now, error=None, speed=None, eta=None)
             self.running[job["id"]] = (asyncio.create_task(self._execute(job["id"], holder)), holder)
             slots -= 1
+
+    def disk_status(self, s: dict | None = None) -> dict:
+        """Volné místo v dočasné složce (tam vznikají rozpracovaná stahování) a v cílové složce.
+
+        Cílová složka se do kontroly minima počítá jen když je údaj spolehlivý (viz util.free_space)."""
+        s = s or self.settings.all()
+        temp_dir = self.staging(0).parent
+        temp_free, _ = free_space(temp_dir)
+        target_free, target_ok = free_space(s["download_dir"])
+        same = False
+        try:
+            same = target_ok and os.stat(temp_dir if temp_dir.exists() else temp_dir.parent).st_dev == os.stat(s["download_dir"]).st_dev
+        except OSError:
+            pass
+        limit = float(s.get("min_free_gb", 2)) * 1024 ** 3
+        low = None
+        if target_ok and target_free is not None and target_free < limit:
+            low = "target"
+        elif temp_free is not None and temp_free < limit:
+            low = "temp"
+        return {"target_free": target_free, "target_reliable": target_ok, "temp_free": temp_free, "temp_dir": str(temp_dir),
+                "same_disk": same, "low": low}
 
     def _pause_for_cookies(self, msg: str) -> None:
         if self.db.kv_get("queue_pause_reason") == "cookies":

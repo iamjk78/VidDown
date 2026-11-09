@@ -13,7 +13,7 @@ from . import __version__
 from .config import DEFAULTS, Secrets, Settings, data_dir
 from .db import DB
 from .i18n import t
-from .util import extract_urls, fmt_bytes, free_bytes
+from .util import extract_urls, fmt_bytes, free_space
 
 
 def _db() -> DB:
@@ -196,8 +196,15 @@ def cmd_doctor(a) -> int:
         line(os.access(dl, os.W_OK), "Cílová složka", dl)
     except OSError as e:
         line(False, "Cílová složka", f"{dl}: {e}")
-    free = free_bytes(dl)
-    line(free > s.get("min_free_gb") * 1024 ** 3, "Volné místo", fmt_bytes(free))
+    free, reliable = free_space(dl)
+    limit = s.get("min_free_gb") * 1024 ** 3
+    if reliable:
+        line(free > limit, "Volné místo (cíl)", fmt_bytes(free))
+    else:
+        line(True, "Volné místo (cíl)", "nelze zjistit (Docker Desktop: složka z /Volumes hlásí místo disku Macu)")
+    tmp = s.get("temp_dir") or str(d / "tmp")
+    tfree, _ = free_space(tmp)
+    line(tfree is None or tfree > limit, "Volné místo (dočasná)", f"{fmt_bytes(tfree)} – {tmp}")
     m = EngineManager(d, s, _db())
     for e in m.status():
         cur = e["current"] or (f"{e['system']} (systém)" if e["system"] else None)

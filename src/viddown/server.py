@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import __version__, thumbs
 from .config import DEFAULTS, CHOICES, cookies_path
-from .util import check_dir_writable, extract_urls, free_bytes, in_docker, in_schedule
+from .util import check_dir_writable, extract_urls, in_docker, in_schedule
 
 WEB = Path(__file__).parent / "web"
 
@@ -116,7 +116,8 @@ def create_app(app_state) -> FastAPI:
             "cookies_error": S.db.kv_get("cookies_error"),
             "schedule": {"enabled": s["schedule_enabled"], "start": s["schedule_start"], "end": s["schedule_end"]},
             "in_window": in_schedule(s),
-            "disk": {"free": free_bytes(s["download_dir"]), "dir": s["download_dir"], "min_gb": s["min_free_gb"]},
+            "disk": dict(S.runner.disk_status(s), dir=s["download_dir"], min_gb=s["min_free_gb"],
+                         low_kind=S.db.kv_get("disk_low")),
             "telegram": S.bot.status() if S.bot else {"state": "off"},
             "engines": {e["name"]: (e["current"] or (f"{e['system']} (systém)" if e["system"] else None))
                         for e in S.engines_cache()},

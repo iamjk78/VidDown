@@ -261,6 +261,7 @@ src/viddown/
 - **Zrušení vs. vypnutí:** zrušení má vždy přednost; úlohy ve stavu „ruší se“ se po restartu dokončí a osiřelé dočasné složky se uklidí.
 - **Pauza během načítání metadat** se projeví před spuštěním stahování (stahování se vůbec nespustí).
 - **Cílová složka** jde měnit v GUI i v Dockeru (kvůli nasazení na Synology). Při uložení se ověří zápis (zkušební vytvoření a smazání složky), v Dockeru navíc, že cesta leží na připojeném svazku; jinak se uložení odmítne s vysvětlením. Za provozu se dostupnost kontroluje každých 20 s: při nedostupnosti se fronta pozastaví a po obnovení sama pokračuje; hotové video čeká v dočasné složce na přesun.
+- **Volné místo:** hlídá se dočasná složka (rozpracovaná stahování) i cílová složka. Docker Desktop na macOS u složek z `/Volumes` (síťové disky) hlásí místo interního disku Macu – takový údaj se nezobrazuje („nelze zjistit“) a do kontroly minima se nepočítá. Na Synology s nativním Dockerem je údaj správný.
 - **Cookies z prohlížeče** čte yt-dlp z profilu prohlížeče na počítači, kde VidDown běží – v Dockeru proto tato volba není (uložení se odmítne) a používá se nahraný `cookies.txt`. Chyba načtení cookies pozastaví frontu (úlohy zůstanou ve frontě) místo toho, aby postupně selhaly všechny.
 - **Sniffer a limit rychlosti:** limit rychlosti platí jen pro yt-dlp (ffmpeg ho neumí).
 - **Licence přibaleného ffmpeg** (GPL build z eugeneware/ffmpeg-static) – při veřejné distribuci balíčků je potřeba přiložit licenci a odkaz na zdrojový kód.

@@ -141,12 +141,11 @@ def test_paused_job_is_skipped_until_resumed(rt, monkeypatch):
     a, _ = rt.add("https://x/a")
     b, _ = rt.add("https://x/b")
 
+    rt.set_paused(a, True)  # pozastaveno dřív, než se dostane na řadu – deterministicky bez závodu s tickem
+
     async def scenario():
         stop = asyncio.Event()
         task = asyncio.create_task(rt.run(stop))
-        while rt.db.get(a)["status"] in ("new", "probing"):
-            await asyncio.sleep(0.05)
-        rt.set_paused(a, True)  # i rozběhnuté stahování se zastaví a vrátí do fronty
         t0 = time.time()
         while rt.db.get(b)["status"] != "done" and time.time() - t0 < 10:
             await asyncio.sleep(0.1)
