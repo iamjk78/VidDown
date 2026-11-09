@@ -19,7 +19,14 @@ Běží na **macOS, Windows i v Dockeru**. Ovládá se **webovým GUI**, **Teleg
 
 ### macOS a Windows (zabalená aplikace)
 
-Balíčky se sestavují v GitHub Actions při vydání verze (tag `v*`): `VidDown-macOS.zip` a `VidDown-Windows.zip` v artefaktech běhu.
+Balíček se sestavuje lokálně na cílovém systému (PyInstaller neumí křížové sestavení):
+
+```bash
+.venv/bin/pip install -e ".[dev]"
+.venv/bin/pyinstaller packaging/viddown.spec
+```
+
+Na Macu vznikne `dist/VidDown.app`, na Windows `dist/viddown/viddown.exe` (příkaz spusťte na počítači s Windows: `.venv\Scripts\pyinstaller packaging\viddown.spec`).
 
 - **macOS:** rozbalte, přesuňte `VidDown.app` do Aplikací a spusťte. Při prvním spuštění: pravé tlačítko › Otevřít (aplikace není podepsaná).
 - **Windows:** rozbalte a spusťte `viddown.exe`.

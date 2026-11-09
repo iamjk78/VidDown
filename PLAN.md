@@ -232,7 +232,7 @@ src/viddown/
 4. **Docker a balíčky pro Windows a macOS**
    - Hotovo, když: aplikace se nainstaluje a běží na čistém Windows, macOS i v Dockeru.
 
-**Testy a CI:** jednotkové testy, lokální testovací HLS server pro sniffer, GitHub Actions na Windows, macOS a Linuxu.
+**Testy:** jednotkové testy a lokální testovací HLS server pro sniffer, spouštěné lokálně (`pytest`). GitHub slouží jen jako úložiště repozitáře, **bez GitHub Actions**.
 
 ## 14. Omezení
 
@@ -247,7 +247,7 @@ src/viddown/
 - Časové okno: jedno okno (od–do, může přes půlnoc) + vybrané dny.
 - Zdroje binárek ffmpeg a Deno pro jednotlivé platformy a licence přibaleného ffmpeg (GPL/LGPL build).
 - Telegram bot ověřen jen testy s podvrženým API – ověřit se skutečným botem.
-- Balíčky pro Windows a Docker obraz se ověřují v GitHub Actions.
+- Balíček pro Windows je potřeba sestavit a vyzkoušet na počítači s Windows (macOS balíček a Docker obraz ověřeny lokálně).
 
 ## 16. Odchylky a doplňky z vývoje
 
