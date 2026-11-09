@@ -677,13 +677,13 @@ function renderHelp() {
       <ul><li>Odkaz na playlist nebo kanál se rozbalí na jednotlivá videa. Ve frontě jsou seskupená pod jednou položkou (šipkou ji rozbalíte).</li>
       <li>U kanálu se stahuje jen záložka <b>Videa</b>. Shorts a živé přenosy zapnete v Nastavení › Stahování.</li>
       <li>Playlist nebo kanál s více videi než nastavený práh (výchozí 50) se nejdřív <b>potvrdí</b>.</li>
-      <li>Mezi videi z jednoho playlistu je krátká náhodná pauza, aby web stahování nezablokoval.</li>
+      <li>Mezi videi z jednoho playlistu je krátká náhodná pauza (5–15 s), aby web stahování nezablokoval. Platí pro každé souběžné stahování zvlášť, takže souběžnost se tím nesnižuje.</li>
       <li>Už stažená videa se znovu nestahují. Opakované vložení kanálu stáhne jen nová videa.</li>
       <li>Videa z playlistu/kanálu se ukládají do <b>samostatné složky</b> pojmenované podle playlistu/kanálu (lze vypnout).</li></ul>`, `
       <ul><li>Playlist and channel links expand into individual videos, grouped under one row in the queue (expand it with the arrow).</li>
       <li>Channels download only the <b>Videos</b> tab. Enable Shorts and live streams in Settings › Downloading.</li>
       <li>Playlists larger than the threshold (default 50) ask for <b>confirmation</b> first.</li>
-      <li>There's a short random pause between videos of one playlist so the site doesn't block you.</li>
+      <li>There's a short random pause (5–15 s) between videos of one playlist so the site doesn't block you. It applies per parallel download, so it doesn't reduce parallelism.</li>
       <li>Already downloaded videos are skipped. Re-adding a channel only fetches new videos.</li>
       <li>Playlist/channel videos go to a <b>separate folder</b> named after it (can be turned off).</li></ul>`)],
     ['naming', T('Pojmenování souborů', 'File naming'), T(`

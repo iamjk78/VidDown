@@ -249,3 +249,30 @@ def test_finished_file_waits_for_target_instead_of_redownload(rt, monkeypatch, t
     rt.db.update(j, not_before=None)
     asyncio.run(run_until(rt, lambda: rt.db.get(j)["status"] == "done"))
     assert rt.db.get(j)["status"] == "done" and len(calls) == 1  # znovu se nestahovalo
+
+
+def test_playlist_videos_download_in_parallel_despite_pause(rt, monkeypatch):
+    """Pauza mezi videi playlistu nesmí omezit souběžnost: při 3 slotech běží 3 videa najednou."""
+    rt.settings.update({"concurrency": 3, "sleep_min": 3, "sleep_max": 3, "playlist_confirm_threshold": 50})
+    entries = [{"url": f"https://x/v{i}", "title": f"v{i}", "info": {"full": True, "requested_formats": [{"format_id": "1"}]}} for i in range(4)]
+
+    async def probe(url, ctx):
+        return {"type": "playlist", "method": "ytdlp", "title": "PL", "count": 4, "entries": [dict(e) for e in entries]}
+    monkeypatch.setattr(runner_mod, "probe_url", probe)
+    active, peak = [0], [0]
+
+    async def dl(url, info, ctx, staging, name, rate, on_progress, holder, audio_only=None):
+        active[0] += 1
+        peak[0] = max(peak[0], active[0])
+        await asyncio.sleep(1.5)
+        active[0] -= 1
+        staging.mkdir(parents=True, exist_ok=True)
+        f = staging / f"{name}.mp4"
+        f.write_bytes(b"v")
+        return {"file": f, "thumb": None}
+    monkeypatch.setattr(runner_mod.ytdlp, "download", dl)
+    monkeypatch.setattr(runner_mod.thumbs, "final_jpg", lambda *a, **k: True)
+    p, _ = rt.add("https://x/list")
+    asyncio.run(run_until(rt, lambda: sum(1 for k in rt.db.children(p) if k["status"] == "done") == 4, timeout=15))
+    assert peak[0] == 3
+    assert all(k["status"] == "done" for k in rt.db.children(p))

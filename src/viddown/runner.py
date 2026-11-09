@@ -53,7 +53,7 @@ class Runner:
         self.running: dict[int, tuple[asyncio.Task, ProcHolder]] = {}
         self.probing: dict[int, asyncio.Task] = {}
         self.stop_reason: dict[int, str] = {}
-        self.sibling_gate: dict[int, float] = {}
+        self.sibling_gate: dict[int, list[float]] = {}
         self.listeners: list = []
         self._engine_task: asyncio.Task | None = None
         self._disk_warned = False
@@ -200,10 +200,15 @@ class Runner:
             if job["id"] in self.running:
                 continue
             pid = job["parent_id"]
-            if pid and self.sibling_gate.get(pid, 0) > now:
-                continue  # pauza mezi videi z playlistu (ochrana proti zablokování)
             if pid:
-                self.sibling_gate[pid] = now + random.uniform(float(s.get("sleep_min", 5)), float(s.get("sleep_max", 15)))
+                # Pauza mezi videi z playlistu (ochrana proti zablokování) platí pro každý souběžný slot zvlášť:
+                # najednou se rozjede až `concurrency` videí a každý slot pak před dalším videem počká 5–15 s.
+                gates = [g for g in self.sibling_gate.get(pid, []) if g > now]
+                if len(gates) >= int(s["concurrency"]):
+                    self.sibling_gate[pid] = gates
+                    continue
+                gates.append(now + random.uniform(float(s.get("sleep_min", 5)), float(s.get("sleep_max", 15))))
+                self.sibling_gate[pid] = gates
             holder = ProcHolder()
             self.db.update(job["id"], status="running", started_at=now, error=None, speed=None, eta=None)
             self.running[job["id"]] = (asyncio.create_task(self._execute(job["id"], holder)), holder)

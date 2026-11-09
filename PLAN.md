@@ -37,7 +37,7 @@ Aplikace pro Windows, macOS a Docker. Uživatel zadá URL stránky, videa, playl
   - existující soubor se nepřepíše, přidá se přípona `(2)`, `(3)`…
 - **Dočasná složka:** rozpracované soubory jsou mimo cílovou složku a přesunou se tam až po dokončení.
 - **Bezpečné názvy souborů:** odstranění znaků zakázaných na Windows, dodržení limitu délky cesty (260 znaků), diakritika zůstává.
-- **Pauzy u hromadného stahování:** mezi videi z kanálu či playlistu náhodná prodleva (výchozí 5–15 s) proti zablokování.
+- **Pauzy u hromadného stahování:** mezi videi z kanálu či playlistu náhodná prodleva (výchozí 5–15 s) proti zablokování. Platí pro každý souběžný slot zvlášť (najednou se rozjede až tolik videí, kolik je souběžných stahování), takže nesnižuje nastavenou souběžnost.
 - **Místo na disku:** kontrola před stažením i průběžně. Pod nastaveným minimem (výchozí 2 GB) se fronta pozastaví a ohlásí se chyba.
 
 ## 3. Fronta
