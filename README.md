@@ -39,9 +39,29 @@ Při prvním spuštění se otevře GUI v prohlížeči (`http://127.0.0.1:8765`
 docker compose up -d --build
 ```
 
-GUI je na `http://127.0.0.1:8765`. Videa se ukládají do `./downloads`, data aplikace do `./data`.
+GUI je na `http://127.0.0.1:8765`. Videa se ve výchozím stavu ukládají do `./downloads`, data aplikace do `./data`.
 V `docker-compose.yml` nastavte `TZ` (plánování), `PUID`/`PGID` (vlastník souborů) a případně Telegram.
 Pro přístup ze sítě odstraňte `127.0.0.1:` z mapování portu a nastavte `VIDDOWN_PASSWORD`.
+
+**Cílová složka (např. síťová složka na NAS).** Kontejner vidí jen připojené složky. Připojte nadřazenou složku
+a konkrétní cíl pak zvolte v GUI (Nastavení › Stahování › Cílová složka). Místní připojení dejte do
+`docker-compose.override.yml` (necommituje se), Docker Compose ho načte automaticky:
+
+```yaml
+services:
+  viddown:
+    environment:
+      PUID: "501"   # id -u
+      PGID: "20"    # id -g
+    volumes:
+      - /Volumes/DATA:/nas      # macOS: připojené SMB sdílení
+      # - /volume1:/nas         # Synology: celý svazek
+```
+
+V GUI pak zadejte cestu uvnitř kontejneru, např. `/nas/sdileni/VidDown`. Při uložení se ověří,
+že složka leží na připojeném svazku a že do ní jde zapisovat. Jinak se uložení odmítne s vysvětlením.
+Když cílová složka za provozu přestane být dostupná (odpojený NAS), fronta se pozastaví a po obnovení
+přístupu sama pokračuje. Už stažené video počká v dočasné složce a znovu se nestahuje.
 
 ### Ze zdrojového kódu
 
@@ -90,7 +110,7 @@ Použijte samostatného bota: jeden token nemůže číst zprávy ve dvou aplika
 
 Obsahuje `settings.json`, `secrets.json` (token a hash hesla, práva 600), `viddown.db`, `engines/`, `thumbs/`, `logs/` a `archive.txt` (už stažená videa). Jinou složku nastavíte proměnnou `VIDDOWN_DATA`.
 
-Proměnné prostředí (mají přednost před nastavením v GUI): `VIDDOWN_DOWNLOAD_DIR`, `VIDDOWN_TEMP_DIR`, `VIDDOWN_CONCURRENCY`, `VIDDOWN_PORT`, `VIDDOWN_HOST`, `VIDDOWN_LANGUAGE`, `VIDDOWN_PASSWORD`, `VIDDOWN_TELEGRAM_TOKEN`, `VIDDOWN_TELEGRAM_CHAT_ID`, `VIDDOWN_ALLOW_NO_PASSWORD`.
+Proměnné prostředí (mají přednost před nastavením v GUI a zamknou ho): `VIDDOWN_DOWNLOAD_DIR`, `VIDDOWN_TEMP_DIR`, `VIDDOWN_CONCURRENCY`, `VIDDOWN_PORT`, `VIDDOWN_HOST`, `VIDDOWN_LANGUAGE`, `VIDDOWN_PASSWORD`, `VIDDOWN_TELEGRAM_TOKEN`, `VIDDOWN_TELEGRAM_CHAT_ID`, `VIDDOWN_ALLOW_NO_PASSWORD`. `VIDDOWN_DEFAULT_DOWNLOAD_DIR` cílovou složku jen předvyplní a v GUI zůstane měnitelná (používá ji Docker obraz).
 
 ## Vývoj
 

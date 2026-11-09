@@ -222,6 +222,50 @@ def in_schedule(settings: dict, now: float | None = None) -> bool:
     return ((t.tm_wday - 1) % 7) in days and cur < end
 
 
+def in_docker() -> bool:
+    return Path("/.dockerenv").exists() or os.environ.get("VIDDOWN_DOCKER") == "1"
+
+
+def check_dir_writable(path: str, docker: bool | None = None) -> tuple[bool, str]:
+    """Ověří, že do složky jde zapisovat (případně ji vytvoří). Vrací (ok, chybová zpráva).
+
+    V Dockeru odmítne cestu mimo připojené svazky – zápis by skončil uvnitř kontejneru a soubory by se ztratily.
+    """
+    import uuid
+
+    docker = in_docker() if docker is None else docker
+    raw = (path or "").strip()
+    if not raw:
+        return False, "Zadejte cestu ke složce."
+    p = Path(raw).expanduser()
+    if not p.is_absolute():
+        return False, f"Cesta „{raw}“ není absolutní. Zadejte celou cestu (např. /Volumes/NAS/Videa)."
+    anc = p
+    while not anc.exists() and anc != anc.parent:
+        anc = anc.parent
+    if docker:
+        try:
+            if os.stat(anc).st_dev == os.stat("/").st_dev:
+                return False, (f"Složka „{p}“ neleží na svazku připojeném do kontejneru. "
+                               "V docker-compose.yml ji připojte v sekci volumes (např. /downloads nebo /nas) a zadejte cestu uvnitř.")
+        except OSError as e:
+            return False, f"Složku „{p}“ nelze ověřit: {e.strerror or e}"
+    try:
+        p.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        return False, f"Složku „{p}“ nelze vytvořit: {e.strerror or e}. Zadejte platnou cestu, kam má aplikace přístup."
+    if not p.is_dir():
+        return False, f"„{p}“ není složka."
+    # zkouška zápisu složkou, ne souborem: SMB (macOS přes Docker) by po smazání otevřeného souboru nechal .smbdelete*
+    test = p / f".viddown-test-{uuid.uuid4().hex[:8]}"
+    try:
+        test.mkdir()
+        test.rmdir()
+    except OSError as e:
+        return False, f"Do složky „{p}“ nelze zapisovat: {e.strerror or e}. Zadejte platnou cestu, kam má aplikace přístup."
+    return True, ""
+
+
 def which(name: str) -> str | None:
     return shutil.which(name)
 

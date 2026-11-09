@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import __version__, thumbs
 from .config import DEFAULTS, CHOICES, cookies_path
-from .util import extract_urls, free_bytes, in_schedule
+from .util import check_dir_writable, extract_urls, free_bytes, in_docker, in_schedule
 
 WEB = Path(__file__).parent / "web"
 
@@ -35,10 +35,6 @@ def job_out(j: dict) -> dict:
         except (json.JSONDecodeError, AttributeError):
             pass
     return o
-
-
-def in_docker() -> bool:
-    return Path("/.dockerenv").exists() or os.environ.get("VIDDOWN_DOCKER") == "1"
 
 
 def create_app(app_state) -> FastAPI:
@@ -116,6 +112,7 @@ def create_app(app_state) -> FastAPI:
             },
             "queue_paused": bool(S.db.kv_get("queue_paused", False)),
             "pause_reason": S.db.kv_get("queue_pause_reason"),
+            "target_error": S.db.kv_get("target_error"),
             "schedule": {"enabled": s["schedule_enabled"], "start": s["schedule_start"], "end": s["schedule_end"]},
             "in_window": in_schedule(s),
             "disk": {"free": free_bytes(s["download_dir"]), "dir": s["download_dir"], "min_gb": s["min_free_gb"]},
@@ -283,11 +280,26 @@ def create_app(app_state) -> FastAPI:
     async def get_settings():
         return settings_out()
 
+    async def validate_dirs(changes: dict) -> None:
+        """Cílová a dočasná složka: musí jít zapisovat, jinak se uložení odmítne."""
+        for key in ("download_dir", "temp_dir"):
+            if key not in changes:
+                continue
+            val = str(changes[key] or "").strip()
+            if key == "temp_dir" and not val:
+                changes[key] = ""
+                continue
+            ok, msg = await asyncio.to_thread(check_dir_writable, val)
+            if not ok:
+                raise HTTPException(400, msg)
+            changes[key] = str(Path(val).expanduser())
+
     @app.put("/api/settings")
     async def put_settings(req: Request):
         body = await req.json()
         locked = S.settings.locked_keys()
         changes = {k: v for k, v in body.items() if k not in locked}
+        await validate_dirs(changes)
         if changes.get("network_access") and not S.secrets.has_password():
             raise HTTPException(400, "Nastavte nejdřív heslo do GUI.")
         try:
@@ -355,6 +367,7 @@ def create_app(app_state) -> FastAPI:
             raise HTTPException(400, "Neplatný soubor nastavení.")
         locked = S.settings.locked_keys()
         changes = {k: v for k, v in d.items() if k in DEFAULTS and k not in locked and k != "network_access"}
+        await validate_dirs(changes)
         try:
             S.settings.update(changes)
         except ValueError as e:

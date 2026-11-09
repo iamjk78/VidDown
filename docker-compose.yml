@@ -16,6 +16,11 @@ services:
       # VIDDOWN_TELEGRAM_TOKEN: "123456789:AA..."
       # VIDDOWN_TELEGRAM_CHAT_ID: "123456789"
       # VIDDOWN_CONCURRENCY: "2"
+      # VIDDOWN_DOWNLOAD_DIR: "/downloads"   # pevně zamkne cílovou složku (jinak se mění v GUI)
     volumes:
       - ./data:/data             # databáze, nastavení, enginy, logy
-      - ./downloads:/downloads   # stažená videa
+      - ./downloads:/downloads   # výchozí cílová složka
+      # Další složky, které půjde v GUI zvolit jako cílové (cesta uvnitř kontejneru = pravá strana):
+      # - /Volumes/NAS:/nas              # macOS: připojené síťové sdílení
+      # - /volume1:/nas                  # Synology: celý svazek
+      # Místní připojení patří do docker-compose.override.yml (necommituje se).

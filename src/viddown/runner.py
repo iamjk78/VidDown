@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import random
 import shutil
 import time
@@ -22,6 +23,22 @@ from .resolvers import Cancelled, Ctx, ProcHolder, ResolveError
 from .resolvers import sniffer, ytdlp
 from .util import (classify_error, fallback_allowed, free_bytes, in_schedule, render_template, retry_allowed,
                    sanitize_filename, unique_target)
+
+PENDING = ".viddown-pending.json"  # hotové stažení čekající na přesun do cílové složky
+
+
+def target_available(path: str) -> tuple[bool, str]:
+    """Lehká průběžná kontrola cílové složky (bez zkušebního zápisu)."""
+    p = Path(path)
+    try:
+        p.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        return False, f"{p}: {e.strerror or e}"
+    if not p.is_dir():
+        return False, f"{p} není složka"
+    if not os.access(p, os.W_OK):
+        return False, f"{p}: bez oprávnění k zápisu"
+    return True, ""
 
 log = logging.getLogger("viddown.runner")
 RETRY_DELAYS = [60, 300, 900]
@@ -40,6 +57,7 @@ class Runner:
         self.listeners: list = []
         self._engine_task: asyncio.Task | None = None
         self._disk_warned = False
+        self._target_checked = -1e9
 
     # ------------------------------------------------------------ pomocné
     def ctx(self) -> Ctx:
@@ -127,7 +145,10 @@ class Runner:
                 self.db.update(job["id"], status="probing")
                 self.probing[job["id"]] = asyncio.create_task(self._probe(job))
 
-        # 2) dohled nad běžícími stahováními
+        # 2) dostupnost cílové složky (např. odpojený NAS) – pozastaví a po obnovení zase pustí frontu
+        await self._check_target(s)
+
+        # 3) dohled nad běžícími stahováními
         disk_low = free_bytes(s["download_dir"]) < float(s.get("min_free_gb", 2)) * 1024 ** 3
         qpaused = self.queue_paused()
         window = in_schedule(s, now)
@@ -187,6 +208,26 @@ class Runner:
             self.db.update(job["id"], status="running", started_at=now, error=None, speed=None, eta=None)
             self.running[job["id"]] = (asyncio.create_task(self._execute(job["id"], holder)), holder)
             slots -= 1
+
+    async def _check_target(self, s: dict) -> None:
+        now = time.monotonic()
+        if now - self._target_checked < 20:
+            return
+        self._target_checked = now
+        ok, msg = await asyncio.to_thread(target_available, s["download_dir"])
+        reason = self.db.kv_get("queue_pause_reason")
+        if not ok:
+            if not self.queue_paused():
+                self.db.kv_set("queue_paused", True)
+                self.db.kv_set("queue_pause_reason", "target")
+                self.db.kv_set("target_error", msg)
+                log.warning("cílová složka není dostupná: %s", msg)
+                self.emit("on_notice", "target", error=msg)
+        elif self.queue_paused() and reason == "target":
+            self.db.kv_set("queue_paused", False)
+            self.db.kv_set("queue_pause_reason", None)
+            self.db.kv_set("target_error", None)
+            log.info("cílová složka je znovu dostupná, fronta pokračuje")
 
     # ------------------------------------------------------------ kontrola URL
     async def _probe(self, job: dict) -> None:
@@ -303,6 +344,17 @@ class Runner:
         try:
             result = None
             used = None
+            pend = staging / PENDING
+            if pend.exists():  # dříve stažené video čeká jen na přesun do cílové složky
+                try:
+                    d = json.loads(pend.read_text())
+                    if Path(d["file"]).exists():
+                        result = {"file": Path(d["file"]), "thumb": Path(d["thumb"]) if d.get("thumb") else None,
+                                  "log": d.get("log", "")}
+                        used = d.get("method")
+                        methods = []
+                except (OSError, ValueError, KeyError):
+                    pass
             for m in methods:
                 holder.check()
                 try:
@@ -389,9 +441,16 @@ class Runner:
         s = self.settings.all()
         src: Path = result["file"]
         target_dir = Path(s["download_dir"]) / (job["subdir"] or "")
-        target_dir.mkdir(parents=True, exist_ok=True)
-        dest = unique_target(target_dir, src.stem, src.suffix)
-        shutil.move(str(src), dest)
+        try:
+            target_dir.mkdir(parents=True, exist_ok=True)
+            dest = unique_target(target_dir, src.stem, src.suffix)
+            shutil.move(str(src), dest)
+        except OSError as e:
+            # cíl nedostupný (např. odpojený NAS) – hotový soubor zůstane v dočasné složce a přesune se později
+            (staging / PENDING).write_text(json.dumps({"file": str(src), "thumb": str(result["thumb"]) if result.get("thumb") else None,
+                                                       "method": method, "log": result.get("log") or ""}))
+            self._target_checked = -1e9
+            raise ResolveError(f"Cílová složka není dostupná ({target_dir}): {e.strerror or e}", "target")
         thumbs.final_jpg(self.data, job, dest, result.get("thumb"), dest.with_suffix(".jpg"),
                          self.engines.get("ffmpeg").bin_path())
         size = dest.stat().st_size
@@ -406,6 +465,9 @@ class Runner:
     def _failed(self, jid: int, msg: str, kind: str, staging: Path) -> None:
         job = self.db.get(jid)
         s = self.settings.all()
+        if kind == "target":  # počká na dostupnost cílové složky, pokusy se nepočítají
+            self.db.update(jid, status="queued", not_before=time.time() + 30, error=msg, error_kind=kind, speed=None, eta=None)
+            return
         attempts = (job["attempts"] or 0) + 1
         if retry_allowed(kind) and attempts <= int(s.get("auto_retry_attempts", 2)):
             delay = RETRY_DELAYS[min(attempts - 1, len(RETRY_DELAYS) - 1)]

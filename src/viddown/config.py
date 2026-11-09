@@ -31,7 +31,9 @@ def data_dir() -> Path:
 
 
 def default_download_dir() -> str:
-    return str(Path.home() / "Downloads" / "VidDown")
+    """Výchozí cílová složka. VIDDOWN_DEFAULT_DOWNLOAD_DIR ji jen předvyplní (v GUI zůstane měnitelná),
+    VIDDOWN_DOWNLOAD_DIR ji naopak pevně zamkne."""
+    return os.environ.get("VIDDOWN_DEFAULT_DOWNLOAD_DIR") or str(Path.home() / "Downloads" / "VidDown")
 
 
 DEFAULTS: dict = {

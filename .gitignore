@@ -12,3 +12,4 @@ design/build/
 dist/
 build/
 *.spec.bak
+docker-compose.override.yml

@@ -257,6 +257,7 @@ src/viddown/
 - **Telegram:** bot frontu nemění (pořadí, pauzy, odstranění, souběžnost jen v GUI). Příkazy: `/fronta`, `/historie`, `/engine`, `/aktualizovat`, `/pomoc`. Kdo napíše z cizího chatu, dostane jen své chat ID (pro nastavení).
 - **Zrušení vs. vypnutí:** zrušení má vždy přednost; úlohy ve stavu „ruší se“ se po restartu dokončí a osiřelé dočasné složky se uklidí.
 - **Pauza během načítání metadat** se projeví před spuštěním stahování (stahování se vůbec nespustí).
+- **Cílová složka** jde měnit v GUI i v Dockeru (kvůli nasazení na Synology). Při uložení se ověří zápis (zkušební vytvoření a smazání složky), v Dockeru navíc, že cesta leží na připojeném svazku; jinak se uložení odmítne s vysvětlením. Za provozu se dostupnost kontroluje každých 20 s: při nedostupnosti se fronta pozastaví a po obnovení sama pokračuje; hotové video čeká v dočasné složce na přesun.
 - **Sniffer a limit rychlosti:** limit rychlosti platí jen pro yt-dlp (ffmpeg ho neumí).
 - **Licence přibaleného ffmpeg** (GPL build z eugeneware/ffmpeg-static) – při veřejné distribuci balíčků je potřeba přiložit licenci a odkaz na zdrojový kód.
 

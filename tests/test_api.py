@@ -101,3 +101,20 @@ def test_static_gui_served(client):
     c, _ = client
     assert "VidDown" in c.get("/").text
     assert c.get("/static/app.js").status_code == 200
+
+
+def test_download_dir_validated_on_save(client, tmp_path):
+    c, st = client
+    good = tmp_path / "nas" / "VidDown"
+    r = c.put("/api/settings", json={"download_dir": str(good)})
+    assert r.status_code == 200 and r.json()["values"]["download_dir"] == str(good) and good.is_dir()
+    ro = tmp_path / "ro"
+    ro.mkdir()
+    ro.chmod(0o500)
+    try:
+        r = c.put("/api/settings", json={"download_dir": str(ro / "x")})
+        assert r.status_code == 400 and "platnou cestu" in r.json()["detail"]
+    finally:
+        ro.chmod(0o700)
+    assert st.settings.get("download_dir") == str(good)  # neplatná cesta se neuložila
+    assert c.put("/api/settings", json={"download_dir": "relativni"}).status_code == 400

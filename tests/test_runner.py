@@ -137,7 +137,7 @@ def test_network_error_is_retried_later(rt, monkeypatch):
 
 def test_paused_job_is_skipped_until_resumed(rt, monkeypatch):
     monkeypatch.setattr(runner_mod, "probe_url", lambda url, ctx: probe_video(url)(url, ctx))
-    monkeypatch.setattr(runner_mod.ytdlp, "download", fake_download(lambda u: {}))
+    monkeypatch.setattr(runner_mod.ytdlp, "download", fake_download(lambda u: {"sleep": 1}))
     a, _ = rt.add("https://x/a")
     b, _ = rt.add("https://x/b")
 
@@ -146,7 +146,7 @@ def test_paused_job_is_skipped_until_resumed(rt, monkeypatch):
         task = asyncio.create_task(rt.run(stop))
         while rt.db.get(a)["status"] in ("new", "probing"):
             await asyncio.sleep(0.05)
-        rt.set_paused(a, True)
+        rt.set_paused(a, True)  # i rozběhnuté stahování se zastaví a vrátí do fronty
         t0 = time.time()
         while rt.db.get(b)["status"] != "done" and time.time() - t0 < 10:
             await asyncio.sleep(0.1)
@@ -213,3 +213,39 @@ def test_playlist_failure_summary_once(rt, monkeypatch):
     summaries = [e for e in rt.events if e[0] == "summary"]
     assert summaries == [("summary", p, 1, 2)]
     assert not [e for e in rt.events if e[0] == "error"]  # u playlistu jen souhrn
+
+
+def test_unavailable_target_pauses_and_resumes_queue(rt, tmp_path):
+    ro = tmp_path / "nas"
+    ro.mkdir()
+    rt.settings.update({"download_dir": str(ro / "VidDown")})
+    ro.chmod(0o500)  # „odpojený NAS“
+    try:
+        asyncio.run(rt._check_target(rt.settings.all()))
+        assert rt.queue_paused() and rt.db.kv_get("queue_pause_reason") == "target"
+    finally:
+        ro.chmod(0o700)
+    rt._target_checked = -1e9
+    asyncio.run(rt._check_target(rt.settings.all()))
+    assert not rt.queue_paused()
+
+
+def test_finished_file_waits_for_target_instead_of_redownload(rt, monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(runner_mod, "probe_url", probe_video("V"))
+    monkeypatch.setattr(runner_mod.ytdlp, "download", fake_download(lambda u: calls.append(u) or {}))
+    j, _ = rt.add("https://x/v")
+    real_move = runner_mod.shutil.move
+    state = {"fail": True}
+
+    def flaky_move(src, dst):
+        if state["fail"]:
+            raise OSError(5, "Input/output error")
+        return real_move(src, dst)
+    monkeypatch.setattr(runner_mod.shutil, "move", flaky_move)
+    asyncio.run(run_until(rt, lambda: rt.db.get(j)["error_kind"] == "target"))
+    assert rt.db.get(j)["status"] == "queued" and (rt.staging(j) / runner_mod.PENDING).exists()
+    state["fail"] = False
+    rt.db.update(j, not_before=None)
+    asyncio.run(run_until(rt, lambda: rt.db.get(j)["status"] == "done"))
+    assert rt.db.get(j)["status"] == "done" and len(calls) == 1  # znovu se nestahovalo

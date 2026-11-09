@@ -3,7 +3,7 @@ FROM python:3.13-slim-bookworm
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     VIDDOWN_DATA=/data \
-    VIDDOWN_DOWNLOAD_DIR=/downloads \
+    VIDDOWN_DEFAULT_DOWNLOAD_DIR=/downloads \
     VIDDOWN_HOST=0.0.0.0 \
     VIDDOWN_DOCKER=1 \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
@@ -12,7 +12,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PGID=1000
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ffmpeg tzdata ca-certificates util-linux passwd \
+ && apt-get install -y --no-install-recommends ffmpeg tzdata ca-certificates util-linux passwd libatomic1 \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

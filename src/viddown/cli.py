@@ -126,6 +126,12 @@ def cmd_config(a) -> int:
     if a.key not in DEFAULTS:
         print(f"Neznámé nastavení: {a.key}")
         return 1
+    if a.key in ("download_dir", "temp_dir") and (a.key == "download_dir" or a.value.strip()):
+        from .util import check_dir_writable
+        ok, msg = check_dir_writable(a.value)
+        if not ok:
+            print(f"Chyba: {msg}")
+            return 1
     try:
         s.update({a.key: a.value})
     except ValueError as e:

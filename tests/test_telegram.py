@@ -24,7 +24,7 @@ def bot(data, tmp_path):
     b.state = "ok"
     b.sent = []
 
-    async def call(method, timeout=30, **p):
+    async def call(method, http_timeout=30, **p):
         b.sent.append((method, p))
         return {"message_id": 100 + len(b.sent)}
     b.call = call
@@ -83,3 +83,10 @@ def test_commands(bot):
     assert "yt-dlp: 2026.10.26" in bot.sent[-1][1]["text"]
     asyncio.run(bot.handle(msg("ahoj")))
     assert "odkaz" in bot.sent[-1][1]["text"]
+
+
+def test_getupdates_timeout_param_does_not_clash(data):
+    """Telegram long-polling posílá parametr 'timeout' – nesmí kolidovat s HTTP limitem volání."""
+    import inspect
+    sig = inspect.signature(TelegramBot.call)
+    assert "timeout" not in sig.parameters

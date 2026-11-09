@@ -216,7 +216,10 @@ function renderQueueDyn() {
   let html = '';
   if (st.queue_paused) {
     const disk = st.pause_reason === 'disk';
-    html += `<div class="banner">${ic(disk ? 'hdd' : 'pause', 18)}<span class="grow">${disk ? T('Fronta je pozastavená: na disku je málo místa', 'Queue paused: low disk space') + ` (${fmtBytes(st.disk.free)}, min. ${st.disk.min_gb} GB)` : T('Fronta je pozastavená', 'The queue is paused')}</span>
+    const target = st.pause_reason === 'target';
+    html += `<div class="banner">${ic(disk ? 'hdd' : target ? 'folder' : 'pause', 18)}<span class="grow">${disk ? T('Fronta je pozastavená: na disku je málo místa', 'Queue paused: low disk space') + ` (${fmtBytes(st.disk.free)}, min. ${st.disk.min_gb} GB)`
+      : target ? T('Fronta je pozastavená: cílová složka není dostupná', 'Queue paused: download folder is not available') + ` – ${esc(st.target_error || st.disk.dir)}`
+      : T('Fronta je pozastavená', 'The queue is paused')}</span>${target ? `<button class="btn sm" data-go="settings">${T('Nastavení', 'Settings')}</button>` : ''}
     <button class="btn sm" data-q="resume">${ic('play', 12)} ${T('Pokračovat', 'Resume')}</button></div>`;
   } else if (st.schedule.enabled && !st.in_window) {
     html += `<div class="banner info">${ic('clock', 18)}<span class="grow">${T('Stahuje se jen v časovém okně', 'Downloads only run in the time window')} ${st.schedule.start}–${st.schedule.end}. ${T('Fronta čeká.', 'The queue is waiting.')}</span><button class="btn sm" data-go="settings">${T('Upravit', 'Edit')}</button></div>`;
@@ -392,6 +395,10 @@ const SECTIONS = () => [
 ];
 
 function fieldHtml(f, S) {
+  if (S.docker && f.type === 'path' && f.k === 'download_dir' && !f.hint)
+    f = Object.assign({}, f, { hint: ['V Dockeru jen složky připojené do kontejneru (např. /downloads, /nas). Při uložení se ověří zápis.', 'In Docker only folders mounted into the container (e.g. /downloads, /nas). Write access is checked on save.'] });
+  else if (f.type === 'path' && f.k === 'download_dir' && !f.hint)
+    f = Object.assign({}, f, { hint: ['Může být i síťová složka. Při uložení se ověří zápis.', 'Network folders work too. Write access is checked on save.'] });
   const v = f.k ? S.values[f.k] : null; const lock = f.k && S.locked[f.k];
   const dis = lock ? 'disabled' : '';
   const lab = (extra = '') => `<div class="lab"><div class="b5">${L(f.label)}${lock ? ` <span class="lock" title="${T('Nastaveno proměnnou prostředí', 'Set by environment variable')} ${esc(lock)}">${ic('lock', 12)}</span>` : ''}</div>${f.hint ? `<div class="hint">${L(f.hint)}</div>` : ''}${extra}</div>`;
@@ -405,7 +412,7 @@ function fieldHtml(f, S) {
     case 'stepper': ctrl = `<button class="ibtn b" data-k="${f.k}" data-t="step" data-d="-1" ${dis}>${ic('minus', 14)}</button><span class="b6 fs15" style="width:24px;text-align:center">${v}</span><button class="ibtn b" data-k="${f.k}" data-t="step" data-d="1" ${dis}>${ic('plus', 14)}</button>`; break;
     case 'text': ctrl = `<input class="input sm" style="width:${f.w || 200}px" data-k="${f.k}" data-t="text" value="${esc(v)}" placeholder="${esc(f.placeholder || '')}" ${dis}>`; break;
     case 'time': ctrl = `<input class="input sm mono" type="time" style="width:110px" data-k="${f.k}" data-t="text" value="${esc(v)}" ${dis}>`; break;
-    case 'path': ctrl = `<input class="input sm mono fs12" style="width:240px" data-k="${f.k}" data-t="text" value="${esc(v)}" ${dis}>${S.docker ? '' : `<button class="btn sm" data-pick="${f.k}" ${dis}>${ic('folder', 13)} ${T('Vybrat', 'Browse')}</button>`}`; break;
+    case 'path': ctrl = `<input class="input sm mono fs12" style="width:240px" data-k="${f.k}" data-t="text" value="${esc(v)}" ${dis}><button class="btn sm" data-pick="${f.k}" ${dis}>${ic('folder', 13)} ${T('Vybrat', 'Browse')}</button>`; break;
     case 'static': ctrl = f.html; break;
     case 'template': return `<div class="fld block">${lab()}<input class="input sm mono" style="margin-top:8px" data-k="${f.k}" data-t="text" value="${esc(v)}" ${dis}>
       <div class="row gap6 wrap" style="margin-top:8px">${['{název}', '{kanál}', '{playlist}', '{datum}', '{rozlišení}', '{id}', '{pořadí}'].map(x => `<button class="chip mono" style="height:22px;font-size:11px" data-ins="${f.k}" data-v="${x}">${x}</button>`).join('')}</div>
@@ -463,7 +470,10 @@ function bindSettings(root, after) {
 
 async function saveSetting(k, v, after) {
   const r = await act(() => api('/api/settings', { method: 'PUT', body: { [k]: v } }));
-  if (!r) return;
+  if (!r) { // odmítnuto (např. neplatná složka) – vrátit pole na uloženou hodnotu
+    if (after) after(); else if (App.view === 'settings') renderSettings();
+    return;
+  }
   App.settings = r;
   if (k === 'language') { LANG = v; document.documentElement.lang = v; return render(); }
   if (k === 'theme') { applyTheme(v); renderSide(); }

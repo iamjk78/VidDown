@@ -74,3 +74,22 @@ def test_schedule_window_over_midnight():
     s2 = dict(s, schedule_start="08:00", schedule_end="17:00")
     assert util.in_schedule(s2, _ts(9, 0)) and not util.in_schedule(s2, _ts(18, 0))
     assert util.in_schedule({"schedule_enabled": False}, _ts(12, 0))
+
+
+def test_check_dir_writable(tmp_path):
+    ok, msg = util.check_dir_writable(str(tmp_path / "nova" / "slozka"), docker=False)
+    assert ok and (tmp_path / "nova" / "slozka").is_dir()
+    assert not list((tmp_path / "nova" / "slozka").iterdir())  # zkušební soubor uklizen
+    ok, msg = util.check_dir_writable("relativni/cesta", docker=False)
+    assert not ok and "absolutní" in msg
+    ro = tmp_path / "jen-cteni"
+    ro.mkdir()
+    ro.chmod(0o500)
+    try:
+        ok, msg = util.check_dir_writable(str(ro / "pod"), docker=False)
+        assert not ok and "platnou cestu" in msg
+    finally:
+        ro.chmod(0o700)
+    f = tmp_path / "soubor.txt"
+    f.write_text("x")
+    assert not util.check_dir_writable(str(f), docker=False)[0]

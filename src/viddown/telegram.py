@@ -46,10 +46,10 @@ class TelegramBot:
         return str(self.settings.get("telegram_chat_id") or "").strip()
 
     # ------------------------------------------------------------ API
-    async def call(self, method: str, timeout: float = 30, **params):
+    async def call(self, method: str, http_timeout: float = 30, **params):
         if not self._client or not self._token:
             raise RuntimeError("bot není připojen")
-        r = await self._client.post(API.format(token=self._token, method=method), json=params, timeout=timeout)
+        r = await self._client.post(API.format(token=self._token, method=method), json=params, timeout=http_timeout)
         data = r.json()
         if not data.get("ok"):
             raise RuntimeError(data.get("description") or f"HTTP {r.status_code}")
@@ -115,7 +115,7 @@ class TelegramBot:
                         params = {"timeout": 25, "allowed_updates": ["message", "callback_query"]}
                         if offset is not None:
                             params["offset"] = offset
-                        poll = asyncio.create_task(self.call("getUpdates", timeout=40, **params))
+                        poll = asyncio.create_task(self.call("getUpdates", http_timeout=40, **params))
                         waiter = asyncio.create_task(self._reload.wait())
                         stopper = asyncio.create_task(stop.wait())
                         done, _ = await asyncio.wait({poll, waiter, stopper}, return_when=asyncio.FIRST_COMPLETED)
@@ -278,6 +278,11 @@ class TelegramBot:
             await self.send(t(self.lang(), "done_job", title=job.get("title") or job["url"], path=job.get("filepath") or ""))
 
     async def on_notice(self, kind: str, **kw) -> None:
+        if kind == "target":
+            await self.send(("⚠️ Fronta pozastavena: cílová složka není dostupná ({e}). Po obnovení přístupu bude pokračovat."
+                             if self.lang() == "cs" else "⚠️ Queue paused: download folder unavailable ({e}). It resumes when the folder is back.")
+                            .format(e=kw.get("error", "")))
+            return
         if kind == "disk":
             await self.send(("⚠️ Fronta pozastavena: málo místa na disku ({free})." if self.lang() == "cs"
                              else "⚠️ Queue paused: low disk space ({free}).").format(free=fmt_bytes(kw.get("free"))))
