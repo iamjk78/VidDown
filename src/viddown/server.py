@@ -241,6 +241,17 @@ def create_app(app_state) -> FastAPI:
             raise HTTPException(404, "file not found")
         return FileResponse(p, filename=p.name)
 
+    @app.get("/api/stream/{jid}")
+    async def stream(jid: int):
+        """Video pro přehrávač v GUI (podporuje HTTP Range, takže jde přetáčet)."""
+        j = _job(jid)
+        p = Path(j["filepath"] or "")
+        if not p.exists():
+            raise HTTPException(404, "file not found")
+        mt = {".mp4": "video/mp4", ".m4v": "video/mp4", ".mkv": "video/webm", ".webm": "video/webm", ".mov": "video/quicktime",
+              ".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".opus": "audio/ogg", ".ogg": "audio/ogg"}.get(p.suffix.lower(), "application/octet-stream")
+        return FileResponse(p, media_type=mt, content_disposition_type="inline", filename=p.name)
+
     @app.post("/api/queue/{action}")
     async def queue_action(action: str):
         if action == "pause":
@@ -256,8 +267,11 @@ def create_app(app_state) -> FastAPI:
 
     # ------------------------------------------------------------ historie
     @app.get("/api/history")
-    async def history(q: str = "", status: str = "", days: int = 0, offset: int = 0):
-        rows = S.db.history(q=q, status=status, days=days, offset=offset)
+    async def history(q: str = "", status: str = "", days: int = 0, offset: int = 0, limit: int = 50):
+        limit = max(1, min(int(limit), 500))
+        offset = max(0, int(offset))
+        rows = S.db.history(q=q, status=status, days=days, offset=offset, limit=limit)
+        matched = S.db.history_count(q=q, status=status, days=days)
         total = S.db.query("select count(*) n, coalesce(sum(filesize),0) b from jobs where status='done'")[0]
 
         def out():
@@ -268,7 +282,8 @@ def create_app(app_state) -> FastAPI:
                     o["file_exists"] = bool(r.get("filepath")) and Path(r["filepath"]).exists()
                 items.append(o)
             return items
-        return {"items": await asyncio.to_thread(out), "total_done": total["n"], "total_bytes": total["b"]}
+        return {"items": await asyncio.to_thread(out), "total_done": total["n"], "total_bytes": total["b"],
+                "matched": matched, "offset": offset, "limit": limit}
 
     @app.delete("/api/history")
     async def clear_history(req: Request):

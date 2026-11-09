@@ -139,3 +139,20 @@ def test_history_marks_deleted_files(client, tmp_path):
     b = st.db.add("https://b", status="done", filepath=str(tmp_path / "smazane.mkv"), finished_at=2.0)
     items = {i["id"]: i for i in c.get("/api/history").json()["items"]}
     assert items[a]["file_exists"] is True and items[b]["file_exists"] is False
+
+
+def test_history_pagination_and_stream(client, tmp_path):
+    c, st = client
+    for i in range(7):
+        st.db.add(f"https://v/{i}", status="done", title=f"V{i}", finished_at=100.0 + i)
+    r = c.get("/api/history?limit=3&offset=0").json()
+    assert r["matched"] == 7 and [i["title"] for i in r["items"]] == ["V6", "V5", "V4"]
+    r = c.get("/api/history?limit=3&offset=6").json()
+    assert [i["title"] for i in r["items"]] == ["V0"] and r["offset"] == 6 and r["limit"] == 3
+    assert c.get("/api/history?q=V3").json()["matched"] == 1
+    f = tmp_path / "video.mp4"
+    f.write_bytes(b"0123456789" * 1000)
+    j = st.db.add("https://v/x", status="done", filepath=str(f))
+    r = c.get(f"/api/stream/{j}", headers={"Range": "bytes=0-9"})
+    assert r.status_code == 206 and r.content == b"0123456789"
+    assert r.headers["content-type"].startswith("video/mp4") and r.headers["content-disposition"].startswith("inline")

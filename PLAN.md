@@ -74,6 +74,8 @@ Aplikace pro Windows, macOS a Docker. Uživatel zadá URL stránky, videa, playl
 - Dokončené a neúspěšné položky s datem, metodou, velikostí, cestou a chybou.
 - Akce: otevřít soubor nebo složku, znovu stáhnout, hledat, smazat záznam.
 - Smazání záznamu **nesmaže** soubor.
+- **Stránkování** historie s volbou počtu záznamů na stránku (25 / 50 / 100 / 200, pamatuje se v prohlížeči).
+- **Přehrávání** staženého videa přímo v GUI (okno s přehrávačem, přetáčení přes HTTP Range); když prohlížeč formát neumí (např. MKV s AV1/VP9 v Safari), nabídne stažení souboru.
 - Ručně smazaný soubor historie pozná (štítek **Soubor smazán**). **Stáhnout znovu** video vyřadí z archivu yt-dlp a zařadí do fronty. Opakované vložení kanálu dál přeskočí všechna kdy stažená videa, i smazaná.
 - Doba uchování historie je nastavitelná (výchozí neomezeně).
 

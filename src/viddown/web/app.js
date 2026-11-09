@@ -284,23 +284,37 @@ document.addEventListener('drop', async e => {
 });
 
 /* ------------------------------------------------------------ historie */
+const PAGE_SIZES = [25, 50, 100, 200];
+function histLimit() { try { const v = +localStorage.getItem('vd_hist_limit'); return PAGE_SIZES.includes(v) ? v : 50; } catch (e) { return 50; } }
 async function renderHistory() {
-  const H = App.hist;
+  const H = App.hist; H.limit = histLimit(); H.offset = 0;
   $('#main').innerHTML = `<div class="row gap10 wrap"><h1>${T('Historie', 'History')}</h1><span class="t2" id="htot" style="margin-left:6px"></span><span class="grow"></span>
    <div class="inwrap" style="height:32px;width:260px">${ic('search', 15)}<input id="hq" placeholder="${T('Hledat v historii…', 'Search history…')}" value="${esc(H.q)}"></div>
    <span class="seg" id="hst">${[['', T('Vše', 'All')], ['done', T('Hotovo', 'Done')], ['failed', T('Chyby', 'Failed')], ['cancelled', T('Zrušeno', 'Cancelled')], ['skipped', T('Přeskočeno', 'Skipped')]].map(([v, l]) => `<button class="${H.status === v ? 'on' : ''}" data-v="${v}">${l}</button>`).join('')}</span>
    <select class="input sm" id="hdays" style="width:170px">${[[1, T('Posledních 24 h', 'Last 24 h')], [7, T('Posledních 7 dní', 'Last 7 days')], [30, T('Posledních 30 dní', 'Last 30 days')], [0, T('Vše', 'All time')]].map(([v, l]) => `<option value="${v}" ${H.days === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
    <button class="btn sm" id="hclear">${ic('trash', 13)} ${T('Vymazat historii', 'Clear history')}</button></div>
-   <div class="card" style="overflow:hidden" id="hlist"><div class="empty"><div class="spin" style="margin:auto"></div></div></div>`;
-  let tmr; $('#hq').oninput = e => { clearTimeout(tmr); tmr = setTimeout(() => { H.q = e.target.value; loadHistory(); }, 300); };
-  $$('#hst button').forEach(b => b.onclick = () => { H.status = b.dataset.v; $$('#hst button').forEach(x => x.classList.toggle('on', x === b)); loadHistory(); });
-  $('#hdays').onchange = e => { H.days = +e.target.value; loadHistory(); };
-  $('#hclear').onclick = async () => { if (confirm(T('Smazat celou historii? Stažené soubory zůstanou na disku.', 'Delete all history? Downloaded files stay on disk.'))) { await act(() => api('/api/history', { method: 'DELETE', body: {} }), T('Historie smazána', 'History cleared')); loadHistory(); } };
+   <div class="card" style="overflow:hidden" id="hlist"><div class="empty"><div class="spin" style="margin:auto"></div></div></div>
+   <div class="row gap10 wrap" id="hpager"></div>`;
+  let tmr; $('#hq').oninput = e => { clearTimeout(tmr); tmr = setTimeout(() => { H.q = e.target.value; H.offset = 0; loadHistory(); }, 300); };
+  $$('#hst button').forEach(b => b.onclick = () => { H.status = b.dataset.v; H.offset = 0; $$('#hst button').forEach(x => x.classList.toggle('on', x === b)); loadHistory(); });
+  $('#hdays').onchange = e => { H.days = +e.target.value; H.offset = 0; loadHistory(); };
+  $('#hclear').onclick = async () => { if (confirm(T('Smazat celou historii? Stažené soubory zůstanou na disku.', 'Delete all history? Downloaded files stay on disk.'))) { await act(() => api('/api/history', { method: 'DELETE', body: {} }), T('Historie smazána', 'History cleared')); H.offset = 0; loadHistory(); } };
   loadHistory();
+}
+function pagerHtml(matched, offset, limit) {
+  const pages = Math.max(1, Math.ceil(matched / limit)), cur = Math.floor(offset / limit) + 1;
+  const nums = [];
+  for (let p = 1; p <= pages; p++) if (p === 1 || p === pages || Math.abs(p - cur) <= 2) nums.push(p); else if (nums[nums.length - 1] !== '…') nums.push('…');
+  const btn = (p, label, dis) => `<button class="btn sm ${p === cur && !label ? 'primary' : ''}" ${dis ? 'disabled' : ''} data-page="${p}">${label || p}</button>`;
+  const from = matched ? offset + 1 : 0, to = Math.min(offset + limit, matched);
+  return `<span class="t2 fs12">${T('Zobrazeno', 'Showing')} ${from}–${to} ${T('z', 'of')} ${matched}</span><span class="grow"></span>
+    ${pages > 1 ? `<span class="row gap4">${btn(cur - 1, ic('right', 12).replace('M9 6l6 6-6 6', 'M15 6l-6 6 6 6'), cur <= 1)}${nums.map(p => p === '…' ? '<span class="t2">…</span>' : btn(p)).join('')}${btn(cur + 1, ic('right', 12), cur >= pages)}</span>` : ''}
+    <label class="row gap6 t2 fs12">${T('Na stránku', 'Per page')}<select class="input sm" id="hlimit" style="width:76px">${PAGE_SIZES.map(n => `<option ${n === limit ? 'selected' : ''}>${n}</option>`).join('')}</select></label>`;
 }
 async function loadHistory() {
   const H = App.hist;
-  const r = await act(() => api(`/api/history?q=${encodeURIComponent(H.q)}&status=${H.status}&days=${H.days}`)); if (!r) return;
+  const r = await act(() => api(`/api/history?q=${encodeURIComponent(H.q)}&status=${H.status}&days=${H.days}&offset=${H.offset}&limit=${H.limit}`)); if (!r) return;
+  if (!r.items.length && r.matched && H.offset >= r.matched) { H.offset = Math.max(0, Math.floor((r.matched - 1) / H.limit) * H.limit); return loadHistory(); }
   H.items = r.items;
   $('#htot').textContent = `${r.total_done} ${T('stažených videí', 'downloaded videos')} · ${fmtBytes(r.total_bytes)}`;
   const local = App.st && !App.st.docker && ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname);
@@ -308,26 +322,50 @@ async function loadHistory() {
     cancelled: `<span class="badge b-n">${ic('x', 11)} ${T('Zrušeno', 'Cancelled')}</span>`, skipped: `<span class="badge b-warn">${T('Přeskočeno', 'Skipped')}</span>` };
   const rows = r.items.map(h => {
     const gone = h.status === 'done' && h.file_exists === false;
+    const playable = h.status === 'done' && !gone;
     const sub = gone ? `<div class="mm"><span class="ell">${T('Soubor už na úložišti není', 'The file is no longer on the storage')} · ${esc(h.filepath || '')}</span></div>`
       : h.status === 'done' ? `<div class="mm"><span class="ell">${esc(h.channel || '')}${h.height ? ' · ' + h.height + 'p' : ''} · </span>${srcIcon(h.source)} ${srcName(h.source)}</div>`
       : `<div class="mm ${h.status === 'failed' ? 'err' : ''}" style="white-space:normal">${h.status === 'failed' ? ic('alert', 12) : ''} ${esc(h.error || '')}</div>`;
     const acts = gone ? `<button class="btn sm" data-h="retry" data-id="${h.id}" title="${T('Vyřadí video z archivu stažených a zařadí ho do fronty', 'Removes the video from the download archive and queues it')}">${ic('download', 12)} ${T('Stáhnout znovu', 'Download again')}</button>`
-      : h.status === 'done'
-      ? (local ? `<button class="ibtn" title="${T('Zobrazit ve složce', 'Show in folder')}" data-h="open" data-id="${h.id}">${ic('folder', 15)}</button>` : '') +
-        `<a class="ibtn" title="${T('Stáhnout / přehrát', 'Download / play')}" href="/api/file/${h.id}" target="_blank">${local ? ic('play', 15) : ic('download', 15)}</a>`
+      : playable
+      ? `<button class="ibtn" title="${T('Přehrát', 'Play')}" data-h="play" data-id="${h.id}">${ic('play', 15)}</button>` +
+        (local ? `<button class="ibtn" title="${T('Zobrazit ve složce', 'Show in folder')}" data-h="open" data-id="${h.id}">${ic('folder', 15)}</button>` : '') +
+        `<a class="ibtn" title="${T('Stáhnout soubor', 'Download file')}" href="/api/file/${h.id}">${ic('download', 15)}</a>`
       : `<button class="btn sm" data-h="retry" data-id="${h.id}">${ic('refresh', 12)} ${T('Znovu', 'Retry')}</button>`;
-    return `<div class="hr">${thumbHtml(h, 104, 58)}<div style="min-width:0"><div class="b6 fs14 ell" title="${esc(h.filepath || h.url)}">${esc(h.title || h.url)}</div>${sub}</div>
+    return `<div class="hr"><div ${playable ? `data-h="play" data-id="${h.id}" style="cursor:pointer" title="${T('Přehrát', 'Play')}"` : ''}>${thumbHtml(h, 104, 58)}</div><div style="min-width:0"><div class="b6 fs14 ell" title="${esc(h.filepath || h.url)}">${esc(h.title || h.url)}</div>${sub}</div>
      <div>${gone ? `<span class="badge b-warn">${ic('trash', 11)} ${T('Soubor smazán', 'File deleted')}</span>` : badge[h.status] || ''}</div><div class="hide-s">${methodBadge(h.method)}</div><div class="b5 hide-s">${h.status === 'done' && !gone ? fmtBytes(h.filesize) : '—'}</div><div class="t2">${fmtDate(h.finished_at)}</div>
      <div class="acts">${acts}<button class="ibtn" title="${T('Smazat záznam', 'Delete record')}" data-h="del" data-id="${h.id}">${ic('trash', 14)}</button></div></div>`;
   }).join('');
   $('#hlist').innerHTML = r.items.length ? `<div class="hr h"><span></span><span>Video</span><span>${T('Stav', 'Status')}</span><span class="hide-s">${T('Metoda', 'Method')}</span><span class="hide-s">${T('Velikost', 'Size')}</span><span>${T('Dokončeno', 'Finished')}</span><span></span></div>${rows}`
     : `<div class="empty">${ic('history', 30)}<h3>${T('Historie je prázdná', 'History is empty')}</h3><p>${T('Dokončená a neúspěšná stahování se zobrazí tady.', 'Finished and failed downloads show up here.')}</p></div>`;
+  $('#hpager').innerHTML = r.matched ? pagerHtml(r.matched, r.offset, r.limit) : '';
+  $$('[data-page]', $('#hpager')).forEach(b => b.onclick = () => { H.offset = (+b.dataset.page - 1) * H.limit; loadHistory(); $('#mainwrap').scrollTop = 0; });
+  const sel = $('#hlimit'); if (sel) sel.onchange = e => { H.limit = +e.target.value; try { localStorage.setItem('vd_hist_limit', H.limit); } catch (er) { /* bez úložiště */ } H.offset = 0; loadHistory(); };
   $$('[data-h]', $('#hlist')).forEach(b => b.onclick = async () => {
     const id = +b.dataset.id, a = b.dataset.h;
+    if (a === 'play') return openPlayer(H.items.find(x => x.id === id), local);
     if (a === 'open') act(() => api(`/api/jobs/${id}/open`, { method: 'POST' }));
     if (a === 'retry') { const ok = await act(() => api(`/api/jobs/${id}/retry`, { method: 'POST' }), T('Přidáno znovu do fronty', 'Added to the queue again')); if (ok) loadHistory(); }
     if (a === 'del') { await act(() => api('/api/history', { method: 'DELETE', body: { ids: [id] } })); loadHistory(); }
   });
+}
+function openPlayer(h, local) {
+  if (!h) return;
+  const audio = /\.(mp3|m4a|opus|ogg)$/i.test(h.filepath || '');
+  const m = modal(`<div class="mh">${ic('play', 18)}<h2 class="ell grow" title="${esc(h.title || '')}">${esc(h.title || h.url)}</h2><button class="ibtn" id="pclose" title="${T('Zavřít', 'Close')}">${ic('x', 16)}</button></div>
+   <div class="mb"><${audio ? 'audio' : 'video'} id="pvid" controls autoplay playsinline preload="metadata" src="/api/stream/${h.id}" style="width:100%;${audio ? '' : 'max-height:70vh;background:#000;border-radius:10px;display:block'}"></${audio ? 'audio' : 'video'}>
+   <div id="perr" class="banner" style="display:none;margin-top:12px">${ic('alert', 16)}<span class="grow">${T('Tento prohlížeč formát videa neumí přehrát (např. MKV s kodekem AV1/VP9 v Safari). Soubor si stáhněte, nebo použijte Chrome či Firefox.', 'This browser cannot play the video format (e.g. MKV with AV1/VP9 in Safari). Download the file or use Chrome or Firefox.')}</span></div>
+   <div class="row gap8 t2 fs12 wrap" style="margin-top:10px">${esc(h.channel || '')}${h.height ? ' · ' + h.height + 'p' : ''} · ${fmtBytes(h.filesize)} · <span class="mono ell" style="max-width:100%">${esc(h.filepath || '')}</span></div></div>
+   <div class="mf">${local ? `<button class="btn" id="pfold">${ic('folder', 14)} ${T('Zobrazit ve složce', 'Show in folder')}</button>` : ''}<a class="btn" href="/api/file/${h.id}">${ic('download', 14)} ${T('Stáhnout soubor', 'Download file')}</a><button class="btn primary" id="pclose2">${T('Zavřít', 'Close')}</button></div>`, 'wide');
+  m.el.style.width = '960px';
+  const v = $('#pvid', m.el);
+  v.addEventListener('error', () => { $('#perr', m.el).style.display = 'flex'; });
+  const close = () => { try { v.pause(); v.removeAttribute('src'); v.load(); } catch (e) { /* nic */ } m.close(); document.removeEventListener('keydown', esc_); };
+  const esc_ = e => { if (e.key === 'Escape') close(); };
+  document.addEventListener('keydown', esc_);
+  $('#pclose', m.el).onclick = close; $('#pclose2', m.el).onclick = close;
+  const f = $('#pfold', m.el); if (f) f.onclick = () => act(() => api(`/api/jobs/${h.id}/open`, { method: 'POST' }));
+  $('.overlay').addEventListener('mousedown', e => { if (e.target.classList.contains('overlay')) close(); });
 }
 
 /* ------------------------------------------------------------ nastavení */

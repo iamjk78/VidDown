@@ -154,8 +154,9 @@ class DB:
             "or (status='expanded' and exists(select 1 from jobs c where c.parent_id=jobs.id "
             "and c.status in ('new','probing','confirm','queued','running'))) order by pos")
 
-    def history(self, q: str = "", status: str = "", days: int = 0, limit: int = 300, offset: int = 0) -> list[dict]:
-        sql = "select * from jobs where status in ('done','failed','cancelled','skipped')"
+    @staticmethod
+    def _history_where(q: str, status: str, days: int) -> tuple[str, list]:
+        sql = " where status in ('done','failed','cancelled','skipped')"
         args: list = []
         if status:
             sql += " and status=?"
@@ -166,9 +167,16 @@ class DB:
         if days:
             sql += " and coalesce(finished_at, updated_at) >= ?"
             args.append(time.time() - days * 86400)
-        sql += " order by coalesce(finished_at, updated_at) desc limit ? offset ?"
-        args += [limit, offset]
-        return self.query(sql, args)
+        return sql, args
+
+    def history(self, q: str = "", status: str = "", days: int = 0, limit: int = 300, offset: int = 0) -> list[dict]:
+        where, args = self._history_where(q, status, days)
+        return self.query(f"select * from jobs{where} order by coalesce(finished_at, updated_at) desc, id desc limit ? offset ?",
+                          args + [limit, offset])
+
+    def history_count(self, q: str = "", status: str = "", days: int = 0) -> int:
+        where, args = self._history_where(q, status, days)
+        return self.query(f"select count(*) n from jobs{where}", args)[0]["n"]
 
     def find_active_url(self, url: str) -> dict | None:
         r = self.query("select * from jobs where url=? and status in ('new','probing','confirm','queued','running') limit 1", (url,))
