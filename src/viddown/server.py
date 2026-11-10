@@ -442,7 +442,7 @@ def create_app(app_state) -> FastAPI:
 
     @app.get("/api/cpu")
     async def cpu_info():
-        return dict(S.runner.cpu.out(), history=list(S.runner.cpu.history), step=2)
+        return dict(S.runner.cpu.out(), history=list(S.runner.cpu.history), mem_history=list(S.runner.cpu.mem_history), step=2)
 
     # ------------------------------------------------------------ statistiky
     @app.get("/api/stats")

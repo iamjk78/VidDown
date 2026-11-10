@@ -81,11 +81,57 @@ def _cgroup_usage() -> tuple[float, float] | None:
     return None
 
 
+def _meminfo_total() -> float:
+    t = _read("/proc/meminfo") or ""
+    for line in t.splitlines():
+        if line.startswith("MemTotal:"):
+            return float(line.split()[1]) * 1024
+    return psutil.virtual_memory().total if psutil else 0.0
+
+
+def _cgroup_mem() -> tuple[float, float] | None:
+    """(používaná paměť v B bez diskové cache, limit v B) celého kontejneru nebo None."""
+    total = _meminfo_total()
+    cur = _read("/sys/fs/cgroup/memory.current")
+    if cur:   # cgroup v2
+        inactive = 0
+        for line in (_read("/sys/fs/cgroup/memory.stat") or "").splitlines():
+            if line.startswith("inactive_file "):
+                inactive = int(line.split()[1])
+        lim = _read("/sys/fs/cgroup/memory.max")
+        limit = total if not lim or lim == "max" else min(total or float(lim), float(lim))
+        return max(0.0, int(cur) - inactive), limit
+    cur = _read("/sys/fs/cgroup/memory/memory.usage_in_bytes")
+    if cur:   # cgroup v1
+        inactive = 0
+        for line in (_read("/sys/fs/cgroup/memory/memory.stat") or "").splitlines():
+            if line.startswith("total_inactive_file "):
+                inactive = int(line.split()[1])
+        lim = float(_read("/sys/fs/cgroup/memory/memory.limit_in_bytes") or 0)
+        return max(0.0, int(cur) - inactive), min(total, lim) if total and lim else (lim or total)
+    return None
+
+
+def _psutil_mem() -> tuple[float, float] | None:
+    if not psutil:
+        return None
+    me = psutil.Process()
+    used = 0.0
+    for p in [me, *me.children(recursive=True)]:
+        try:
+            used += p.memory_info().rss
+        except psutil.Error:
+            pass
+    return used, float(psutil.virtual_memory().total)
+
+
 class Monitor:
     def __init__(self) -> None:
         self.percent: float | None = None
         self.cores = float(os.cpu_count() or 1)
         self.history: deque[float] = deque(maxlen=HISTORY)
+        self.mem_history: deque[float] = deque(maxlen=HISTORY)   # využití paměti v %
+        self.mem: tuple[float, float] | None = None
         self.mode = "full"
         self.source = "cgroup" if _cgroup_usage() else ("psutil" if psutil else None)
         self._last_t = 0.0
@@ -132,6 +178,12 @@ class Monitor:
                 self.history.append(round(self.percent, 1))
         except Exception as e:  # noqa: BLE001
             log.debug("měření CPU selhalo: %s", e)
+        try:
+            self.mem = (_cgroup_mem() if self.source == "cgroup" else None) or _psutil_mem()
+            if self.mem and self.mem[1]:
+                self.mem_history.append(round(self.mem[0] / self.mem[1] * 100, 1))
+        except Exception as e:  # noqa: BLE001
+            log.debug("měření paměti selhalo: %s", e)
         self._renice()
 
     def _renice(self) -> None:
@@ -162,4 +214,5 @@ class Monitor:
 
     def out(self) -> dict:
         return {"percent": None if self.percent is None else round(self.percent, 1), "mode": self.mode,
-                "cores": round(self.cores, 2), "source": self.source}
+                "cores": round(self.cores, 2), "source": self.source,
+                "mem": {"used": int(self.mem[0]), "total": int(self.mem[1])} if self.mem else None}

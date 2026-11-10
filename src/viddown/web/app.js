@@ -502,14 +502,16 @@ function cpuBox(st) {
   return `<div class="card" style="padding:12px;background:var(--surface2)" title="${T('Vytížení procesoru touto aplikací (100 % = všechna jádra)', 'CPU load of this app (100% = all cores)')}">
    <div class="row fs12 t2" style="justify-content:space-between"><span class="row gap6">${ic('cpu', 14)} ${T('Procesor', 'CPU')}</span><b style="color:var(--text)">${pc == null ? '—' : Math.round(pc) + ' %'}</b></div>
    <div class="bar" style="margin-top:6px"><i style="width:${pc || 0}%;background:${col}"></i></div>
-   <span class="seg" style="display:flex;margin-top:8px">${PERF_MODES().map(([v, l, d]) => `<button style="flex:1;padding:4px 0" class="${c.mode === v ? 'on' : ''}" data-perf="${v}" title="${esc(d)}">${l}</button>`).join('')}</span></div>`;
+   ${c.mem ? (() => { const mp = c.mem.total ? c.mem.used / c.mem.total * 100 : 0, mc = mp >= 90 ? 'var(--err)' : mp >= 75 ? 'var(--warn)' : 'var(--ok)'; return `<div class="row fs12 t2" style="justify-content:space-between;margin-top:10px" title="${T('Paměť používaná touto aplikací a jejími procesy z celkové paměti', 'Memory used by this app and its processes out of total memory')}"><span class="row gap6">${ic('hdd', 14)} RAM</span><span><b style="color:var(--text)">${fmtBytes(c.mem.used)}</b> / ${fmtBytes(c.mem.total)}</span></div><div class="bar" style="margin-top:6px"><i style="width:${Math.max(1, mp)}%;background:${mc}"></i></div>`; })() : ''}
+   <span class="seg" style="display:flex;margin-top:10px">${PERF_MODES().map(([v, l, d]) => `<button style="flex:1;padding:4px 0" class="${c.mode === v ? 'on' : ''}" data-perf="${v}" title="${esc(d)}">${l}</button>`).join('')}</span></div>`;
 }
 async function drawCpuChart() {
   const box = $('#cpuchart'); if (!box) return;
   const r = await api('/api/cpu').catch(() => null); if (!r || !$('#cpuchart')) return;
-  const h = r.history.slice(-450);
+  const h = r.history.slice(-450), mh = (r.mem_history || []).slice(-450);
   box.innerHTML = h.length ? `<div class="bars" style="height:90px;margin-top:10px;padding-bottom:0">${h.map(v => `<div class="bcol" title="${v} %"><i style="height:${Math.max(2, v)}%;background:${v >= 85 ? 'var(--err)' : v >= 60 ? 'var(--warn)' : 'var(--accent)'}"></i></div>`).join('')}</div>
-    <div class="row fs12 t2" style="justify-content:space-between;margin-top:4px"><span>${T('před', 'ago')} ${Math.round(h.length * r.step / 60)} min</span><span>${T('teď', 'now')}</span></div>`
+    <div class="row fs12 t2" style="justify-content:space-between;margin-top:4px"><span>${T('před', 'ago')} ${Math.round(h.length * r.step / 60)} min</span><span>${T('teď', 'now')}</span></div>
+    ${mh.length ? `<div class="row gap10" style="margin-top:14px"><b>${T('Paměť RAM', 'Memory (RAM)')}</b><span class="grow"></span><span class="t2 fs12">${r.mem ? fmtBytes(r.mem.used) + ' / ' + fmtBytes(r.mem.total) : ''}</span></div><div class="bars" style="height:70px;margin-top:8px;padding-bottom:0">${mh.map(v => `<div class="bcol" title="${v} %"><i style="height:${Math.max(2, v)}%;background:${v >= 90 ? 'var(--err)' : v >= 75 ? 'var(--warn)' : 'var(--ok)'}"></i></div>`).join('')}</div>` : ''}`
     : `<div class="t2 fs12" style="padding:8px 0">${T('Měření se právě rozbíhá…', 'Measurement is starting…')}</div>`;
   clearTimeout(App.cpuTmr); App.cpuTmr = setTimeout(drawCpuChart, 4000);
 }
@@ -530,7 +532,7 @@ function renderStats() {
   $('#main').innerHTML = `<div class="row gap16 wrap"><div><h1>${T('Statistiky', 'Statistics')}</h1><div class="t2" style="margin-top:3px">${T('Počty a objemy stahování. Nezávisí na historii – mazání historie statistiky nemění.', 'Download counts and volumes. Independent of history – clearing history does not change them.')}</div></div><span class="grow"></span>
     <span class="seg" id="stp">${periods.map(([v, l]) => `<button data-v="${v}" class="${STATS.p === v ? 'on' : ''}">${l}</button>`).join('')}</span></div>
     <div class="row gap8 wrap" id="stcustom" style="margin-top:10px;${STATS.p === 'custom' ? '' : 'display:none'}"><span class="t2 fs12">${T('Od', 'From')}</span><input type="date" class="input sm" id="stfrom" value="${STATS.from}" style="width:150px"><span class="t2 fs12">${T('do (včetně)', 'to (inclusive)')}</span><input type="date" class="input sm" id="stto" value="${STATS.to}" style="width:150px"></div>
-    <div class="card" style="padding:16px 18px;margin-top:14px"><div class="row gap10"><b>${T('Vytížení procesoru (posledních 15 minut)', 'CPU load (last 15 minutes)')}</b><span class="grow"></span><span class="t2 fs12" id="cpunow"></span></div><div id="cpuchart"></div></div>
+    <div class="card" style="padding:16px 18px;margin-top:14px"><div class="row gap10"><b>${T('Vytížení procesoru a paměti (posledních 15 minut)', 'CPU and memory load (last 15 minutes)')}</b><span class="grow"></span><span class="t2 fs12" id="cpunow"></span></div><div id="cpuchart"></div></div>
     <div id="stbody" style="margin-top:16px"><div class="empty"><div class="spin" style="margin:auto"></div></div></div>`;
   $$('#stp button').forEach(b => b.onclick = () => { STATS.p = b.dataset.v; $$('#stp button').forEach(x => x.classList.toggle('on', x === b)); $('#stcustom').style.display = STATS.p === 'custom' ? '' : 'none'; loadStats(); });
   $('#stfrom').onchange = e => { STATS.from = e.target.value; loadStats(); };
