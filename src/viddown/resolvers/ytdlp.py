@@ -44,6 +44,9 @@ def _error_from(out: str) -> str:
     tail = [l for l in out.strip().splitlines() if l.strip()]
     return tail[-1] if tail else "neznámá chyba yt-dlp"
 
+# zpracování po stažení (ffmpeg: metadata, miniatura, titulky) – u velkých souborů na síťovém disku trvá minuty
+POST = "postprocess:VDPOST %(progress.status)s|%(progress.postprocessor)s"
+
 
 async def _run_json(cmd: list[str], timeout: float) -> dict:
     proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
@@ -117,6 +120,7 @@ async def download(url: str, info: dict | None, ctx: Ctx, staging: Path, name: s
     cmd += ["-P", str(staging), "-o", name.replace("%", "%%") + ".%(ext)s",
             "--no-playlist", "--no-mtime", "--newline", "--progress", "--progress-template", PROG,
             "--no-simulate", "--print", "after_move:VDFILE %(filepath)s",
+            "--progress-template", POST,
             "-R", str(s.get("retries", 5)), "--fragment-retries", str(s.get("retries", 5)),
             "--write-thumbnail", "--convert-thumbnails", "jpg",
             "--download-archive", str(ctx.data / "archive.txt")]
@@ -171,6 +175,11 @@ async def download(url: str, info: dict | None, ctx: Ctx, staging: Path, name: s
                 on_progress(downloaded=int(done), total=int(total) or None,
                             progress=(min(done / total, 1.0) if total else None),
                             speed=num(spd), eta=int(num(eta)) if num(eta) is not None else None)
+            continue
+        if line.startswith("VDPOST "):
+            if line.startswith("VDPOST started"):   # stažení je hotové, běží ffmpeg: ukázat 100 % bez rychlosti
+                done = int(sum(x[0] for x in parts.values()) or sum(x[1] for x in parts.values()) or 0)
+                on_progress(progress=1.0, speed=None, eta=None, **({"downloaded": done, "total": done} if done else {}))
             continue
         if line.startswith("VDFILE "):
             filepath = line[7:].strip()

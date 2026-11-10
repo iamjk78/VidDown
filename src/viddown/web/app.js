@@ -156,11 +156,12 @@ function renderSide() {
    <div class="row gap8 fs12 t2" style="padding:6px 6px 0"><span class="dot ${tg.state === 'ok' ? 'g' : tg.state === 'error' ? 'r' : ''}"></span>${tgTxt}</div>
    <div class="row gap8 fs12 t2" style="padding:2px 6px"><span class="row gap6">${ic('moon', 14)} ${T('Tmavý režim', 'Dark mode')}</span><span class="grow"></span><button class="toggle ${dark ? 'on' : ''}" id="darkt" aria-label="dark mode"></button></div>
    <div class="row fs11 muted" style="padding:2px 6px;justify-content:space-between"><span>VidDown ${esc(st ? st.version : '')}</span>
-   <span class="row gap4"><button class="btn ghost sm" style="height:22px;padding:0 6px" data-lang="cs">CS</button><button class="btn ghost sm" style="height:22px;padding:0 6px" data-lang="en">EN</button></span></div>
+   <span class="row gap4"><button class="btn ghost sm" style="height:22px;padding:0 6px" data-lang="cs">CS</button><button class="btn ghost sm" style="height:22px;padding:0 6px" data-lang="en">EN</button><button class="btn ghost sm" style="height:22px;padding:0 6px" id="srestart" title="${T('Restartovat aplikaci', 'Restart app')}">${ic('refresh', 12)}</button></span></div>
   </div>`;
   $$('[data-go]', side).forEach(b => b.onclick = () => go(b.dataset.go));
   if (keepScroll && $('.subnav', side)) $('.subnav', side).scrollTop = keepScroll;
   $$('[data-perf]', side).forEach(b => b.onclick = async () => { await saveSetting('perf_mode', b.dataset.perf, () => {}); if (App.st && App.st.cpu) App.st.cpu.mode = b.dataset.perf; renderSide(); });
+  $('#srestart', side).onclick = restartApp;
   $('#darkt', side).onclick = () => saveSetting('theme', dark ? 'light' : 'dark');
   $$('[data-lang]', side).forEach(b => { b.style.fontWeight = b.dataset.lang === LANG ? '700' : '400'; b.onclick = () => saveSetting('language', b.dataset.lang); });
 }
@@ -838,15 +839,7 @@ function renderSettings() {
   bindSettings($('#main'));
   $('#impf').onchange = async e => { const fd = new FormData(); fd.append('file', e.target.files[0]); const r = await act(() => api('/api/settings/import', { method: 'POST', body: fd }), T('Nastavení načteno', 'Settings imported')); if (r) { App.settings = r; renderSettings(); } };
   $('#wizbtn').onclick = openWizard;
-  $('#restartbtn').onclick = async () => {
-    if (!confirm(T('Restartovat celou aplikaci? Rozpracovaná stahování se přeruší a po startu začnou znovu od začátku; fronta zůstane zachována.', 'Restart the whole app? Downloads in progress are interrupted and restart from the beginning; the queue is kept.'))) return;
-    if (!await act(() => api('/api/restart', { method: 'POST' }))) return;
-    document.body.insertAdjacentHTML('beforeend', `<div id="rsov" style="position:fixed;inset:0;z-index:9999;background:var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px"><div class="spin"></div><div>${T('Restartuji aplikaci…', 'Restarting the app…')}</div></div>`);
-    if (App.es) App.es.close();
-    await new Promise(r => setTimeout(r, 2500));
-    for (let i = 0; i < 90; i++) { try { const r = await fetch('/api/state', { cache: 'no-store' }); if (r.ok || r.status === 401) break; } catch (e) { /* server ještě neběží */ } await new Promise(r => setTimeout(r, 1000)); }
-    location.reload();
-  };
+  $('#restartbtn').onclick = restartApp;
 }
 
 function bindSettings(root, after) {
@@ -869,6 +862,15 @@ function bindSettings(root, after) {
   const tt = $('#tgtest', root); if (tt) tt.onclick = () => act(() => api('/api/telegram/test', { method: 'POST' }), T('Testovací zpráva odeslána', 'Test message sent'));
 }
 
+async function restartApp() {
+    if (!confirm(T('Restartovat celou aplikaci? Rozpracovaná stahování se přeruší a po startu začnou znovu od začátku; fronta zůstane zachována.', 'Restart the whole app? Downloads in progress are interrupted and restart from the beginning; the queue is kept.'))) return;
+    if (!await act(() => api('/api/restart', { method: 'POST' }))) return;
+    document.body.insertAdjacentHTML('beforeend', `<div id="rsov" style="position:fixed;inset:0;z-index:9999;background:var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px"><div class="spin"></div><div>${T('Restartuji aplikaci…', 'Restarting the app…')}</div></div>`);
+    if (App.es) App.es.close();
+    await new Promise(r => setTimeout(r, 2500));
+    for (let i = 0; i < 90; i++) { try { const r = await fetch('/api/state', { cache: 'no-store' }); if (r.ok || r.status === 401) break; } catch (e) { /* server ještě neběží */ } await new Promise(r => setTimeout(r, 1000)); }
+    location.reload();
+  }
 async function saveSetting(k, v, after) {
   const r = await act(() => api('/api/settings', { method: 'PUT', body: { [k]: v } }));
   if (!r) { // odmítnuto (např. neplatná složka) – vrátit pole na uloženou hodnotu
