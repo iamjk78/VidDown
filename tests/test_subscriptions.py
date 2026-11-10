@@ -360,3 +360,19 @@ def test_expand_skips_videos_already_queued_and_duplicate_playlist_is_refused(rt
     other = rt.db.add("https://x/other", status="probing", kind="playlist")
     rt._expand(rt.db.get(other), entries() + [{"url": "https://x/v9", "title": "N"}])
     assert [c["url"] for c in rt.db.children(other)] == ["https://x/v9"]
+
+
+def test_cpu_modes_and_api(client):
+    from viddown import cpu
+    c, rt = client
+    assert cpu.MODES["eco"][2] == 1
+    assert rt.eff_concurrency({"concurrency": 4, "perf_mode": "eco"}) == 1
+    assert rt.eff_concurrency({"concurrency": 4, "perf_mode": "balanced"}) == 4
+    assert rt.eff_concurrency({"concurrency": 4}) == 4
+    rt.cpu.sample("balanced"); rt.cpu._last_t -= 3; rt.cpu.sample("balanced")
+    r = c.get("/api/cpu").json()
+    assert r["mode"] == "balanced" and "history" in r and r["cores"] > 0
+    assert c.put("/api/settings", json={"perf_mode": "eco"}).status_code == 200
+    assert c.put("/api/settings", json={"perf_mode": "nope"}).status_code in (400, 422)
+    assert c.post("/api/restart").status_code == 501   # v testu není hlavní smyčka
+    cpu._nice = 0

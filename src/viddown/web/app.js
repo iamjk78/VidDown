@@ -152,6 +152,7 @@ function renderSide() {
       : `<div class="row fs12 t2" style="justify-content:space-between" title="${esc(disk.dir)}"><span class="row gap6">${ic('folder', 14)} ${T('Cíl', 'Target')}</span>${disk.target_reliable ? `<span><b style="color:var(--text)">${fmtBytes(disk.target_free)}</b> ${T('volno', 'free')}</span>` : `<span class="muted" title="${T('Docker Desktop na macOS u složek z /Volumes (síťové disky) hlásí místo interního disku Macu, proto se nezobrazuje.', 'Docker Desktop on macOS reports the Mac disk for folders from /Volumes (network shares), so it is not shown.')}">${T('nelze zjistit', 'unknown')} ⓘ</span>`}</div>
        <div class="row fs12 t2" style="justify-content:space-between;margin-top:4px" title="${T('Rozpracovaná stahování', 'Downloads in progress')}: ${esc(disk.temp_dir)}"><span class="row gap6">${ic('hdd', 14)} ${T('Dočasná', 'Temp')}</span><span><b style="color:var(--text)">${fmtBytes(disk.temp_free)}</b> ${T('volno', 'free')}</span></div>`}
    <div class="fs11 muted ell" style="margin-top:6px" title="${esc(disk.dir)}">${esc(disk.dir)}</div></div>` : ''}
+   ${cpuBox(st)}
    <div class="row gap8 fs12 t2" style="padding:6px 6px 0"><span class="dot ${tg.state === 'ok' ? 'g' : tg.state === 'error' ? 'r' : ''}"></span>${tgTxt}</div>
    <div class="row gap8 fs12 t2" style="padding:2px 6px"><span class="row gap6">${ic('moon', 14)} ${T('Tmavý režim', 'Dark mode')}</span><span class="grow"></span><button class="toggle ${dark ? 'on' : ''}" id="darkt" aria-label="dark mode"></button></div>
    <div class="row fs11 muted" style="padding:2px 6px;justify-content:space-between"><span>VidDown ${esc(st ? st.version : '')}</span>
@@ -159,6 +160,7 @@ function renderSide() {
   </div>`;
   $$('[data-go]', side).forEach(b => b.onclick = () => go(b.dataset.go));
   if (keepScroll && $('.subnav', side)) $('.subnav', side).scrollTop = keepScroll;
+  $$('[data-perf]', side).forEach(b => b.onclick = async () => { await saveSetting('perf_mode', b.dataset.perf, () => {}); if (App.st && App.st.cpu) App.st.cpu.mode = b.dataset.perf; renderSide(); });
   $('#darkt', side).onclick = () => saveSetting('theme', dark ? 'light' : 'dark');
   $$('[data-lang]', side).forEach(b => { b.style.fontWeight = b.dataset.lang === LANG ? '700' : '400'; b.onclick = () => saveSetting('language', b.dataset.lang); });
 }
@@ -490,6 +492,28 @@ async function subAction(b) {
   if (a === 'toggle') { const s = subById(id); if (s) { s.enabled = s.enabled ? 0 : 1; updateSubHead(); } return act(() => api(`/api/subscriptions/${id}`, { method: 'PUT', body: { enabled: s ? !!s.enabled : true } })); }
 }
 
+/* ------------------------------------------------------------ vytížení procesoru */
+const PERF_MODES = () => [['full', T('Plný', 'Full'), T('Plný výkon – bez omezení', 'Full performance – no limits')],
+  ['balanced', T('Vyvážený', 'Balanced'), T('Nižší priorita podprocesů, ffmpeg na 2 vlákna', 'Lower subprocess priority, ffmpeg limited to 2 threads')],
+  ['eco', T('Šetrný', 'Eco'), T('Nejnižší priorita, 1 vlákno ffmpeg, nejvýše 1 souběžné stahování', 'Lowest priority, 1 ffmpeg thread, at most 1 parallel download')]];
+function cpuBox(st) {
+  const c = st && st.cpu; if (!c) return '';
+  const pc = c.percent, col = pc == null ? 'var(--muted)' : pc >= 85 ? 'var(--err)' : pc >= 60 ? 'var(--warn)' : 'var(--ok)';
+  return `<div class="card" style="padding:12px;background:var(--surface2)" title="${T('Vytížení procesoru touto aplikací (100 % = všechna jádra)', 'CPU load of this app (100% = all cores)')}">
+   <div class="row fs12 t2" style="justify-content:space-between"><span class="row gap6">${ic('cpu', 14)} ${T('Procesor', 'CPU')}</span><b style="color:var(--text)">${pc == null ? '—' : Math.round(pc) + ' %'}</b></div>
+   <div class="bar" style="margin-top:6px"><i style="width:${pc || 0}%;background:${col}"></i></div>
+   <span class="seg" style="display:flex;margin-top:8px">${PERF_MODES().map(([v, l, d]) => `<button style="flex:1;padding:4px 0" class="${c.mode === v ? 'on' : ''}" data-perf="${v}" title="${esc(d)}">${l}</button>`).join('')}</span></div>`;
+}
+async function drawCpuChart() {
+  const box = $('#cpuchart'); if (!box) return;
+  const r = await api('/api/cpu').catch(() => null); if (!r || !$('#cpuchart')) return;
+  const h = r.history.slice(-450);
+  box.innerHTML = h.length ? `<div class="bars" style="height:90px;margin-top:10px;padding-bottom:0">${h.map(v => `<div class="bcol" title="${v} %"><i style="height:${Math.max(2, v)}%;background:${v >= 85 ? 'var(--err)' : v >= 60 ? 'var(--warn)' : 'var(--accent)'}"></i></div>`).join('')}</div>
+    <div class="row fs12 t2" style="justify-content:space-between;margin-top:4px"><span>${T('před', 'ago')} ${Math.round(h.length * r.step / 60)} min</span><span>${T('teď', 'now')}</span></div>`
+    : `<div class="t2 fs12" style="padding:8px 0">${T('Měření se právě rozbíhá…', 'Measurement is starting…')}</div>`;
+  clearTimeout(App.cpuTmr); App.cpuTmr = setTimeout(drawCpuChart, 4000);
+}
+
 /* ------------------------------------------------------------ statistiky */
 const STATS = { p: '30d', from: '', to: '', metric: 'n' };
 function statsRange() {
@@ -506,10 +530,12 @@ function renderStats() {
   $('#main').innerHTML = `<div class="row gap16 wrap"><div><h1>${T('Statistiky', 'Statistics')}</h1><div class="t2" style="margin-top:3px">${T('Počty a objemy stahování. Nezávisí na historii – mazání historie statistiky nemění.', 'Download counts and volumes. Independent of history – clearing history does not change them.')}</div></div><span class="grow"></span>
     <span class="seg" id="stp">${periods.map(([v, l]) => `<button data-v="${v}" class="${STATS.p === v ? 'on' : ''}">${l}</button>`).join('')}</span></div>
     <div class="row gap8 wrap" id="stcustom" style="margin-top:10px;${STATS.p === 'custom' ? '' : 'display:none'}"><span class="t2 fs12">${T('Od', 'From')}</span><input type="date" class="input sm" id="stfrom" value="${STATS.from}" style="width:150px"><span class="t2 fs12">${T('do (včetně)', 'to (inclusive)')}</span><input type="date" class="input sm" id="stto" value="${STATS.to}" style="width:150px"></div>
+    <div class="card" style="padding:16px 18px;margin-top:14px"><div class="row gap10"><b>${T('Vytížení procesoru (posledních 15 minut)', 'CPU load (last 15 minutes)')}</b><span class="grow"></span><span class="t2 fs12" id="cpunow"></span></div><div id="cpuchart"></div></div>
     <div id="stbody" style="margin-top:16px"><div class="empty"><div class="spin" style="margin:auto"></div></div></div>`;
   $$('#stp button').forEach(b => b.onclick = () => { STATS.p = b.dataset.v; $$('#stp button').forEach(x => x.classList.toggle('on', x === b)); $('#stcustom').style.display = STATS.p === 'custom' ? '' : 'none'; loadStats(); });
   $('#stfrom').onchange = e => { STATS.from = e.target.value; loadStats(); };
   $('#stto').onchange = e => { STATS.to = e.target.value; loadStats(); };
+  drawCpuChart();
   loadStats();
 }
 async function loadStats() {
@@ -688,6 +714,8 @@ const SECTIONS = () => [
   { icon: 'download', title: ['Stahování', 'Downloading'], col: 0, fields: [
     { k: 'download_dir', type: 'path', label: ['Cílová složka', 'Download folder'] },
     { k: 'concurrency', type: 'stepper', min: 1, max: 16, label: ['Souběžná stahování', 'Parallel downloads'], hint: ['Platí okamžitě', 'Applies immediately'] },
+    { k: 'perf_mode', type: 'seg', opts: [['full', T('Plný', 'Full')], ['balanced', T('Vyvážený', 'Balanced')], ['eco', T('Šetrný', 'Eco')]], label: ['Výkon', 'Performance'],
+      hint: ['Šetrný snižuje prioritu procesů, vlákna ffmpeg a souběžnost (max. 1). Zpět na Plný platí pro nově spuštěná stahování.', 'Eco lowers process priority, ffmpeg threads and concurrency (max 1). Switching back to Full applies to newly started downloads.'] },
     { k: 'quality', type: 'seg', opts: [['max', ['Maximální', 'Maximum']], ['compat', ['Kompatibilita', 'Compatibility']]], label: ['Kvalita', 'Quality'], hint: ['Kompatibilita = MP4 / H.264 pro starší přehrávače', 'Compatibility = MP4 / H.264 for older players'] },
     { k: 'audio_only', type: 'toggle', label: ['Stahovat jen zvuk', 'Audio only'] },
     { k: 'audio_format', type: 'seg', opts: [['mp3', 'MP3'], ['m4a', 'M4A']], label: ['Formát zvuku', 'Audio format'] },
@@ -802,11 +830,21 @@ function renderSettings() {
   const card = s => `<div class="card sect"><div class="sh">${ic(s.icon, 16)}<h2>${L(s.title)}</h2></div>${s.fields.map(f => fieldHtml(f, S)).join('')}</div>`;
   $('#main').innerHTML = `<div class="row gap16 wrap"><div><h1>${T('Nastavení', 'Settings')}</h1><div class="t2" style="margin-top:3px">${T('Změny se ukládají automaticky a platí okamžitě', 'Changes save automatically and apply immediately')}</div></div><div class="grow"></div>
    <a class="btn sm" href="/api/settings/export">${ic('download', 13)} ${T('Exportovat', 'Export')}</a><label class="btn sm">${T('Importovat', 'Import')}<input type="file" id="impf" accept=".json" hidden></label>
-   <button class="btn sm" id="wizbtn">${ic('sparkle', 13)} ${T('Průvodce nastavením', 'Setup guide')}</button></div>
+   <button class="btn sm" id="wizbtn">${ic('sparkle', 13)} ${T('Průvodce nastavením', 'Setup guide')}</button>
+   <button class="btn sm" id="restartbtn" title="${T('Řádně ukončí a znovu spustí celou aplikaci', 'Cleanly stops and starts the whole app again')}">${ic('refresh', 13)} ${T('Restartovat aplikaci', 'Restart app')}</button></div>
    <div class="sgrid"><div class="scol">${secs.filter(s => s.col === 0).map(card).join('')}</div><div class="scol">${secs.filter(s => s.col === 1).map(card).join('')}</div></div>`;
   bindSettings($('#main'));
   $('#impf').onchange = async e => { const fd = new FormData(); fd.append('file', e.target.files[0]); const r = await act(() => api('/api/settings/import', { method: 'POST', body: fd }), T('Nastavení načteno', 'Settings imported')); if (r) { App.settings = r; renderSettings(); } };
   $('#wizbtn').onclick = openWizard;
+  $('#restartbtn').onclick = async () => {
+    if (!confirm(T('Restartovat celou aplikaci? Rozpracovaná stahování se přeruší a po startu začnou znovu od začátku; fronta zůstane zachována.', 'Restart the whole app? Downloads in progress are interrupted and restart from the beginning; the queue is kept.'))) return;
+    if (!await act(() => api('/api/restart', { method: 'POST' }))) return;
+    document.body.insertAdjacentHTML('beforeend', `<div id="rsov" style="position:fixed;inset:0;z-index:9999;background:var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px"><div class="spin"></div><div>${T('Restartuji aplikaci…', 'Restarting the app…')}</div></div>`);
+    if (App.es) App.es.close();
+    await new Promise(r => setTimeout(r, 2500));
+    for (let i = 0; i < 90; i++) { try { const r = await fetch('/api/state', { cache: 'no-store' }); if (r.ok || r.status === 401) break; } catch (e) { /* server ještě neběží */ } await new Promise(r => setTimeout(r, 1000)); }
+    location.reload();
+  };
 }
 
 function bindSettings(root, after) {

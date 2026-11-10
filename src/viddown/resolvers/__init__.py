@@ -68,7 +68,9 @@ class ProcHolder:
 
 
 def subprocess_kwargs() -> dict:
+    from .. import cpu
     if sys.platform == "win32":
         import subprocess
-        return {"creationflags": subprocess.CREATE_NO_WINDOW}
-    return {}
+        return {"creationflags": subprocess.CREATE_NO_WINDOW | cpu.win_flags()}
+    pre = cpu.preexec()
+    return {"preexec_fn": pre} if pre else {}

@@ -42,6 +42,7 @@ DEFAULTS: dict = {
     "temp_dir": "",
     "min_free_gb": 2.0,
     "concurrency": 2,
+    "perf_mode": "full",            # full | balanced | eco – omezení výkonu (priorita, vlákna, souběžnost)
     "quality": "max",               # max | compat
     "audio_only": False,
     "audio_format": "mp3",          # mp3 | m4a
@@ -95,6 +96,7 @@ DEFAULTS: dict = {
 }
 
 CHOICES = {
+    "perf_mode": ["full", "balanced", "eco"],
     "quality": ["max", "compat"],
     "audio_format": ["mp3", "m4a"],
     "cookies_mode": ["none", "file", "browser"],

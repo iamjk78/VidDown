@@ -105,7 +105,7 @@ def create_app(app_state) -> FastAPI:
         return {
             "queue": q,
             "stats": {
-                "running": len(running), "concurrency": s["concurrency"],
+                "running": len(running), "concurrency": S.runner.eff_concurrency(s),
                 "waiting": len(waiting) + playlists_pending,
                 "paused": sum(1 for j in q if j["paused"] and j["kind"] == "video"),
                 "size_est": sum((j["size_est"] or 0) for j in waiting),
@@ -113,6 +113,7 @@ def create_app(app_state) -> FastAPI:
                 "rate_limit": s["rate_limit_mbps"] if s["rate_limit_enabled"] else None,
                 "today": S.db.stats_today(),
             },
+            "cpu": S.runner.cpu.out(),
             "queue_paused": bool(S.db.kv_get("queue_paused", False)),
             "pause_reason": S.db.kv_get("queue_pause_reason"),
             "target_error": S.db.kv_get("target_error"),
@@ -428,6 +429,20 @@ def create_app(app_state) -> FastAPI:
         else:
             n = S.db.delete_history(body.get("ids"), int(body.get("view") or 0), scope)
         return {"deleted": n, "archive_removed": forgot}
+
+    @app.post("/api/restart")
+    async def restart_app():
+        """Řádně ukončí aplikaci a spustí ji znovu (rozpracovaná stahování se vrátí do fronty)."""
+        stop = getattr(S, "stop", None)
+        if stop is None:
+            raise HTTPException(501, "Restart není v tomto režimu k dispozici")
+        S.restart = True
+        asyncio.get_running_loop().call_later(0.5, stop.set)
+        return {"ok": True, "docker": in_docker()}
+
+    @app.get("/api/cpu")
+    async def cpu_info():
+        return dict(S.runner.cpu.out(), history=list(S.runner.cpu.history), step=2)
 
     # ------------------------------------------------------------ statistiky
     @app.get("/api/stats")

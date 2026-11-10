@@ -7,6 +7,7 @@ import logging
 import logging.handlers
 import os
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -18,7 +19,7 @@ from .config import Secrets, Settings, data_dir
 from .db import DB
 from .engines import EngineManager
 from .runner import Runner
-from .util import env_flag
+from .util import env_flag, in_docker
 
 log = logging.getLogger("viddown")
 
@@ -102,6 +103,8 @@ class AppState:
         self._eng_cache = (0.0, [])
         self.chromium_busy = False
         self.stopping = False
+        self.restart = False     # po ukončení se má aplikace spustit znovu
+        self.stop = None         # asyncio.Event hlavní smyčky
 
     def _engine_notify(self, key, **kw):
         if self.bot:
@@ -156,6 +159,14 @@ def serve(open_browser: bool = False, host: str | None = None, port: int | None 
             (data / "daemon.json").unlink()
         except OSError:
             pass
+    if st.restart and not in_docker():
+        # mimo Docker se spustí nový proces (v Dockeru se kontejner restartuje sám díky `restart: unless-stopped`)
+        argv = [sys.executable, *getattr(sys, "orig_argv", sys.argv)[1:]]
+        log.info("Restart: %s", argv)
+        if sys.platform == "win32":
+            subprocess.Popen(argv)
+        else:
+            os.execv(argv[0], argv)
     return 0
 
 
@@ -166,6 +177,7 @@ async def _main(st: AppState, host: str, port: int, open_browser: bool) -> None:
     from .telegram import TelegramBot
 
     stop = asyncio.Event()
+    st.stop = stop
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:

@@ -15,7 +15,7 @@ import shutil
 import time
 from pathlib import Path
 
-from . import subscriptions, thumbs
+from . import cpu, subscriptions, thumbs
 from .config import Settings
 from .db import ACTIVE, DB
 from .i18n import t
@@ -51,6 +51,7 @@ class Runner:
         self.settings = settings
         self.engines = engines
         self.data = data
+        self.cpu = cpu.Monitor()
         self.running: dict[int, tuple[asyncio.Task, ProcHolder]] = {}
         self.probing: dict[int, asyncio.Task] = {}
         self.stop_reason: dict[int, str] = {}
@@ -88,12 +89,19 @@ class Runner:
         return self.settings.get("language", "cs")
 
     # ------------------------------------------------------------ hlavní smyčka
+    def eff_concurrency(self, s: dict) -> int:
+        """Souběžná stahování po zohlednění režimu výkonu (Šetrný = nejvýše 1)."""
+        n = int(s["concurrency"])
+        cap = cpu.MODES.get(s.get("perf_mode", "full"), cpu.MODES["full"])[2]
+        return min(n, cap) if cap else n
+
     async def run(self, stop: asyncio.Event) -> None:
         self.db.recover()
         self._finish_cancelling()
         last_purge = 0.0
         while not stop.is_set():
             try:
+                self.cpu.sample(str(self.settings.get("perf_mode", "full")))
                 await self.tick()
                 if time.time() - last_purge > 3600:
                     last_purge = time.time()
@@ -200,7 +208,7 @@ class Runner:
             return
 
         # 4) spuštění dalších úloh v pořadí fronty
-        slots = int(s["concurrency"]) - len(self.running)
+        slots = self.eff_concurrency(s) - len(self.running)
         if slots <= 0:
             return
         for job in self.db.query(
@@ -215,7 +223,7 @@ class Runner:
                 # Pauza mezi videi z playlistu (ochrana proti zablokování) platí pro každý souběžný slot zvlášť:
                 # najednou se rozjede až `concurrency` videí a každý slot pak před dalším videem počká 5–15 s.
                 gates = [g for g in self.sibling_gate.get(pid, []) if g > now]
-                if len(gates) >= int(s["concurrency"]):
+                if len(gates) >= self.eff_concurrency(s):
                     self.sibling_gate[pid] = gates
                     continue
                 gates.append(now + random.uniform(float(s.get("sleep_min", 5)), float(s.get("sleep_max", 15))))

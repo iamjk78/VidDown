@@ -105,6 +105,9 @@ def size_estimate(info: dict) -> int | None:
     return total or None
 
 
+from ..cpu import MODES  # noqa: E402
+
+
 async def download(url: str, info: dict | None, ctx: Ctx, staging: Path, name: str, rate_bps: int | None,
                    on_progress, holder: ProcHolder, audio_only: bool | None = None, no_subs: bool = False) -> dict:
     """Stáhne video do staging. Vrací {"file": Path, "thumb": Path|None} nebo {"skipped": důvod}."""
@@ -130,6 +133,9 @@ async def download(url: str, info: dict | None, ctx: Ctx, staging: Path, name: s
         cmd += ["--match-filter", "!is_live"]
     if rate_bps:
         cmd += ["-r", str(int(rate_bps))]
+    threads = MODES.get(s.get("perf_mode", "full"), MODES["full"])[1]
+    if threads:
+        cmd += ["--postprocessor-args", f"ffmpeg:-threads {threads}"]
     cmd.append(url)
 
     # odhad celkové velikosti přes všechny části (video + audio)
