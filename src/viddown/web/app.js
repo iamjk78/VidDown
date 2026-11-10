@@ -321,7 +321,7 @@ function renderQueueDyn() {
    ${!st.pause_hard && running.length ? `<button class="btn sm" data-q="pause_all" title="${T('Přeruší i rozpracovaná stahování. Stahování z internetu po obnovení naváže, zpracování ffmpeg začne znovu od začátku.', 'Interrupts downloads in progress too. Downloading resumes, ffmpeg processing restarts from the beginning.')}">${ic('pause', 13)} ${T('Pozastavit vše', 'Pause all')}</button>` : ''}</div>`;
   html += running.length ? `<div class="col gap10">${running.map(runHtml).join('')}</div>`
     : `<div class="card empty" style="padding:22px">${T('Nic se právě nestahuje.', 'Nothing is downloading right now.')}</div>`;
-  html += `<div class="sec"><h2>${T('Čeká ve frontě', 'Waiting')}</h2><span class="chip"><b>${f ? waiting.length + ' / ' + waitingAll.length : waiting.length}</b></span><span class="grow"></span><button class="btn sm ${thumbsOn() ? '' : 'ghost'}" id="qth" title="${T('Zobrazit nebo skrýt miniatury ve frontě', 'Show or hide thumbnails in the queue')}">${ic('film', 13)} ${T('Miniatury', 'Thumbnails')}: ${thumbsOn() ? T('zap', 'on') : T('vyp', 'off')}</button>${waitingAll.length > 1 || f ? `<div class="inwrap" style="height:30px;width:240px">${ic('search', 14)}<input id="qf" placeholder="${T('Filtrovat podle názvu…', 'Filter by name…')}" value="${esc(App.qf || '')}" autocomplete="off"></div>` : ''}<span class="t2 fs12 row gap6">${ic('grip', 14)} ${T('Přetažením změníte pořadí', 'Drag to reorder')}</span></div>`;
+  html += `<div class="sec"><h2>${T('Čeká ve frontě', 'Waiting')}</h2><span class="chip"><b>${f ? waiting.length + ' / ' + waitingAll.length : waiting.length}</b></span><span class="grow"></span><button class="btn sm ${thumbsOn() ? '' : 'ghost'}" id="qth" title="${T('Zobrazit nebo skrýt miniatury ve frontě', 'Show or hide thumbnails in the queue')}">${ic('film', 13)} ${T('Miniatury', 'Thumbnails')}: ${thumbsOn() ? T('zap', 'on') : T('vyp', 'off')}</button>${waitingAll.length > 1 || f ? `<div class="inwrap" style="height:30px;width:240px">${ic('search', 14)}<input id="qf" placeholder="${T('Filtrovat podle názvu…', 'Filter by name…')}" value="${esc(App.qf || '')}" autocomplete="off">${App.qf ? `<button class="ibtn" id="qfx" type="button" title="${T('Smazat filtr (Esc)', 'Clear filter (Esc)')}" style="width:22px;height:22px">${ic('x', 13)}</button>` : ''}</div>` : ''}<span class="t2 fs12 row gap6">${ic('grip', 14)} ${T('Přetažením změníte pořadí', 'Drag to reorder')}</span></div>`;
   if (f && !waiting.length && waitingAll.length) {
     html += `<div class="card empty" style="padding:22px">${T('Filtru neodpovídá žádná čekající položka.', 'No waiting item matches the filter.')}</div>`;
   } else if (!waiting.length && !running.length && !confirm.length) {
@@ -362,6 +362,9 @@ function renderQueueDyn() {
   const qf = $('#qf', box);
   if (qf) {
     qf.oninput = e => { App.qf = e.target.value; renderQueueDyn(); };
+    const clearQf = () => { App.qf = ''; renderQueueDyn(); const n = $('#qf'); if (n) n.focus(); };
+    qf.onkeydown = e => { if (e.key === 'Escape' && App.qf) { e.preventDefault(); clearQf(); } };
+    const x = $('#qfx', box); if (x) x.onclick = clearQf;
     if (wasFocused) { qf.focus(); qf.setSelectionRange(caret, caret); }
   }
 }
@@ -733,7 +736,7 @@ async function renderHistory(host, sub = null) {
   if ((H.sub || null) !== sub) { H.q = ''; H.status = ''; resetSel(); }
   H.sub = sub;
   (host || $('#main')).innerHTML = `<div class="row gap10 wrap">${sub ? '' : `<h1>${T('Historie', 'History')}</h1>`}<span class="t2" id="htot" style="margin-left:6px"></span><span class="grow"></span>
-   <div class="inwrap" style="height:32px;width:260px">${ic('search', 15)}<input id="hq" placeholder="${T('Hledat v historii…', 'Search history…')}" value="${esc(H.q)}"></div>
+   <div class="inwrap" style="height:32px;width:260px">${ic('search', 15)}<input id="hq" placeholder="${T('Hledat v historii…', 'Search history…')}" value="${esc(H.q)}"><button class="ibtn" id="hqx" type="button" title="${T('Smazat hledání (Esc)', 'Clear search (Esc)')}" style="width:22px;height:22px;${H.q ? '' : 'display:none'}">${ic('x', 13)}</button></div>
    <span class="seg" id="hst">${[['', T('Vše', 'All')], ['done', T('Hotovo', 'Done')], ['failed', T('Chyby', 'Failed')], ['cancelled', T('Zrušeno', 'Cancelled')], ['skipped', T('Přeskočeno', 'Skipped')]].map(([v, l]) => `<button class="${H.status === v ? 'on' : ''}" data-v="${v}">${l}</button>`).join('')}</span>
    <select class="input sm" id="hdays" style="width:170px">${[[1, T('Posledních 24 h', 'Last 24 h')], [7, T('Posledních 7 dní', 'Last 7 days')], [30, T('Posledních 30 dní', 'Last 30 days')], [0, T('Vše', 'All time')]].map(([v, l]) => `<option value="${v}" ${H.days === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
    ${(sub || (App.st.subs || []).length) ? `<label class="row gap6 fs12" style="cursor:pointer" title="${sub ? T('Záznam zůstane jinak v celkové historii.', 'Otherwise the record stays in the global history.') : T('Záznamy z odběrů zůstanou jinak v historii příslušného odběru.', 'Otherwise records from subscriptions stay in that subscription\'s history.')}"><input type="checkbox" id="hboth" ${H.both ? 'checked' : ''}>${sub ? T('i z celkové historie', 'also from global history') : T('i z historie odběrů', 'also from subscription histories')}</label>` : ''}
@@ -741,7 +744,9 @@ async function renderHistory(host, sub = null) {
    <div id="hbulk"></div>
    <div class="card" style="overflow:hidden" id="hlist"><div class="empty"><div class="spin" style="margin:auto"></div></div></div>
    <div class="row gap10 wrap" id="hpager"></div>`;
-  let tmr; $('#hq').oninput = e => { clearTimeout(tmr); tmr = setTimeout(() => { H.q = e.target.value; H.offset = 0; resetSel(); loadHistory(); }, 300); };
+  const hqx = $('#hqx'), hqClear = () => { const el = $('#hq'); el.value = ''; hqx.style.display = 'none'; H.q = ''; H.offset = 0; resetSel(); loadHistory(); el.focus(); };
+  hqx.onclick = hqClear; $('#hq').onkeydown = e => { if (e.key === 'Escape' && $('#hq').value) { e.preventDefault(); hqClear(); } };
+  let tmr; $('#hq').oninput = e => { hqx.style.display = e.target.value ? '' : 'none'; clearTimeout(tmr); tmr = setTimeout(() => { H.q = e.target.value; H.offset = 0; resetSel(); loadHistory(); }, 300); };
   $$('#hst button').forEach(b => b.onclick = () => { H.status = b.dataset.v; H.offset = 0; resetSel(); $$('#hst button').forEach(x => x.classList.toggle('on', x === b)); loadHistory(); });
   $('#hdays').onchange = e => { H.days = +e.target.value; H.offset = 0; resetSel(); loadHistory(); };
   const hb = $('#hboth'); if (hb) hb.onchange = e => { H.both = e.target.checked; };
