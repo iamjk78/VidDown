@@ -266,6 +266,61 @@ src/viddown/
 - **Sniffer a limit rychlosti:** limit rychlosti platí jen pro yt-dlp (ffmpeg ho neumí).
 - **Licence přibaleného ffmpeg** (GPL build z eugeneware/ffmpeg-static) – při veřejné distribuci balíčků je potřeba přiložit licenci a odkaz na zdrojový kód.
 
-## 17. Inspirace
+## 17. Odběry a Statistiky (návrh, zatím neimplementováno)
+
+### 17.1 Odběry
+
+**Co to je.** Nové menu **Odběry**. Odběr = URL kanálu (nebo playlistu) + složka + datum „od kdy“. Aplikace sama pravidelně hledá nová videa a řadí je do běžné fronty. Odběry se zakládají a upravují **jen v GUI** (CLI a Telegram je neumí).
+
+**Nastavení odběru** (dialog „Přidat odběr“, po zadání URL se zobrazí název, miniatura a počet nalezených videí):
+- **URL kanálu / playlistu** (cokoli, co yt-dlp vypíše jako seznam; YouTube kanál se bere po záložkách videa/shorts/živě podle globálního nastavení, u odběru jde přepsat).
+- **Složka pro tento odběr** – absolutní cesta, při uložení se ověří zápis stejně jako u cílové složky; výchozí `<cílová složka>/<kanál>`.
+- **Stahovat od data** – předvolby „jen nové od teď“, „od minulého měsíce“, „od data…“ (kalendář), „vše“. Starší videa se nikdy nestáhnou; nová od data až po budoucí ano.
+- Zapnuto/pozastaveno. Kontrola hned tlačítkem „Zkontrolovat teď“.
+- Kvalita, šablona názvu a ostatní volby se berou z globálního nastavení (v první verzi bez přepsání).
+
+**Kontrola nových videí.**
+- Interval globálně v Nastavení (výchozí 6 h), běží jen když fronta není pozastavená; odběry se kontrolují postupně (žádná dávka dotazů najednou), při HTTP 429 se kontrola odloží.
+- Postup: seznam od nejnovějších (`--flat-playlist`), u neznámých ID se zjistí datum nahrání; čtení se zastaví u prvního videa starší než „od data“. Přeskakují se videa v `archive.txt`, videa už vedená v databázi, živá vysílání a premiéry (stáhnou se při dalším kontrolním běhu, až skončí).
+- Nová videa se zařadí na konec fronty jako běžné úlohy se zdrojem „odběr“ (bez potvrzování); při **první** kontrole se nad prahem (výchozí 50 videí) zeptá, jako u playlistů.
+- Chyba kontroly (kanál smazán, vyžaduje přihlášení…) se zobrazí u odběru a odběr se nezastaví; kontrola se zopakuje při dalším běhu.
+
+**Podmenu a historie.** V bočním panelu je pod položkou Odběry seznam odběrů; každý má vlastní stránku se záložkami **Fronta**, **Historie**, **Nastavení**. Stránka Odběry (přehled) ukazuje karty: miniatura, název, počet nových videí, poslední kontrola, stav.
+- **Fronta** odběru = běžná fronta vyfiltrovaná na odběr (pořadí, pauza, odstranění fungují stejně).
+- **Historie** odběru = stejný seznam jako globální historie (stránkování, hledání, přehrávání, hromadný výběr), jen s filtrem na odběr.
+- **Jedna úloha, dva pohledy:** záznam je v databázi jednou (`jobs.sub_id`). Odstranění z historie se zeptá, odkud: **jen z historie odběru**, **jen z celkové historie**, nebo **z obou** (hromadný výběr včetně volby „odstranit i z archivu stažených“). Technicky dva příznaky skrytí (`hide_sub`, `hide_global`); záznam se fyzicky smaže, až když je skrytý z obou míst, nebo při volbě „z obou“.
+- Smazání odběru: dotaz, jestli zachovat stažené záznamy v celkové historii (výchozí) nebo je odstranit; stažené soubory se nikdy nemažou.
+
+### 17.2 Statistiky
+
+Nové menu **Statistiky** s přepínačem období: 24 h, 7 dní, 30 dní, 12 měsíců, vše, vlastní rozsah (od–do).
+- **Přehled:** počet stažených videí, objem dat, průměr za den, úspěšnost (hotovo / chyba), celkový čas stahování.
+- **Grafy:** sloupce po dnech (týdnech u delších období) s přepínačem počet / objem; **podle kanálu** (nejvíc stahované), **podle zdroje** (GUI, CLI, Telegram, odběr), **podle metody** (yt-dlp / sniffer), **podle webu**.
+- Tabulka kanálů s počtem a objemem; klik na kanál otevře jeho odběr nebo vyhledá v historii.
+- **Statistiky nezávisí na historii:** při dokončení každého stažení se zapíše řádek do samostatné tabulky `downloads` (datum, kanál, web, zdroj, metoda, velikost, doba, odběr). Smazání historie ani odstranění záznamů statistiky nemění. Při zavedení se tabulka jednorázově naplní z dosavadních hotových úloh. Tlačítko „Vynulovat statistiky“ s potvrzením.
+
+### 17.3 Technické změny
+
+- **Verzované migrace databáze** (`pragma user_version`) – nutné před první změnou schématu; stávající databáze se upgraduje beze ztráty dat.
+- Nové tabulky `subscriptions` (id, url, název, miniatura, složka, od data, záložky, zapnuto, poslední kontrola, poslední chyba, vytvořeno) a `downloads` (viz výše); nové sloupce `jobs.sub_id`, `jobs.hide_sub`, `jobs.hide_global`.
+- Rozhraní: `/api/subscriptions` (seznam, vytvoření s kontrolou URL a složky, úprava, smazání, „zkontrolovat teď“), `/api/history?sub=ID`, `/api/stats?from=&to=&group=`.
+- Kontrola odběrů je součást smyčky runneru (jako automatická aktualizace enginů), ne samostatný proces.
+- Testy: kontrola nových videí s podvrženým yt-dlp (datum, archiv, deduplikace, živé přenosy), semantika skrytí/smazání z historií, agregace statistik, migrace.
+
+### 17.4 Etapy
+
+1. Migrace databáze + `subscriptions` + kontrola nových videí + API (bez GUI) + testy.
+2. GUI Odběry (přehled, přidání, podmenu s frontou, historií a nastavením).
+3. Dvojí historie (příznaky skrytí, volba „z jedné / z obou“).
+4. Tabulka `downloads` + API + GUI Statistiky.
+
+### 17.5 K potvrzení (navržené výchozí hodnoty)
+
+- Interval kontroly globálně 6 h (bez nastavení u jednotlivého odběru).
+- Odběr funguje pro kanály i playlisty z libovolného webu, který yt-dlp umí vypsat; první verze testována na YouTube.
+- Shorts a živé záložky se u odběru výchozí vypnuté (jen „videa“).
+- Kvalita a šablona názvu zůstávají globální.
+
+## 18. Inspirace
 
 Myšlenky z projektu [puemos/hls-downloader](https://github.com/puemos/hls-downloader) (MIT): detekce HLS playlistů, parsování m3u8, fragmenty, AES-128, spojování.
