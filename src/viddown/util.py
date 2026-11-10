@@ -219,7 +219,7 @@ ERROR_PATTERNS = [
     ("geo", r"not available in your country|geo.?restrict|geoblock"),
     ("removed", r"video unavailable|has been removed|does not exist|404: not found|account.*terminated|video is no longer"),
     ("live", r"live event will begin|is live|premieres in"),
-    ("network", r"timed out|timeout|connection|temporary failure|http error 5\d\d|reset by peer|network|name resolution|ssl"),
+    ("network", r"too many requests|http error 429|timed out|timeout|connection|temporary failure|http error 5\d\d|reset by peer|network|name resolution|ssl"),
 ]
 
 

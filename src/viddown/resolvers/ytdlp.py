@@ -103,7 +103,7 @@ def size_estimate(info: dict) -> int | None:
 
 
 async def download(url: str, info: dict | None, ctx: Ctx, staging: Path, name: str, rate_bps: int | None,
-                   on_progress, holder: ProcHolder, audio_only: bool | None = None) -> dict:
+                   on_progress, holder: ProcHolder, audio_only: bool | None = None, no_subs: bool = False) -> dict:
     """Stáhne video do staging. Vrací {"file": Path, "thumb": Path|None} nebo {"skipped": důvod}."""
     s = ctx.settings
     staging.mkdir(parents=True, exist_ok=True)
@@ -116,7 +116,8 @@ async def download(url: str, info: dict | None, ctx: Ctx, staging: Path, name: s
             "--download-archive", str(ctx.data / "archive.txt")]
     if s.get("embed_metadata"):
         cmd += ["--embed-thumbnail", "--embed-metadata", "--embed-chapters"]
-    if s.get("subtitles"):
+    use_subs = bool(s.get("subtitles")) and not no_subs
+    if use_subs:
         cmd += ["--write-subs", "--sub-langs", s.get("subtitle_langs") or "cs,en", "--embed-subs"]
         if s.get("auto_subtitles"):
             cmd += ["--write-auto-subs"]
@@ -179,6 +180,10 @@ async def download(url: str, info: dict | None, ctx: Ctx, staging: Path, name: s
         return {"skipped": skipped}
     if code != 0 or not filepath:
         msg = _error_from("\n".join(tail))
+        if use_subs and "subtitle" in msg.lower():
+            # titulky jsou doplněk (YouTube je často omezuje – HTTP 429): video stáhneme i bez nich
+            log.warning("titulky se nepodařilo stáhnout (%s), zkouším bez titulků", msg)
+            return await download(url, info, ctx, staging, name, rate_bps, on_progress, holder, audio_only, no_subs=True)
         raise ResolveError(msg, classify_error(msg))
     fp = Path(filepath)
     thumb = fp.with_suffix(".jpg")
