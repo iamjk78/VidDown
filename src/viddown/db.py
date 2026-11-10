@@ -139,12 +139,17 @@ alter table downloads add column t_post real;    -- doba zpracování po stažen
 alter table downloads add column t_move real;    -- doba přesunu do cílové složky
 """
 
+PAGE_SUBS_V6 = """
+alter table subscriptions add column config text;    -- JSON nastavení odběru typu 'page' (vzor odkazů, stránkování)
+"""
+
 MIGRATIONS: list[tuple[int, object]] = [
     (1, SCHEMA),   # základní schéma (VidDown 0.1.0)
     (2, SUBSCRIPTIONS_V2),   # odběry
     (3, HISTORY_FLAGS_V3),   # dvojí historie (celková + odběr)
     (4, _downloads_v4),      # statistiky stahování
     (5, PHASES_V5),          # fáze stahování
+    (6, PAGE_SUBS_V6),       # odběr ze stránky s videi
 ]
 
 
@@ -467,7 +472,7 @@ class DB:
     def sub_add(self, url: str, folder: str, **fields) -> int:
         now = time.time()
         cols = {"url": url, "folder": folder, "created_at": now, "updated_at": now, **fields}
-        for k in ("tabs", "seen_old", "pending"):
+        for k in ("tabs", "seen_old", "pending", "config"):
             if k in cols and not isinstance(cols[k], (str, type(None))):
                 cols[k] = json.dumps(cols[k], ensure_ascii=False)
         with self.conn() as c:
@@ -485,7 +490,7 @@ class DB:
         if not kw:
             return
         kw["updated_at"] = time.time()
-        for k in ("tabs", "seen_old", "pending"):
+        for k in ("tabs", "seen_old", "pending", "config"):
             if k in kw and not isinstance(kw[k], (str, type(None))):
                 kw[k] = json.dumps(kw[k], ensure_ascii=False)
         with self.conn() as c:

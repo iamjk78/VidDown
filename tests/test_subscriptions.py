@@ -440,3 +440,83 @@ def test_tick_soft_pause_keeps_running_job_hard_pause_stops_it(rt):
 
     assert run(go(False)) == ({}, 0)
     assert run(go(True)) == ({jid: "queue"}, 1)
+
+
+# ---------------------------------------------------------------- odběr ze stránky s videi
+def _page_html(items, page):
+    rows = "".join(f"<h2><a href='https://w.example/tv?id=28&pg={page}&video={vid}'>{title}</a></h2>"
+                   f"<a href='https://w.example/tv?id=28&pg={page}&video={vid}'><img src='x.jpg'></a>"
+                   f"<a href='https://w.example/tv?id=28&pg={page}&video={vid}'>Zobraziť video</a>" for vid, title in items)
+    pager = "".join(f"<a href='https://w.example/tv?id=28&amp;pg={i}'>{i}</a>" for i in (1, 2, 3, 9))
+    other = "<a href='/kontakt'>Kontakt</a><a href='/o-nas'>O nás</a>"
+    return f"<html><head><title>TV RELÁCIA</title><base href='https://w.example'></head><body>{other}{rows}{pager}</body></html>"
+
+
+PAGES = {
+    "https://w.example/tv": _page_html([(105, "DIL 5 - 8.11.2026"), (104, "DIL 4 - 25.10.2026")], 0),
+    "https://w.example/tv?id=28&pg=1": _page_html([(103, "DIL 3 - 18.10.2026"), (102, "DIL 2 - 1.3.2026")], 1),
+    "https://w.example/tv?id=28&pg=2": _page_html([(101, "DIL 1 - 8.1.2026")], 2),
+}
+
+
+@pytest.fixture()
+def fake_pages(monkeypatch):
+    calls = []
+
+    async def fetch(url, settings=None, timeout=30):
+        calls.append(url)
+        if url not in PAGES:
+            raise subs.pagelist.PageError("404")
+        return PAGES[url], url
+
+    monkeypatch.setattr(subs.pagelist, "fetch", fetch)
+    return calls
+
+
+def test_pagelist_detects_items_dates_and_paging(fake_pages):
+    d = run(subs.pagelist.analyze("https://w.example/tv"))
+    assert d["page_param"] == "pg" and d["page_start"] == 0 and d["page_template"] == "https://w.example/tv?id=28&pg={n}"
+    assert [(i["title"], i["date"]) for i in d["items"]] == [("DIL 5 - 8.11.2026", "2026-11-08"), ("DIL 4 - 25.10.2026", "2026-10-25")]
+    assert d["items"][0]["url"] == "https://w.example/tv?id=28&video=105"      # bez parametru stránkování
+    assert d["title"] == "TV RELÁCIA"
+    assert subs.pagelist.find_date("x 2026-11-08 y") == "2026-11-08" and subs.pagelist.find_date("bez data") is None
+
+
+def test_pagelist_stops_paging_when_page_is_older_than_since(fake_pages):
+    d = run(subs.pagelist.analyze("https://w.example/tv"))
+    sub = {"url": "https://w.example/tv", "config": json.dumps({k: d[k] for k in ("item_regex", "page_param", "page_start", "page_template")})}
+    ctx = type("C", (), {"settings": {}})
+    items = run(subs.pagelist.list_items(sub, ctx, 10, "2026-10-01"))
+    assert [i["date"] for i in items][:3] == ["2026-11-08", "2026-10-25", "2026-10-18"]
+    assert fake_pages[-1] == "https://w.example/tv?id=28&pg=2"   # strana 2 má jen starší díly → další se už nečte
+
+
+def test_page_subscription_check_queues_new_items_once(rt, tmp_path, fake_pages):
+    d = run(subs.pagelist.analyze("https://w.example/tv"))
+    cfg = {k: d[k] for k in ("item_regex", "page_param", "page_start", "page_template")}
+    sid = rt.db.sub_add("https://w.example/tv", str(tmp_path / "f"), kind="page", title="Moje relace", since="2026-10-01", config=cfg)
+    r = run(subs.check(rt, sid))
+    assert r["queued"] == 3 and r["pending"] == 0
+    jobs = rt.db.query("select * from jobs where sub_id=? order by id", (sid,))
+    assert [j["url"] for j in jobs] == [f"https://w.example/tv?id=28&video={v}" for v in (105, 104, 103)]
+    assert jobs[0]["title"] == "DIL 5 - 8.11.2026" and jobs[0]["channel"] == "Moje relace" and jobs[0]["target_dir"] == str(tmp_path / "f")
+    # druhá kontrola nepřidá nic; ani když se hotové úlohy smažou z historie
+    assert run(subs.check(rt, sid))["queued"] == 0
+    rt.db.query("select 1")
+    with rt.db.conn() as c:
+        c.execute("delete from jobs where sub_id=?", (sid,))
+    assert run(subs.check(rt, sid))["queued"] == 0
+
+
+def test_api_page_subscription_with_name(client, tmp_path, fake_pages):
+    c, rt = client
+    p = c.post("/api/subscriptions/preview-page", json={"url": "https://w.example/tv"}).json()
+    assert p["page_param"] == "pg" and len(p["items"]) == 2
+    assert c.post("/api/subscriptions/preview-page", json={"url": "https://w.example/nic"}).status_code == 400
+    r = c.post("/api/subscriptions", json={"url": "https://w.example/tv", "kind": "page", "title": "Autosalón", "since": "now",
+                                           "folder": str(tmp_path / "as")})
+    assert r.status_code == 200, r.text
+    s = r.json()
+    assert s["kind"] == "page" and s["title"] == "Autosalón" and s["config"]["page_param"] == "pg"
+    assert c.post("/api/subscriptions", json={"url": "https://w.example/tv", "kind": "page"}).status_code == 409
+    assert c.post("/api/subscriptions", json={"url": "https://w.example/bad", "kind": "page"}).status_code == 400

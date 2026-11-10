@@ -313,7 +313,7 @@ document.addEventListener('drop', async e => {
 /* ------------------------------------------------------------ odběry */
 const subList = () => (App.st && App.st.subs) || [];
 const subById = id => subList().find(s => s.id === id);
-const subKind = s => s.kind === 'playlist' ? 'Playlist' : T('Kanál', 'Channel');
+const subKind = s => s.kind === 'playlist' ? 'Playlist' : s.kind === 'page' ? T('Stránka', 'Page') : T('Kanál', 'Channel');
 const sinceTxt = s => s.since ? T('od ', 'since ') + new Date(s.since + 'T00:00:00').toLocaleDateString(LANG === 'cs' ? 'cs-CZ' : 'en-GB') : T('všechna videa', 'all videos');
 function subThumb(s, size = 48) {
   const img = s.thumb_url ? `<img src="${esc(s.thumb_url)}" referrerpolicy="no-referrer" loading="lazy" alt="" onerror="this.remove()">` : '';
@@ -384,23 +384,53 @@ function renderSubNew() {
   $('#main').innerHTML = `<div class="row gap10"><button class="btn ghost sm" data-go="subs">${ic('right', 12).replace('M9 6l6 6-6 6', 'M15 6l-6 6 6 6')} ${T('Odběry', 'Subscriptions')}</button></div>
    <div><h1>${T('Přidat odběr', 'Add subscription')}</h1></div>
    <div class="card col gap16" style="padding:20px;max-width:720px">
-    <label class="col gap6"><span class="fs12 b6">${T('URL kanálu nebo playlistu', 'Channel or playlist URL')}</span><input class="input" id="sau" placeholder="https://www.youtube.com/@kanal" autocomplete="off"></label>
+    <div class="col gap6"><span class="fs12 b6">${T('Zdroj', 'Source')}</span>
+     <span class="seg" id="samode" style="align-self:flex-start"><button data-v="feed" class="on">${T('Kanál nebo playlist', 'Channel or playlist')}</button><button data-v="page">${T('Stránka s videi', 'Page with videos')}</button></span>
+     <span class="fs12 muted" id="samodehint">${T('YouTube a další weby, které yt-dlp umí vypsat jako kanál nebo playlist.', 'YouTube and other sites yt-dlp can list as a channel or playlist.')}</span></div>
+    <label class="col gap6"><span class="fs12 b6" id="saulab">${T('URL kanálu nebo playlistu', 'Channel or playlist URL')}</span><input class="input" id="sau" placeholder="https://www.youtube.com/@kanal" autocomplete="off"></label>
+    <div id="sapage" class="col gap10" style="display:none">
+     <div class="row gap8"><button class="btn" id="sapv">${ic('search', 14)} ${T('Zkontrolovat stránku', 'Check the page')}</button><span class="fs12 muted">${T('Najde na stránce seznam videí a jejich data.', 'Finds the list of videos and their dates on the page.')}</span></div>
+     <div id="sapvbox"></div></div>
+    <label class="col gap6"><span class="fs12 b6">${T('Název (nepovinné)', 'Name (optional)')}</span><input class="input" id="sat" placeholder="${T('Zobrazí se v menu. Prázdné = název zdroje', 'Shown in the menu. Empty = source name')}" autocomplete="off"></label>
     <div class="col gap6"><span class="fs12 b6">${T('Složka pro videa tohoto odběru', 'Folder for this subscription')}</span>
      <div class="row gap8"><input class="input grow mono fs12" id="saf" placeholder="${T('Nevyplněno = cílová složka / název kanálu', 'Empty = download folder / channel name')}"><button class="btn" id="sabr">${ic('folder', 14)} ${T('Vybrat…', 'Browse…')}</button></div>
      <span class="fs12 muted">${T('Při uložení se ověří, že do složky jde zapisovat.', 'Write access is checked when you save.')}</span></div>
     <div class="col gap6"><span class="fs12 b6">${T('Stahovat videa', 'Download videos')}</span>${sinceControl('sa', since, true)}
      <span class="fs12 muted">${T('Starší videa se nestáhnou. Nová videa po tomto datu ano, i v budoucnu.', 'Older videos are not downloaded. New ones after this date are, also in the future.')}</span></div>
-    <div class="col gap6"><span class="fs12 b6">${T('Z kanálu YouTube stahovat', 'From a YouTube channel download')}</span>${tabsControl('sa', tabs)}</div>
+    <div class="col gap6" id="satabs"><span class="fs12 b6">${T('Z kanálu YouTube stahovat', 'From a YouTube channel download')}</span>${tabsControl('sa', tabs)}</div>
     <div class="banner" id="saerr" style="display:none"></div>
     <div class="row gap8"><button class="btn primary lg" id="saok">${ic('plus', 14)} ${T('Přidat odběr', 'Add subscription')}</button><button class="btn lg" data-go="subs">${T('Zrušit', 'Cancel')}</button></div></div>`;
   bindSince('sa', since); bindTabs('sa', tabs);
   $('#sabr').onclick = () => openDirPicker($('#saf').value || App.settings.values.download_dir, p => { $('#saf').value = p; });
+  let mode = 'feed', det = null;
+  $$('#samode button').forEach(b => b.onclick = () => {
+    mode = b.dataset.v; det = null; $('#sapvbox').innerHTML = '';
+    $$('#samode button').forEach(x => x.classList.toggle('on', x === b));
+    $('#sapage').style.display = mode === 'page' ? 'flex' : 'none'; $('#satabs').style.display = mode === 'page' ? 'none' : '';
+    $('#saulab').textContent = mode === 'page' ? T('URL stránky se seznamem videí', 'URL of the page listing the videos') : T('URL kanálu nebo playlistu', 'Channel or playlist URL');
+    $('#sau').placeholder = mode === 'page' ? 'https://www.example.com/tv-show' : 'https://www.youtube.com/@kanal';
+    $('#samodehint').textContent = mode === 'page' ? T('Web bez kanálu: seznam dílů s podstránkami, každý díl má vlastní stránku s videem.', 'A site without a channel: a list of episodes with sub-pages, each with its own video page.') : T('YouTube a další weby, které yt-dlp umí vypsat jako kanál nebo playlist.', 'YouTube and other sites yt-dlp can list as a channel or playlist.');
+  });
+  $('#sapv').onclick = async () => {
+    const url = $('#sau').value.trim(), box = $('#sapvbox'); if (!url) return toast(T('Zadejte URL stránky.', 'Enter the page URL.'));
+    box.innerHTML = `<div class="row gap8 t2 fs12"><span class="spin" style="width:13px;height:13px"></span> ${T('Načítám stránku…', 'Loading the page…')}</div>`;
+    try {
+      det = await api('/api/subscriptions/preview-page', { method: 'POST', body: { url } });
+      if (!$('#sat').value.trim() && det.title) $('#sat').placeholder = det.title;
+      box.innerHTML = `<div class="card" style="padding:12px 14px;background:var(--surface2)"><div class="fs12 b6" style="margin-bottom:6px">${T('Nalezeno', 'Found')}: ${det.items.length}${det.items.length >= 12 ? '+' : ''} ${T('videí (první stránka)', 'videos (first page)')} · ${det.page_param ? T('stránkování', 'paging') + ' ' + esc(det.page_param) : T('bez stránkování', 'no paging')}</div>
+        ${det.items.map(i => `<div class="row gap8 fs12" style="justify-content:space-between"><span class="ell">${esc(i.title || i.url)}</span><span class="t2" style="white-space:nowrap">${i.date ? esc(i.date) : T('bez data', 'no date')}</span></div>`).join('')}</div>
+        <details class="fs12"><summary class="t2" style="cursor:pointer">${T('Upřesnit (vzor odkazů, stránkování)', 'Advanced (link pattern, paging)')}</summary><div class="col gap8" style="margin-top:8px">
+         <label class="col gap4"><span class="b6">${T('Vzor odkazů na videa (regulární výraz)', 'Video link pattern (regular expression)')}</span><input class="input mono fs12" id="sare" value="${esc(det.item_regex)}"></label>
+         <label class="col gap4"><span class="b6">${T('Adresa další stránky ({n} = číslo)', 'Next-page URL ({n} = number)')}</span><input class="input mono fs12" id="sapt" value="${esc(det.page_template || '')}"></label></div></details>`;
+    } catch (e) { if (e.message !== 'auth') box.innerHTML = `<div class="banner">${ic('alert', 18)}<span class="grow">${esc(e.message)}</span></div>`; }
+  };
   const submit = async () => {
     const err = $('#saerr'); err.style.display = 'none';
     const btn = $('#saok'); const url = $('#sau').value.trim();
     try {
       if (!url) throw new Error(T('Zadejte URL kanálu nebo playlistu.', 'Enter a channel or playlist URL.'));
-      const body = { url, folder: $('#saf').value.trim(), since: sinceValue(since), tabs: tabsValue(tabs) };
+      const body = { url, folder: $('#saf').value.trim(), since: sinceValue(since), tabs: tabsValue(tabs), title: $('#sat').value.trim() };
+      if (mode === 'page') { body.kind = 'page'; if (det && $('#sare')) { body.item_regex = $('#sare').value.trim(); body.page_template = $('#sapt').value.trim(); } }
       btn.disabled = true; btn.innerHTML = `<span class="spin" style="width:13px;height:13px"></span> ${T('Kontroluji URL…', 'Checking URL…')}`;
       const r = await api('/api/subscriptions', { method: 'POST', body });
       toast(T('Odběr přidán', 'Subscription added')); if (App.st && App.st.subs && !subById(r.id)) App.st.subs.push(r); go(`sub/${r.id}`);

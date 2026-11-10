@@ -14,6 +14,7 @@ import json
 import logging
 import time
 
+from . import pagelist
 from .probe import _flatten
 from .resolvers import ResolveError, ytdlp
 from .util import youtube_channel_base
@@ -53,6 +54,8 @@ def parse_since(value) -> str | None:
 
 
 def entry_date(e: dict) -> str | None:
+    if e.get("date") and len(str(e["date"])) == 10:     # datum z textu odkazu (odběr ze stránky)
+        return str(e["date"])
     ud = e.get("upload_date")
     if ud and len(str(ud)) == 8 and str(ud).isdigit():
         return f"{ud[:4]}-{ud[4:6]}-{ud[6:]}"
@@ -91,6 +94,12 @@ def due(db, hours: float, now: float | None = None) -> dict | None:
 async def list_sources(sub: dict, ctx, limit: int) -> list[list[dict]]:
     """Seznamy videí odběru od nejnovějších; u kanálu jeden seznam na záložku (videa / shorts / živě)."""
     url = sub["url"]
+    if sub["kind"] == "page":
+        pages = 60 if sub["last_check"] is None else 3
+        try:
+            return [await pagelist.list_items(sub, ctx, pages, sub["since"])]
+        except pagelist.PageError as e:
+            raise ResolveError(str(e), "other") from e
     base = youtube_channel_base(url) if sub["kind"] == "channel" else None
     if not base:
         info = await ytdlp.probe(url, ctx, playlist_end=limit)
@@ -169,6 +178,8 @@ async def check(runner, sid: int) -> dict:
             e["date"] = d
             new.append(e)
 
+    if sub["kind"] == "page":      # už zařazené díly se znovu nenabídnou, ani když se záznam z historie smaže
+        seen_old |= {str(e.get("id") or e["url"]) for e in new}
     seen_json = json.dumps(sorted(seen_old)[-SEEN_OLD_CAP:])
     if first and len(new) > threshold:
         pending = [{k: e.get(k) for k in ("url", "id", "title", "thumb_url", "duration", "channel", "date")} for e in new]

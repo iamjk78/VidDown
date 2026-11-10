@@ -6,16 +6,18 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import subprocess
 import sys
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import __version__, subscriptions, thumbs
+from . import __version__, pagelist, subscriptions, thumbs
 from .config import DEFAULTS, CHOICES, cookies_path
 from .probe import probe_url
 from .util import check_dir_writable, extract_urls, in_docker, in_schedule, sanitize_filename
@@ -285,6 +287,7 @@ def create_app(app_state) -> FastAPI:
         d = {k: s[k] for k in ("id", "url", "kind", "title", "thumb_url", "folder", "since", "enabled", "last_check",
                                "last_error", "created_at")}
         d["tabs"] = json.loads(s["tabs"]) if s["tabs"] else None
+        d["config"] = json.loads(s["config"]) if s.get("config") else None
         d["pending"] = len(json.loads(s["pending"])) if s["pending"] else 0
         d.update({"queued": 0, "running": 0, "done": 0, "failed": 0, "bytes": 0}, **counts.get(s["id"], {}))
         return d
@@ -309,6 +312,20 @@ def create_app(app_state) -> FastAPI:
         return {"items": [sub_out(s, counts) for s in S.db.sub_list()],
                 "check_hours": S.settings.get("subscription_check_hours")}
 
+    @app.post("/api/subscriptions/preview-page")
+    async def subs_preview_page(req: Request):
+        """Náhled odběru ze stránky: co by se našlo (díly s daty, vzor odkazů, stránkování)."""
+        body = await req.json()
+        urls = extract_urls(str(body.get("url") or ""))
+        if not urls:
+            raise HTTPException(400, "Zadejte platnou URL stránky se seznamem videí.")
+        try:
+            det = await pagelist.analyze(urls[0], S.settings.all())
+        except pagelist.PageError as e:
+            raise HTTPException(400, str(e))
+        det["items"] = det["items"][:12]
+        return det
+
     @app.post("/api/subscriptions")
     async def subs_add(req: Request):
         body = await req.json()
@@ -323,7 +340,29 @@ def create_app(app_state) -> FastAPI:
         except ValueError as e:
             raise HTTPException(400, str(e))
         tabs = parse_tabs(body.get("tabs"))
+        name = str(body.get("title") or "").strip() or None
+        if body.get("kind") == "page":
+            # odběr ze stránky s videi: bez kontroly přes yt-dlp, vzor odkazů najde a ověří pagelist
+            try:
+                det = await pagelist.analyze(url, S.settings.all())
+            except pagelist.PageError as e:
+                raise HTTPException(400, str(e))
+            cfg = {k: det.get(k) for k in ("item_regex", "page_param", "page_start", "page_template")}
+            for k in ("item_regex", "page_param", "page_template"):
+                if body.get(k) is not None and str(body[k]).strip():
+                    cfg[k] = str(body[k]).strip()
+            try:
+                re.compile(cfg["item_regex"])
+            except re.error as e:
+                raise HTTPException(400, f"Neplatný vzor odkazů: {e}")
+            title = name or det.get("title") or urlparse(url).netloc
+            folder = str(body.get("folder") or "").strip() or str(Path(S.settings.get("download_dir")) / sanitize_filename(title))
+            folder = await check_folder(folder)
+            sid = S.db.sub_add(url, folder, kind="page", title=title, since=since, config=cfg)
+            return sub_out(S.db.sub_get(sid), S.db.sub_counts())
         res = await probe_url(url, S.runner.ctx())
+        if name:
+            res["title"] = name
         if res["type"] == "none":
             raise HTTPException(400, f"URL se nepodařilo zkontrolovat: {res['error']}")
         if res["type"] not in ("channel", "playlist"):
