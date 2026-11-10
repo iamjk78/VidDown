@@ -84,6 +84,13 @@ class Runner:
                 except Exception:  # noqa: BLE001
                     log.exception("listener %s", event)
 
+    def pause_is_hard(self) -> bool:
+        """Pozastavená fronta přeruší i běžící úlohy, pokud jde o „Pozastavit vše“ nebo o jiný důvod než ruční pozastavení
+        (cookies, nedostupná cílová složka, málo místa). Ruční „Pozastavit frontu“ nechá rozpracované doběhnout."""
+        if not self.queue_paused():
+            return False
+        return bool(self.db.kv_get("queue_pause_hard", False)) or self.db.kv_get("queue_pause_reason") != "user"
+
     def queue_paused(self) -> bool:
         return bool(self.db.kv_get("queue_paused", False))
 
@@ -164,6 +171,7 @@ class Runner:
         disk = self.disk_status(s)
         disk_low = disk["low"] is not None
         qpaused = self.queue_paused()
+        hard = self.pause_is_hard()
         window = in_schedule(s, now)
         for jid, (task, holder) in list(self.running.items()):
             j = self.db.get(jid)
@@ -172,7 +180,7 @@ class Runner:
                 reason = "cancel"
             elif j["paused"]:
                 reason = "pause"
-            elif qpaused:
+            elif qpaused and hard:
                 reason = "queue"
             elif not window:
                 reason = "schedule"

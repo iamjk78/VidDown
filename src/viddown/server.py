@@ -120,6 +120,7 @@ def create_app(app_state) -> FastAPI:
             "cpu": S.runner.cpu.out(),
             "queue_paused": bool(S.db.kv_get("queue_paused", False)),
             "pause_reason": S.db.kv_get("queue_pause_reason"),
+            "pause_hard": S.runner.pause_is_hard(),
             "target_error": S.db.kv_get("target_error"),
             "cookies_error": S.db.kv_get("cookies_error"),
             "schedule": {"enabled": s["schedule_enabled"], "start": s["schedule_start"], "end": s["schedule_end"]},
@@ -264,12 +265,15 @@ def create_app(app_state) -> FastAPI:
 
     @app.post("/api/queue/{action}")
     async def queue_action(action: str):
-        if action == "pause":
+        if action in ("pause", "pause_all"):
+            # pause = nezačínat další, rozpracované doběhnou; pause_all = přerušit i rozpracované
             S.db.kv_set("queue_paused", True)
             S.db.kv_set("queue_pause_reason", "user")
+            S.db.kv_set("queue_pause_hard", action == "pause_all")
         elif action == "resume":
             S.db.kv_set("queue_paused", False)
             S.db.kv_set("queue_pause_reason", None)
+            S.db.kv_set("queue_pause_hard", False)
             S.db.kv_set("cookies_error", None)
         else:
             raise HTTPException(404)

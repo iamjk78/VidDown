@@ -402,3 +402,41 @@ def test_phases_recorded_and_stats_expose_them(client):
     assert rt.db.get(jid)["stage"] == "post"
     assert "temp_used" in rt.disk_status()
     assert set(c.get("/api/cpu").json()["rate_history"]) == {"net_in", "net_out", "io_w", "io_r"}
+
+
+def test_soft_and_hard_pause(client):
+    c, rt = client
+    assert not rt.pause_is_hard()
+    assert c.post("/api/queue/pause").status_code == 200
+    assert rt.queue_paused() and not rt.pause_is_hard()          # rozpracované doběhnou
+    assert c.post("/api/queue/pause_all").status_code == 200
+    assert rt.queue_paused() and rt.pause_is_hard()              # přeruší i běžící
+    assert c.post("/api/queue/resume").status_code == 200
+    assert not rt.queue_paused() and not rt.pause_is_hard()
+    rt.db.kv_set("queue_paused", True); rt.db.kv_set("queue_pause_reason", "cookies")
+    assert rt.pause_is_hard()                                    # jiné důvody (cookies, disk, cíl) zůstávají tvrdé
+
+
+def test_tick_soft_pause_keeps_running_job_hard_pause_stops_it(rt):
+    stopped = []
+
+    class H:
+        async def stop(self):
+            stopped.append(1)
+
+    async def fake():
+        await asyncio.sleep(0)
+
+    jid = rt.db.add("https://x/run", status="running")
+
+    async def go(hard):
+        rt.stop_reason.clear(); stopped.clear()
+        rt.db.kv_set("queue_paused", True); rt.db.kv_set("queue_pause_reason", "user"); rt.db.kv_set("queue_pause_hard", hard)
+        rt.running[jid] = (asyncio.ensure_future(fake()), H())
+        await rt.tick()
+        await asyncio.sleep(0.01)
+        rt.running.pop(jid, None)
+        return dict(rt.stop_reason), len(stopped)
+
+    assert run(go(False)) == ({}, 0)
+    assert run(go(True)) == ({jid: "queue"}, 1)
