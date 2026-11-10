@@ -304,3 +304,44 @@ def test_api_history_scope(client, tmp_path):
     assert c.get(f"/api/history?sub={sid}").json()["matched"] == 1
     assert c.request("DELETE", "/api/history", json={"filter": {"sub": sid}, "scope": "both"}).json()["deleted"] == 1
     assert rt.db.get(a) is None
+
+
+def test_stats_recorded_independent_of_history_and_reset(client, tmp_path):
+    c, rt = client
+    sid = add_sub(rt, tmp_path)
+    now = time.time()
+    for i, (ok, size) in enumerate([(True, 100), (True, 300), (False, 0)]):
+        jid = rt.db.add(f"https://www.youtube.com/watch?v={i}", source="subscription", sub_id=sid, channel="Kanal A")
+        rt.db.update(jid, status="done" if ok else "failed", filesize=size, started_at=now - 20, finished_at=now - 10, method="yt-dlp")
+        rt.db.record_download(rt.db.get(jid), ok)
+    rt.db.delete_history_matching(scope="both")
+    rt.db.delete_history_matching(sub=sid, scope="both")
+    r = c.get("/api/stats", params={"t0": now - 86400, "tz": 120}).json()
+    assert (r["done"], r["failed"], r["bytes"]) == (2, 1, 400)
+    assert r["channels"][0]["name"] == "Kanal A" and r["channels"][0]["n"] == 2
+    assert r["sites"][0]["name"] == "youtube.com" and r["sources"][0]["name"] == "subscription"
+    assert sum(x["n"] for x in r["series"]) == 2 and r["fmt"] == "%Y-%m-%d %H:00"
+    assert c.get("/api/stats", params={"t0": now - 86400, "sub": sid + 5}).json()["done"] == 0
+    assert c.get("/api/stats").json()["done"] == 2   # celé období
+    assert c.delete("/api/stats").json()["deleted"] == 3
+    assert c.get("/api/stats").json()["done"] == 0
+
+
+def test_migration_backfills_downloads(data):
+    import sqlite3
+    from viddown import db as dbm
+    path = data / "old.db"
+    con = sqlite3.connect(path)
+    con.executescript(dbm.SCHEMA)
+    con.execute("pragma user_version=3")
+    for v, sql in ((2, dbm.SUBSCRIPTIONS_V2), (3, dbm.HISTORY_FLAGS_V3)):
+        for st in dbm._split_sql(sql):
+            con.execute(st)
+    con.execute("insert into jobs(url,status,filesize,pos,created_at,updated_at,finished_at,started_at,channel) "
+                "values('https://www.vimeo.com/1','done',500,1,1,1,100,90,'C')")
+    con.execute("insert into jobs(url,status,pos,created_at,updated_at,finished_at) values('https://x.cz/2','failed',2,1,1,110)")
+    con.commit(); con.close()
+    d = DB(path)
+    assert d.schema_version == dbm.MIGRATIONS[-1][0]
+    rows = d.query("select * from downloads order by ts")
+    assert [(r["ok"], r["bytes"], r["site"]) for r in rows] == [(1, 500, "vimeo.com"), (0, 0, "x.cz")]

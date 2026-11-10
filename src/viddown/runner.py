@@ -542,7 +542,9 @@ class Runner:
         self.db.update(jid, status="done", filepath=str(dest), filesize=size, finished_at=time.time(), progress=1.0,
                        downloaded=size, total=size, speed=None, eta=None, method=method, error=None, error_kind=None)
         shutil.rmtree(staging, ignore_errors=True)
-        self.emit("on_done", self.db.get(jid))
+        done = self.db.get(jid)
+        self.db.record_download(done, True)
+        self.emit("on_done", done)
 
     def _failed(self, jid: int, msg: str, kind: str, staging: Path) -> None:
         job = self.db.get(jid)
@@ -564,6 +566,7 @@ class Runner:
         self.db.update(jid, status="failed", attempts=attempts, error=msg, error_kind=kind,
                        finished_at=time.time(), speed=None, eta=None)
         job = self.db.get(jid)
+        self.db.record_download(job, False)
         if not job["parent_id"]:
             self.emit("on_error", job, msg)
 

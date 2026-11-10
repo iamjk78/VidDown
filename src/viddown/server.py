@@ -429,6 +429,40 @@ def create_app(app_state) -> FastAPI:
             n = S.db.delete_history(body.get("ids"), int(body.get("view") or 0), scope)
         return {"deleted": n, "archive_removed": forgot}
 
+    # ------------------------------------------------------------ statistiky
+    @app.get("/api/stats")
+    async def stats(t0: float = 0, t1: float = 0, tz: int = 0, sub: int = 0):
+        now = time.time()
+        t1 = t1 or now + 1
+        if not t0:   # celé období: od prvního záznamu
+            r = S.db.query("select min(ts) m from downloads")[0]["m"]
+            t0 = min(r or now, t1 - 86400)
+        r = S.db.stats(t0, t1, tz, sub)
+        # doplnit prázdné intervaly, ať graf nemá mezery
+        step = {"%Y-%m-%d %H:00": 3600, "%Y-%m-%d": 86400}.get(r["fmt"])
+        have = {x["b"]: x for x in r["series"]}
+        out, off = [], tz * 60
+        if step:
+            cur = (int(t0 + off) // step) * step
+            while cur < t1 + off:
+                b = time.strftime(r["fmt"], time.gmtime(cur))
+                out.append(have.get(b) or {"b": b, "n": 0, "bytes": 0, "failed": 0})
+                cur += step
+        else:
+            y, m = time.gmtime(t0 + off)[:2]
+            ey, em = time.gmtime(t1 + off)[:2]
+            while (y, m) <= (ey, em):
+                b = f"{y:04d}-{m:02d}"
+                out.append(have.get(b) or {"b": b, "n": 0, "bytes": 0, "failed": 0})
+                y, m = (y, m + 1) if m < 12 else (y + 1, 1)
+        r["series"] = out
+        r["t0"], r["t1"] = t0, t1
+        return r
+
+    @app.delete("/api/stats")
+    async def stats_reset():
+        return {"deleted": S.db.stats_reset()}
+
     # ------------------------------------------------------------ nastavení
     def settings_out():
         cp = cookies_path()

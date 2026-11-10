@@ -8,6 +8,7 @@ let LANG = 'cs';
 const T = (cs, en) => (LANG === 'en' && en !== undefined ? en : cs);
 
 const ICONS = {
+  chart: '<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>',
   rss: '<path d="M4 11a9 9 0 0 1 9 9M4 4a16 16 0 0 1 16 16"/><circle cx="5" cy="19" r="1.2"/>',
   play: '<path d="M7 4v16l13-8z"/>', pause: '<path d="M8 5v14M16 5v14"/>', x: '<path d="M6 6l12 12M18 6L6 18"/>',
   grip: '<path d="M9 6h.01M15 6h.01M9 12h.01M15 12h.01M9 18h.01M15 18h.01" stroke-width="3"/>',
@@ -121,7 +122,7 @@ function render() {
   App.subFilter = null; App.subReady = false;
   renderSide();
   const freshSettings = async () => { const r = await act(() => api('/api/settings')); if (r) App.settings = r; if (App.view === 'settings') renderSettings(); };
-  const views = { queue: renderQueue, history: () => renderHistory(), subs: () => (App.args[0] === 'new' ? renderSubNew() : renderSubs()), sub: renderSub,
+  const views = { queue: renderQueue, history: () => renderHistory(), subs: () => (App.args[0] === 'new' ? renderSubNew() : renderSubs()), sub: renderSub, stats: renderStats,
     settings: freshSettings, engines: renderEngines, help: renderHelp };
   (views[App.view] || renderQueue)();
   $('#mainwrap').scrollTop = 0;
@@ -132,7 +133,7 @@ function renderSide() {
   const st = App.st; const side = $('#side'); if (!side) return;
   const n = st ? st.queue.filter(j => j.kind === 'video' && j.status !== 'running' || j.status === 'running').length : 0;
   const subs = subList(), subN = subs.reduce((a, x) => a + x.queued + x.running, 0);
-  const nav = [['queue', 'list', T('Fronta', 'Queue'), n], ['history', 'history', T('Historie', 'History')], ['subs', 'rss', T('Odběry', 'Subscriptions'), subN],
+  const nav = [['queue', 'list', T('Fronta', 'Queue'), n], ['history', 'history', T('Historie', 'History')], ['subs', 'rss', T('Odběry', 'Subscriptions'), subN], ['stats', 'chart', T('Statistiky', 'Statistics')],
     ['settings', 'settings', T('Nastavení', 'Settings')], ['engines', 'cpu', T('Enginy', 'Engines')], ['help', 'help', T('Nápověda', 'Help')]];
   const subNav = subs.length ? `<div class="subnav">${subs.map(x => `<button class="nav sub ${App.view === 'sub' && +App.args[0] === x.id ? 'on' : ''}" data-go="sub/${x.id}" title="${esc(x.title || x.url)}">
     <span class="dot ${x.last_error ? 'r' : x.pending ? 'y' : x.enabled ? 'g' : ''}"></span><span class="ell">${esc(x.title || x.url)}</span>${x.queued + x.running ? `<span class="n">${x.queued + x.running}</span>` : ''}</button>`).join('')}</div>` : '';
@@ -489,6 +490,65 @@ async function subAction(b) {
   if (a === 'toggle') { const s = subById(id); if (s) { s.enabled = s.enabled ? 0 : 1; updateSubHead(); } return act(() => api(`/api/subscriptions/${id}`, { method: 'PUT', body: { enabled: s ? !!s.enabled : true } })); }
 }
 
+/* ------------------------------------------------------------ statistiky */
+const STATS = { p: '30d', from: '', to: '', metric: 'n' };
+function statsRange() {
+  const now = Date.now() / 1000, d = 86400;
+  if (STATS.p === 'custom') {
+    const a = STATS.from ? new Date(STATS.from + 'T00:00:00').getTime() / 1000 : 0, b = STATS.to ? new Date(STATS.to + 'T00:00:00').getTime() / 1000 + d : 0;
+    return [a, b];
+  }
+  const span = { '24h': d, '7d': 7 * d, '30d': 30 * d, '12m': 365 * d }[STATS.p];
+  return [span ? now - span : 0, 0];
+}
+function renderStats() {
+  const periods = [['24h', T('24 hodin', '24 hours')], ['7d', T('7 dní', '7 days')], ['30d', T('30 dní', '30 days')], ['12m', T('12 měsíců', '12 months')], ['all', T('Vše', 'All time')], ['custom', T('Vlastní', 'Custom')]];
+  $('#main').innerHTML = `<div class="row gap16 wrap"><div><h1>${T('Statistiky', 'Statistics')}</h1><div class="t2" style="margin-top:3px">${T('Počty a objemy stahování. Nezávisí na historii – mazání historie statistiky nemění.', 'Download counts and volumes. Independent of history – clearing history does not change them.')}</div></div><span class="grow"></span>
+    <span class="seg" id="stp">${periods.map(([v, l]) => `<button data-v="${v}" class="${STATS.p === v ? 'on' : ''}">${l}</button>`).join('')}</span></div>
+    <div class="row gap8 wrap" id="stcustom" style="margin-top:10px;${STATS.p === 'custom' ? '' : 'display:none'}"><span class="t2 fs12">${T('Od', 'From')}</span><input type="date" class="input sm" id="stfrom" value="${STATS.from}" style="width:150px"><span class="t2 fs12">${T('do (včetně)', 'to (inclusive)')}</span><input type="date" class="input sm" id="stto" value="${STATS.to}" style="width:150px"></div>
+    <div id="stbody" style="margin-top:16px"><div class="empty"><div class="spin" style="margin:auto"></div></div></div>`;
+  $$('#stp button').forEach(b => b.onclick = () => { STATS.p = b.dataset.v; $$('#stp button').forEach(x => x.classList.toggle('on', x === b)); $('#stcustom').style.display = STATS.p === 'custom' ? '' : 'none'; loadStats(); });
+  $('#stfrom').onchange = e => { STATS.from = e.target.value; loadStats(); };
+  $('#stto').onchange = e => { STATS.to = e.target.value; loadStats(); };
+  loadStats();
+}
+async function loadStats() {
+  const [t0, t1] = statsRange();
+  const r = await act(() => api(`/api/stats?t0=${t0}&t1=${t1}&tz=${-new Date().getTimezoneOffset()}`)); const box = $('#stbody'); if (!r || !box) return;
+  const total = r.done + r.failed, rate = total ? Math.round(r.done / total * 100) : null;
+  const days = Math.max(1, ((r.t1 - r.t0) / 86400)), perDay = r.done / days;
+  const kpi = (l, v, sub = '') => `<div class="card kpi"><div class="t2 fs12">${l}</div><div class="kv">${v}</div><div class="t2 fs12">${sub || '&nbsp;'}</div></div>`;
+  const nf = n => Number(n).toLocaleString(LANG === 'cs' ? 'cs-CZ' : 'en-US');
+  const lab = b => r.fmt === '%Y-%m' ? b : r.fmt === '%Y-%m-%d' ? b.slice(5).replace('-', '. ') + '.' : b.slice(11, 13);
+  const val = x => x[STATS.metric === 'n' ? 'n' : 'bytes'];
+  const mx = Math.max(1, ...r.series.map(val));
+  const every = Math.ceil(r.series.length / 12);
+  const chart = r.series.length ? `<div class="bars">${r.series.map((x, i) => `<div class="bcol" title="${esc(x.b)}: ${nf(x.n)} ${T('videí', 'videos')}, ${fmtBytes(x.bytes)}${x.failed ? `, ${x.failed} ${T('chyb', 'failed')}` : ''}"><i style="height:${val(x) ? Math.max(2, val(x) / mx * 100) : 0}%"></i><span>${i % every === 0 ? lab(x.b) : ''}</span></div>`).join('')}</div>` : '';
+  const top = (rows, nameFn, linkFn) => {
+    if (!rows.length) return `<div class="t2 fs12" style="padding:6px 0">${T('Zatím nic', 'Nothing yet')}</div>`;
+    const m = Math.max(1, ...rows.map(val));
+    return rows.map(x => `<div class="trow ${linkFn ? 'lnk' : ''}" ${linkFn ? `data-l="${esc(linkFn(x))}"` : ''}><div class="row gap8" style="justify-content:space-between"><span class="ell">${esc(nameFn(x))}</span><span class="t2 fs12" style="white-space:nowrap">${nf(x.n)} · ${fmtBytes(x.bytes)}</span></div><div class="bar"><i style="width:${val(x) / m * 100}%"></i></div></div>`).join('');
+  };
+  const chLink = x => (x.sub_id && subById(x.sub_id)) ? 'sub/' + x.sub_id : 'q:' + x.name;
+  box.innerHTML = `<div class="kpis">
+    ${kpi(T('Staženo videí', 'Videos downloaded'), nf(r.done), `${perDay >= 10 ? Math.round(perDay) : perDay.toFixed(1).replace('.', LANG === 'cs' ? ',' : '.')} ${T('za den', 'per day')}`)}
+    ${kpi(T('Objem dat', 'Data volume'), fmtBytes(r.bytes), r.done ? `Ø ${fmtBytes(r.bytes / r.done)} ${T('na video', 'per video')}` : '')}
+    ${kpi(T('Úspěšnost', 'Success rate'), rate == null ? '—' : rate + ' %', `${nf(r.failed)} ${T('chyb', 'failed')}`)}
+    ${kpi(T('Čas stahování', 'Download time'), r.secs ? fmtDur(r.secs) : '—', r.secs && r.bytes ? `Ø ${fmtBytes(r.bytes / r.secs)}/s` : '')}</div>
+    <div class="card" style="padding:16px 18px;margin-top:14px"><div class="row gap10"><b>${r.fmt === '%Y-%m' ? T('Po měsících', 'By month') : r.fmt === '%Y-%m-%d' ? T('Po dnech', 'By day') : T('Po hodinách', 'By hour')}</b><span class="grow"></span>
+      <span class="seg" id="stm">${[['n', T('Počet', 'Count')], ['b', T('Objem', 'Volume')]].map(([v, l]) => `<button data-v="${v}" class="${STATS.metric === v ? 'on' : ''}">${l}</button>`).join('')}</span></div>${chart}</div>
+    <div class="sgrid" style="margin-top:14px">
+      <div class="card" style="padding:16px 18px"><b>${T('Podle zdroje', 'By source')}</b><div class="col gap10" style="margin-top:10px">${top(r.sources, x => srcName(x.name))}</div></div>
+      <div class="card" style="padding:16px 18px"><b>${T('Podle metody', 'By method')}</b><div class="col gap10" style="margin-top:10px">${top(r.methods, x => x.name)}</div></div>
+      <div class="card" style="padding:16px 18px"><b>${T('Podle webu', 'By site')}</b><div class="col gap10" style="margin-top:10px">${top(r.sites, x => x.name)}</div></div>
+      <div class="card" style="padding:16px 18px"><b>${T('Podle kanálu', 'By channel')}</b><div class="col gap10" style="margin-top:10px">${top(r.channels.slice(0, 10), x => x.name, chLink)}</div></div></div>
+    ${r.channels.length > 10 ? `<div class="card" style="margin-top:14px;overflow:hidden"><div style="padding:14px 18px"><b>${T('Všechny kanály', 'All channels')}</b></div><table class="stt"><tr><th>${T('Kanál', 'Channel')}</th><th>${T('Videí', 'Videos')}</th><th>${T('Objem', 'Volume')}</th></tr>${r.channels.map(x => `<tr class="lnk" data-l="${esc(chLink(x))}"><td>${esc(x.name)}</td><td>${nf(x.n)}</td><td>${fmtBytes(x.bytes)}</td></tr>`).join('')}</table></div>` : ''}
+    <div class="row" style="margin-top:18px"><span class="t2 fs12">${r.first ? T('Záznamy od', 'Records since') + ' ' + new Date(r.first * 1000).toLocaleDateString() : ''}</span><span class="grow"></span><button class="btn sm danger" id="strst">${ic('trash', 13)} ${T('Vynulovat statistiky', 'Reset statistics')}</button></div>`;
+  $$('#stm button').forEach(b => b.onclick = () => { STATS.metric = b.dataset.v; loadStats(); });
+  $$('[data-l]', box).forEach(el => el.onclick = () => { const l = el.dataset.l; if (l.startsWith('q:')) { App.hist.q = l.slice(2); App.hist.sub = null; go('history'); } else go(l); });
+  $('#strst').onclick = async () => { if (confirm(T('Vynulovat všechny statistiky? Historie ani soubory se nemění a statistiky se začnou sbírat znovu od nuly.', 'Reset all statistics? History and files are untouched; collection starts again from zero.'))) { if (await act(() => api('/api/stats', { method: 'DELETE' }), T('Statistiky vynulovány', 'Statistics reset'))) loadStats(); } };
+}
+
 /* ------------------------------------------------------------ historie */
 const PAGE_SIZES = [25, 50, 100, 200];
 function histLimit() { try { const v = +localStorage.getItem('vd_hist_limit'); return PAGE_SIZES.includes(v) ? v : 50; } catch (e) { return 50; } }
@@ -713,7 +773,7 @@ function fieldHtml(f, S) {
     case 'stepper': ctrl = `<button class="ibtn b" data-k="${f.k}" data-t="step" data-d="-1" ${dis}>${ic('minus', 14)}</button><span class="b6 fs15" style="width:24px;text-align:center">${v}</span><button class="ibtn b" data-k="${f.k}" data-t="step" data-d="1" ${dis}>${ic('plus', 14)}</button>`; break;
     case 'text': ctrl = `<input class="input sm" style="width:${f.w || 200}px" data-k="${f.k}" data-t="text" value="${esc(v)}" placeholder="${esc(f.placeholder || '')}" ${dis}>`; break;
     case 'time': ctrl = `<input class="input sm mono" type="time" style="width:110px" data-k="${f.k}" data-t="text" value="${esc(v)}" ${dis}>`; break;
-    case 'path': ctrl = `<input class="input sm mono fs12" style="width:240px" data-k="${f.k}" data-t="text" value="${esc(v)}" ${dis}><button class="btn sm" data-pick="${f.k}" ${dis}>${ic('folder', 13)} ${T('Vybrat', 'Browse')}</button>`; break;
+    case 'path': return `<div class="fld block">${lab()}<div class="row gap8" style="margin-top:8px"><input class="input sm mono fs12" style="flex:1;min-width:0" data-k="${f.k}" data-t="text" value="${esc(v)}" ${dis}><button class="btn sm" data-pick="${f.k}" ${dis}>${ic('folder', 13)} ${T('Vybrat', 'Browse')}</button></div></div>`;
     case 'static': ctrl = f.html; break;
     case 'template': return `<div class="fld block">${lab()}<input class="input sm mono" style="margin-top:8px" data-k="${f.k}" data-t="text" value="${esc(v)}" ${dis}>
       <div class="row gap6 wrap" style="margin-top:8px">${['{název}', '{kanál}', '{playlist}', '{datum}', '{rozlišení}', '{id}', '{pořadí}'].map(x => `<button class="chip mono" style="height:22px;font-size:11px" data-ins="${f.k}" data-v="${x}">${x}</button>`).join('')}</div>

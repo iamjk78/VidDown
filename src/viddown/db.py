@@ -91,10 +91,52 @@ alter table jobs add column hide_sub integer not null default 0;      -- skryto 
 alter table jobs add column hide_global integer not null default 0;   -- skryto v celkové historii
 """
 
+DOWNLOADS_V4 = """
+create table downloads (
+    id integer primary key autoincrement,
+    job_id integer,
+    ts real not null,              -- čas dokončení
+    ok integer not null,           -- 1 = staženo, 0 = skončilo chybou
+    bytes integer not null default 0,
+    secs real,                     -- doba stahování
+    channel text,
+    site text,
+    source text,
+    method text,
+    sub_id integer,
+    error_kind text
+);
+create index downloads_ts on downloads(ts);
+"""
+
+
+def _site(url: str) -> str:
+    from urllib.parse import urlparse
+    try:
+        return urlparse(url or "").netloc.lower().removeprefix("www.")
+    except ValueError:
+        return ""
+
+
+def _downloads_v4(c) -> None:
+    """Vytvoří statistickou tabulku a jednorázově ji naplní z dosavadních hotových a chybných úloh."""
+    for stmt in _split_sql(DOWNLOADS_V4):
+        c.execute(stmt)
+    rows = c.execute("select id, url, status, filesize, started_at, finished_at, updated_at, channel, source, method, sub_id, error_kind "
+                     "from jobs where kind='video' and status in ('done','failed')").fetchall()
+    for r in rows:
+        ts = r["finished_at"] or r["updated_at"]
+        secs = max(0.0, r["finished_at"] - r["started_at"]) if r["finished_at"] and r["started_at"] else None
+        c.execute("insert into downloads(job_id,ts,ok,bytes,secs,channel,site,source,method,sub_id,error_kind) values(?,?,?,?,?,?,?,?,?,?,?)",
+                  (r["id"], ts, 1 if r["status"] == "done" else 0, r["filesize"] or 0 if r["status"] == "done" else 0, secs,
+                   r["channel"], _site(r["url"]), r["source"], r["method"], r["sub_id"], r["error_kind"]))
+
+
 MIGRATIONS: list[tuple[int, object]] = [
     (1, SCHEMA),   # základní schéma (VidDown 0.1.0)
     (2, SUBSCRIPTIONS_V2),   # odběry
     (3, HISTORY_FLAGS_V3),   # dvojí historie (celková + odběr)
+    (4, _downloads_v4),      # statistiky stahování
 ]
 
 
@@ -343,6 +385,41 @@ class DB:
         where, args = self._history_where(q, status, days, sub)
         with self.conn() as c:
             return self._remove(c, where, args, sub, scope)
+
+    def record_download(self, job: dict, ok: bool) -> None:
+        """Zapíše dokončené stahování do statistik (nezávislé na historii)."""
+        ts = job.get("finished_at") or time.time()
+        secs = max(0.0, ts - job["started_at"]) if job.get("started_at") else None
+        with self.conn() as c:
+            c.execute("insert into downloads(job_id,ts,ok,bytes,secs,channel,site,source,method,sub_id,error_kind) values(?,?,?,?,?,?,?,?,?,?,?)",
+                      (job["id"], ts, 1 if ok else 0, (job.get("filesize") or 0) if ok else 0, secs, job.get("channel"),
+                       _site(job["url"]), job.get("source"), job.get("method"), job.get("sub_id"), job.get("error_kind")))
+
+    def stats(self, t0: float, t1: float, tz_min: int = 0, sub: int = 0) -> dict:
+        """Souhrn statistik za období <t0, t1) v časovém pásmu tz_min (minuty východně od UTC)."""
+        w, a = " where ts>=? and ts<?", [t0, t1]
+        if sub:
+            w += " and sub_id=?"
+            a.append(sub)
+        q = lambda sql, extra=(): self.query(sql.replace("@W", w), [*a, *extra])  # noqa: E731
+        k = q("select coalesce(sum(ok),0) done, coalesce(sum(1-ok),0) failed, coalesce(sum(bytes),0) bytes, "
+              "coalesce(sum(case when ok=1 then secs end),0) secs, min(ts) first, max(ts) last from downloads@W")[0]
+        span = t1 - t0
+        fmt = "%Y-%m-%d %H:00" if span <= 2 * 86400 else "%Y-%m-%d" if span <= 100 * 86400 else "%Y-%m"
+        off = int(tz_min) * 60
+        series = q(f"select strftime('{fmt}', ts+{off}, 'unixepoch') b, sum(ok) n, coalesce(sum(bytes),0) bytes, sum(1-ok) failed "
+                   "from downloads@W group by b order by b")
+
+        def group(col: str, limit: int = 20):
+            return q(f"select coalesce(nullif({col},''),'—') name, sum(ok) n, coalesce(sum(bytes),0) bytes, sum(1-ok) failed, max(sub_id) sub_id "
+                     f"from downloads@W group by name having n>0 or failed>0 order by n desc, bytes desc limit {limit}")
+        return {"done": k["done"], "failed": k["failed"], "bytes": k["bytes"], "secs": k["secs"], "first": k["first"], "last": k["last"],
+                "fmt": fmt, "series": series, "channels": group("channel", 50), "sources": group("source"),
+                "methods": group("method"), "sites": group("site")}
+
+    def stats_reset(self) -> int:
+        with self.conn() as c:
+            return c.execute("delete from downloads").rowcount
 
     def remap_paths(self, old: str, new: str, dry_run: bool = False) -> int:
         """Přepíše začátek cest stažených souborů (po přesunu na jiný počítač nebo svazek). Vrací počet záznamů."""
