@@ -390,7 +390,7 @@ def create_app(app_state) -> FastAPI:
         offset = max(0, int(offset))
         rows = S.db.history(q=q, status=status, days=days, offset=offset, limit=limit, sub=sub)
         matched = S.db.history_count(q=q, status=status, days=days, sub=sub)
-        total = S.db.query("select count(*) n, coalesce(sum(filesize),0) b from jobs where status='done'" + (" and sub_id=?" if sub else ""),
+        total = S.db.query("select count(*) n, coalesce(sum(filesize),0) b from jobs where status='done'" + (" and sub_id=? and hide_sub=0" if sub else " and hide_global=0"),
                            (sub,) if sub else ())[0]
 
         def out():
@@ -422,10 +422,11 @@ def create_app(app_state) -> FastAPI:
             else:
                 jobs = S.db.history(limit=10 ** 9)
             forgot = S.runner.archive_forget_many([j for j in jobs if j["status"] in ("done", "skipped")])
+        scope = "both" if body.get("scope") == "both" else "here"
         if isinstance(f, dict):  # hromadně podle aktuálního filtru (hledání, stav, období)
-            n = S.db.delete_history_matching(str(f.get("q") or ""), str(f.get("status") or ""), int(f.get("days") or 0), int(f.get("sub") or 0))
+            n = S.db.delete_history_matching(str(f.get("q") or ""), str(f.get("status") or ""), int(f.get("days") or 0), int(f.get("sub") or 0), scope)
         else:
-            n = S.db.delete_history(body.get("ids"))
+            n = S.db.delete_history(body.get("ids"), int(body.get("view") or 0), scope)
         return {"deleted": n, "archive_removed": forgot}
 
     # ------------------------------------------------------------ nastavení

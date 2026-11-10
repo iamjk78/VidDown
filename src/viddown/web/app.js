@@ -500,6 +500,7 @@ async function renderHistory(host, sub = null) {
    <div class="inwrap" style="height:32px;width:260px">${ic('search', 15)}<input id="hq" placeholder="${T('Hledat v historii…', 'Search history…')}" value="${esc(H.q)}"></div>
    <span class="seg" id="hst">${[['', T('Vše', 'All')], ['done', T('Hotovo', 'Done')], ['failed', T('Chyby', 'Failed')], ['cancelled', T('Zrušeno', 'Cancelled')], ['skipped', T('Přeskočeno', 'Skipped')]].map(([v, l]) => `<button class="${H.status === v ? 'on' : ''}" data-v="${v}">${l}</button>`).join('')}</span>
    <select class="input sm" id="hdays" style="width:170px">${[[1, T('Posledních 24 h', 'Last 24 h')], [7, T('Posledních 7 dní', 'Last 7 days')], [30, T('Posledních 30 dní', 'Last 30 days')], [0, T('Vše', 'All time')]].map(([v, l]) => `<option value="${v}" ${H.days === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
+   ${(sub || (App.st.subs || []).length) ? `<label class="row gap6 fs12" style="cursor:pointer" title="${sub ? T('Záznam zůstane jinak v celkové historii.', 'Otherwise the record stays in the global history.') : T('Záznamy z odběrů zůstanou jinak v historii příslušného odběru.', 'Otherwise records from subscriptions stay in that subscription\'s history.')}"><input type="checkbox" id="hboth" ${H.both ? 'checked' : ''}>${sub ? T('i z celkové historie', 'also from global history') : T('i z historie odběrů', 'also from subscription histories')}</label>` : ''}
    <button class="btn sm" id="hclear">${ic('trash', 13)} ${T('Vymazat historii', 'Clear history')}</button></div>
    <div id="hbulk"></div>
    <div class="card" style="overflow:hidden" id="hlist"><div class="empty"><div class="spin" style="margin:auto"></div></div></div>
@@ -507,7 +508,8 @@ async function renderHistory(host, sub = null) {
   let tmr; $('#hq').oninput = e => { clearTimeout(tmr); tmr = setTimeout(() => { H.q = e.target.value; H.offset = 0; resetSel(); loadHistory(); }, 300); };
   $$('#hst button').forEach(b => b.onclick = () => { H.status = b.dataset.v; H.offset = 0; resetSel(); $$('#hst button').forEach(x => x.classList.toggle('on', x === b)); loadHistory(); });
   $('#hdays').onchange = e => { H.days = +e.target.value; H.offset = 0; resetSel(); loadHistory(); };
-  $('#hclear').onclick = async () => { if (confirm(T('Smazat celou historii' + (H.sub ? ' tohoto odběru' : '') + '? Stažené soubory zůstanou na disku.', 'Delete all history' + (H.sub ? ' of this subscription' : '') + '? Downloaded files stay on disk.'))) { await act(() => api('/api/history', { method: 'DELETE', body: H.sub ? { filter: { sub: H.sub } } : {} }), T('Historie smazána', 'History cleared')); H.offset = 0; loadHistory(); } };
+  const hb = $('#hboth'); if (hb) hb.onchange = e => { H.both = e.target.checked; };
+  $('#hclear').onclick = async () => { if (confirm(T('Smazat celou historii' + (H.sub ? ' tohoto odběru' : '') + '? Stažené soubory zůstanou na disku.', 'Delete all history' + (H.sub ? ' of this subscription' : '') + '? Downloaded files stay on disk.'))) { await act(() => api('/api/history', { method: 'DELETE', body: { filter: { sub: H.sub || 0 }, scope: H.both ? 'both' : 'here' } }), T('Historie smazána', 'History cleared')); H.offset = 0; loadHistory(); } };
   loadHistory();
 }
 function pagerHtml(matched, offset, limit) {
@@ -543,7 +545,7 @@ function bulkBar(matched) {
     const f = !!H.forget;
     if (!confirm(T(`Odstranit ${n} záznamů z historie${f ? ' a hotová videa i z archivu stažených (půjdou stáhnout znovu)' : ''}? Stažené soubory zůstanou na disku.`,
       `Delete ${n} records from history${f ? ' and remove done videos from the download archive (they can be downloaded again)' : ''}? Downloaded files stay on disk.`))) return;
-    const body = H.all ? { filter: { q: H.q, status: H.status, days: H.days, sub: H.sub || 0 }, forget_archive: f } : { ids: [...H.sel], forget_archive: f };
+    const body = H.all ? { filter: { q: H.q, status: H.status, days: H.days, sub: H.sub || 0 }, forget_archive: f, scope: H.both ? 'both' : 'here' } : { ids: [...H.sel], view: H.sub || 0, forget_archive: f, scope: H.both ? 'both' : 'here' };
     const ok = await act(() => api('/api/history', { method: 'DELETE', body }), T('Záznamy odstraněny', 'Records deleted'));
     if (ok) { resetSel(); H.offset = 0; loadHistory(); }
   };
@@ -598,7 +600,7 @@ async function loadHistory() {
     if (a === 'play') return openPlayer(H.items.find(x => x.id === id), local);
     if (a === 'open') act(() => api(`/api/jobs/${id}/open`, { method: 'POST' }));
     if (a === 'retry') { const ok = await act(() => api(`/api/jobs/${id}/retry`, { method: 'POST' }), T('Přidáno znovu do fronty', 'Added to the queue again')); if (ok) loadHistory(); }
-    if (a === 'del') { await act(() => api('/api/history', { method: 'DELETE', body: { ids: [id] } })); loadHistory(); }
+    if (a === 'del') { await act(() => api('/api/history', { method: 'DELETE', body: { ids: [id], view: H.sub || 0, scope: H.both ? 'both' : 'here' } })); loadHistory(); }
   });
 }
 function openPlayer(h, local) {

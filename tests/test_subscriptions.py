@@ -255,3 +255,52 @@ def test_api_update_check_and_delete(client, tmp_path):
     d2 = rt.db.add("https://example.com/v3", status="done", sub_id=sid2, finished_at=1.0)
     assert c.delete(f"/api/subscriptions/{sid2}?keep_history=false").status_code == 200
     assert rt.db.get(d2) is None
+
+
+def _hist_job(rt, sid, url):
+    jid = rt.db.add(url, source="subscription", sub_id=sid)
+    rt.db.update(jid, status="done", finished_at=time.time())
+    return jid
+
+
+def test_dual_history_hide_here_then_delete_when_hidden_everywhere(rt, tmp_path):
+    sid = add_sub(rt, tmp_path)
+    a, b = _hist_job(rt, sid, "https://x/a"), _hist_job(rt, sid, "https://x/b")
+    plain = rt.db.add("https://x/p")
+    rt.db.update(plain, status="done", finished_at=time.time())
+    # odstranění z celkové historie: záznam odběru zůstane v historii odběru, běžný záznam zmizí úplně
+    assert rt.db.delete_history([a, plain], view=0, scope="here") == 2
+    assert rt.db.get(plain) is None and rt.db.get(a)["hide_global"] == 1
+    assert {j["id"] for j in rt.db.history()} == {b}
+    assert {j["id"] for j in rt.db.history(sub=sid)} == {a, b}
+    # skrytí ještě v historii odběru → nikde není vidět, smaže se fyzicky
+    rt.db.delete_history([a], view=sid, scope="here")
+    assert rt.db.get(a) is None
+    # druhá cesta: nejdřív z odběru, pak z celkové
+    rt.db.delete_history([b], view=sid, scope="here")
+    assert rt.db.get(b)["hide_sub"] == 1 and rt.db.history(sub=sid) == [] and len(rt.db.history()) == 1
+    rt.db.delete_history([b], view=0, scope="here")
+    assert rt.db.get(b) is None
+
+
+def test_dual_history_scope_both_and_filter_and_sub_delete(rt, tmp_path):
+    sid = add_sub(rt, tmp_path)
+    a, b, c = (_hist_job(rt, sid, f"https://x/{i}") for i in "abc")
+    assert rt.db.delete_history([a], view=sid, scope="both") == 1 and rt.db.get(a) is None
+    assert rt.db.delete_history_matching(sub=sid, scope="here") == 2
+    assert rt.db.history(sub=sid) == [] and len(rt.db.history()) == 2
+    # smazání odběru se zachováním historie: co je skryté v celkové historii, se nesmí vrátit
+    rt.db.delete_history([b], view=0, scope="here")
+    rt.db.sub_delete(sid, keep_history=True)
+    assert [j["id"] for j in rt.db.history()] == [c] and rt.db.get(c)["hide_sub"] == 0
+
+
+def test_api_history_scope(client, tmp_path):
+    c, rt = client
+    sid = add_sub(rt, tmp_path)
+    a = _hist_job(rt, sid, "https://x/a")
+    assert c.request("DELETE", "/api/history", json={"ids": [a], "view": 0}).json()["deleted"] == 1
+    assert c.get("/api/history").json()["matched"] == 0
+    assert c.get(f"/api/history?sub={sid}").json()["matched"] == 1
+    assert c.request("DELETE", "/api/history", json={"filter": {"sub": sid}, "scope": "both"}).json()["deleted"] == 1
+    assert rt.db.get(a) is None

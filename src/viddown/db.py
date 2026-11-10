@@ -86,9 +86,15 @@ alter table jobs add column target_dir text;     -- vlastní cílová složka ú
 create index if not exists jobs_sub on jobs(sub_id);
 """
 
+HISTORY_FLAGS_V3 = """
+alter table jobs add column hide_sub integer not null default 0;      -- skryto v historii odběru
+alter table jobs add column hide_global integer not null default 0;   -- skryto v celkové historii
+"""
+
 MIGRATIONS: list[tuple[int, object]] = [
     (1, SCHEMA),   # základní schéma (VidDown 0.1.0)
     (2, SUBSCRIPTIONS_V2),   # odběry
+    (3, HISTORY_FLAGS_V3),   # dvojí historie (celková + odběr)
 ]
 
 
@@ -255,8 +261,10 @@ class DB:
         sql = " where status in ('done','failed','cancelled','skipped')"
         args: list = []
         if sub:
-            sql += " and sub_id=?"
+            sql += " and sub_id=? and hide_sub=0"
             args.append(sub)
+        else:
+            sql += " and hide_global=0"
         if status:
             sql += " and status=?"
             args.append(status)
@@ -308,22 +316,33 @@ class DB:
             c.execute("update jobs set status='queued', speed=null, eta=null where status='running'")
             c.execute("update jobs set status='new' where status='probing'")
 
-    def delete_history(self, ids: list[int] | None = None) -> int:
+    def _remove(self, c, where: str, args: list, view: int, scope: str) -> int:
+        """Odstraní záznamy z historie. scope 'both' = smazat úplně; 'here' = skrýt jen v zobrazené historii
+        (view = 0 celková, jinak id odběru) a fyzicky smazat, až když už nejsou vidět nikde."""
+        if scope == "both":
+            n = c.execute(f"delete from jobs{where}", args).rowcount
+        elif view:
+            n = c.execute(f"delete from jobs{where} and hide_global=1", args).rowcount
+            n += c.execute(f"update jobs set hide_sub=1{where}", args).rowcount
+        else:
+            n = c.execute(f"delete from jobs{where} and (sub_id is null or hide_sub=1)", args).rowcount
+            n += c.execute(f"update jobs set hide_global=1{where}", args).rowcount
+        c.execute("delete from jobs where status='expanded' and not exists(select 1 from jobs c where c.parent_id=jobs.id)")
+        return n
+
+    def delete_history(self, ids: list[int] | None = None, view: int = 0, scope: str = "here") -> int:
         with self.conn() as c:
             if ids:
-                q = f"delete from jobs where id in ({','.join('?' * len(ids))}) and status in ('done','failed','cancelled','skipped')"
-                return c.execute(q, ids).rowcount
-            n = c.execute("delete from jobs where status in ('done','failed','cancelled','skipped')").rowcount
-            c.execute("delete from jobs where status='expanded' and not exists(select 1 from jobs c where c.parent_id=jobs.id)")
-            return n
+                where = f" where id in ({','.join('?' * len(ids))}) and status in ('done','failed','cancelled','skipped')"
+                return self._remove(c, where, list(ids), view, scope)
+            where, args = self._history_where("", "", 0, view)
+            return self._remove(c, where, args, view, scope)
 
-    def delete_history_matching(self, q: str = "", status: str = "", days: int = 0, sub: int = 0) -> int:
-        """Smaže všechny záznamy historie odpovídající filtru (hledání, stav, období, odběr)."""
+    def delete_history_matching(self, q: str = "", status: str = "", days: int = 0, sub: int = 0, scope: str = "here") -> int:
+        """Odstraní všechny záznamy historie odpovídající filtru (hledání, stav, období, odběr)."""
         where, args = self._history_where(q, status, days, sub)
         with self.conn() as c:
-            n = c.execute(f"delete from jobs{where}", args).rowcount
-            c.execute("delete from jobs where status='expanded' and not exists(select 1 from jobs c where c.parent_id=jobs.id)")
-            return n
+            return self._remove(c, where, args, sub, scope)
 
     def remap_paths(self, old: str, new: str, dry_run: bool = False) -> int:
         """Přepíše začátek cest stažených souborů (po přesunu na jiný počítač nebo svazek). Vrací počet záznamů."""
@@ -385,10 +404,12 @@ class DB:
             c.execute("update jobs set status='cancelled', finished_at=?, updated_at=? "
                       "where sub_id=? and status in ('new','probing','confirm','queued')", (time.time(), time.time(), sid))
             if keep_history:
-                c.execute("update jobs set sub_id=null where sub_id=?", (sid,))
+                # záznamy skryté v celkové historii by po zrušení vazby nebyly vidět nikde → pryč
+                c.execute("delete from jobs where sub_id=? and hide_global=1 and status in ('done','failed','cancelled','skipped')", (sid,))
+                c.execute("update jobs set sub_id=null, hide_sub=0 where sub_id=?", (sid,))
             else:
                 c.execute("delete from jobs where sub_id=? and status in ('done','failed','cancelled','skipped')", (sid,))
-                c.execute("update jobs set sub_id=null where sub_id=?", (sid,))   # ještě běžící úloha doběhne bez odběru
+                c.execute("update jobs set sub_id=null, hide_sub=0, hide_global=0 where sub_id=?", (sid,))   # ještě běžící úloha doběhne bez odběru
             c.execute("delete from subscriptions where id=?", (sid,))
             c.execute("commit")
 
