@@ -575,3 +575,17 @@ def test_preview_fills_title_thumb_and_full_info(rt, monkeypatch):
     assert info["full"] is True and info["playlist_index"] == 3 and j["size_est"] == 1000
     run(rt._preview(rt.db.get(other)))
     assert json.loads(rt.db.get(other)["info"])["preview_tried"] is True      # chybná položka se nezkouší dokola
+
+
+def test_bulk_cancel_queue_items(client):
+    c, rt = client
+    p = rt.db.add("https://x/list", status="probing", kind="playlist")
+    rt._expand(rt.db.get(p), [{"url": f"https://x/v{i}", "title": f"V{i}"} for i in range(3)])
+    kids = [k["id"] for k in rt.db.children(p)]
+    solo = rt.db.add("https://x/solo", status="queued", kind="video")
+    r = c.post("/api/jobs/bulk-cancel", json={"ids": [kids[0], solo, 99999]}).json()
+    assert r["cancelled"] == 2
+    assert rt.db.get(kids[0])["status"] == "cancelled" and rt.db.get(solo)["status"] == "cancelled"
+    assert rt.db.get(kids[1])["status"] == "queued"
+    assert c.post("/api/jobs/bulk-cancel", json={"ids": [p, kids[1]]}).json()["cancelled"] == 1   # položka už padla s playlistem
+    assert all(rt.db.get(k)["status"] == "cancelled" for k in kids) and rt.db.get(p)["status"] == "cancelled"

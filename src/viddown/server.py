@@ -178,6 +178,19 @@ def create_app(app_state) -> FastAPI:
             raise HTTPException(404, "job not found")
         return j
 
+    @app.post("/api/jobs/bulk-cancel")
+    async def bulk_cancel(req: Request):
+        """Hromadně odebere položky z fronty. U playlistu se odeberou i jeho položky; položky už zrušeného playlistu se přeskočí."""
+        body = await req.json()
+        ids = [int(i) for i in (body.get("ids") or [])][:5000]
+        n = 0
+        for jid in ids:
+            j = S.db.get(jid)
+            if j and j["status"] in ("new", "probing", "confirm", "queued", "running", "expanded"):
+                S.runner.cancel(jid)
+                n += 1
+        return {"cancelled": n}
+
     @app.post("/api/jobs/{jid}/{action}")
     async def job_action(jid: int, action: str, req: Request):
         _job(jid)

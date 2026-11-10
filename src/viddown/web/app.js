@@ -37,7 +37,7 @@ const ICONS = {
 };
 const ic = (n, s = 16) => `<svg class="ic" width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${ICONS[n] || ''}</svg>`;
 
-const App = { view: 'queue', session: null, st: null, settings: null, engines: null, hist: { items: [], q: '', status: '', days: 30, offset: 0 },
+const App = { qsel: new Set(), qshown: [], view: 'queue', session: null, st: null, settings: null, engines: null, hist: { items: [], q: '', status: '', days: 30, offset: 0 },
   expanded: new Set(), drag: null, es: null, timer: null, wizardShown: false, args: [], subFilter: null, subReady: false };
 function parseHash() { const h = (location.hash || '#queue').slice(1).split('/'); App.view = h[0] || 'queue'; App.args = h.slice(1); }
 
@@ -212,7 +212,9 @@ function rowHtml(j, pos, child = false) {
   } else meta = statusLine(j);
   const right = isGroup ? '' : `${j.size_est ? '~' + fmtBytes(j.size_est) : ''}${j.size_est && j.height ? ' · ' : ''}${j.height ? j.height + 'p' : ''}${j.approx ? ' ' + T('(odhad)', '(est.)') : ''}`;
   const toggle = isGroup ? `<button class="ibtn" data-a="expand" data-id="${j.id}" title="${T('Rozbalit', 'Expand')}">${ic(App.expanded.has(j.id) ? 'up' : 'down', 15)}</button>` : '';
-  return `<div class="qr${pz}${child ? ' child' : ''}" data-row="${j.id}" ${child ? '' : 'draggable="true"'}>
+  const selOn = App.qsel.has(j.id);
+  return `<div class="qr${pz}${child ? ' child' : ''}${selOn ? ' qon' : ''}" data-row="${j.id}" ${child ? '' : 'draggable="true"'}>
+   <span class="qck"><input type="checkbox" class="qsel" data-id="${j.id}" ${selOn ? 'checked' : ''} title="${T('Vybrat k odstranění', 'Select for removal')}"></span>
    <span class="grip">${child ? '' : ic('grip', 15)}</span><span class="pos">${pos ?? ''}</span>
    <div class="fade">${thumbsOn() ? thumbHtml(j, child ? 72 : 96, child ? 40 : 54, { cls: isGroup ? 'stack' : '' }) : ''}</div>
    <div style="min-width:0"><div class="b6 ell fade" title="${esc(title)}">${esc(title)}</div><div class="mm">${meta}</div></div>
@@ -232,6 +234,51 @@ function runHtml(j) {
   <div class="row gap6" style="align-self:flex-start"><button class="ibtn b" title="${T('Pozastavit', 'Pause')}" data-a="pause" data-id="${j.id}">${ic('pause', 15)}</button><button class="ibtn b" title="${T('Zrušit', 'Cancel')}" data-a="cancel" data-id="${j.id}">${ic('x', 15)}</button></div></div>`;
 }
 
+/* hromadný výběr ve frontě: výběr se drží po videích; playlist je vybraný, jen když jsou vybraná všechna jeho videa */
+function qNormalize(q) {
+  const ids = new Set(q.map(j => j.id));
+  for (const id of [...App.qsel]) if (!ids.has(id)) App.qsel.delete(id);
+  for (const j of q) {
+    if (j.kind === 'video' || j.parent_id) continue;
+    const kids = q.filter(c => c.parent_id === j.id);
+    if (!kids.length) continue;   // playlist bez rozbalených položek se vybírá sám
+    if (kids.every(c => App.qsel.has(c.id))) App.qsel.add(j.id); else App.qsel.delete(j.id);
+  }
+}
+function qWaitingKids(q, j) { return q.filter(c => c.parent_id === j.id && c.status !== 'running'); }
+function qSelectShown(q) {
+  for (const id of App.qshown) {
+    const j = q.find(x => x.id === id); if (!j) continue;
+    App.qsel.add(id);
+    if (j.kind !== 'video' && !j.parent_id) qWaitingKids(q, j).forEach(c => App.qsel.add(c.id));
+  }
+  qNormalize(q);
+}
+function qToggle(q, id, on) {
+  const j = q.find(x => x.id === id); if (!j) return;
+  const group = j.kind !== 'video' && !j.parent_id;
+  if (on) { App.qsel.add(id); if (group) qWaitingKids(q, j).forEach(c => App.qsel.add(c.id)); }
+  else { App.qsel.delete(id); if (group) q.filter(c => c.parent_id === id).forEach(c => App.qsel.delete(c.id)); }
+  qNormalize(q);
+}
+function qCount(q) {
+  const vids = q.filter(j => App.qsel.has(j.id) && j.kind === 'video').length;
+  return vids || q.filter(j => App.qsel.has(j.id)).length;
+}
+async function qRemoveSelected(q) {
+  const ids = q.filter(j => App.qsel.has(j.id) && !(j.parent_id && App.qsel.has(j.parent_id))).map(j => j.id);   // vybraný playlist = jeden příkaz
+  const n = qCount(q), lists = q.filter(j => App.qsel.has(j.id) && j.kind !== 'video' && !j.parent_id).length;
+  if (!ids.length) return;
+  if (!confirm(T(`Odebrat z fronty ${n} ${n === 1 ? 'video' : n < 5 ? 'videa' : 'videí'}${lists ? ` (včetně ${lists} celých playlistů)` : ''}? Stažené soubory se nemění.`,
+    `Remove ${n} item(s) from the queue${lists ? ` (including ${lists} whole playlist(s))` : ''}? Downloaded files are not affected.`))) return;
+  if (await act(() => api('/api/jobs/bulk-cancel', { method: 'POST', body: { ids } }), T('Odebráno z fronty', 'Removed from the queue'))) App.qsel.clear();
+  renderQueueDyn();
+}
+document.addEventListener('change', e => {
+  const cb = e.target; if (!cb.classList || !cb.classList.contains('qsel') || !App.st) return;
+  const q = App.subFilter ? App.st.queue.filter(j => j.sub_id === App.subFilter) : App.st.queue;
+  qToggle(q, +cb.dataset.id, cb.checked); renderQueueDyn();
+});
 function renderQueueDyn() {
   const box = $('#qdyn'); const st = App.st; if (!box || !st) return;
   const q = App.subFilter ? st.queue.filter(j => j.sub_id === App.subFilter) : st.queue, s = st.stats;
@@ -282,20 +329,35 @@ function renderQueueDyn() {
       ? `<div class="card empty">${ic('rss', 32)}<h3>${T('Fronta odběru je prázdná', 'This subscription has nothing queued')}</h3><p>${T('Nová videa se zařadí sama při příští kontrole. Můžete ji spustit tlačítkem nahoře.', 'New videos are queued automatically at the next check. You can start one with the button above.')}</p></div>`
       : `<div class="card empty">${ic('download', 32)}<h3>${T('Fronta je prázdná', 'The queue is empty')}</h3><p>${T('Vložte odkaz na video, playlist nebo kanál do pole nahoře, nebo ho pošlete Telegram botovi.', 'Paste a link to a video, playlist or channel above, or send it to the Telegram bot.')}</p></div>`;
   } else if (waiting.length) {
+    qNormalize(q);
     let rows = '', n = 0;
+    const shown = [];   // co obsahuje „Vybrat zobrazené“: rozbalený playlist = jeho zobrazené položky, sbalený = celý playlist
     for (const j of waiting) {
       rows += rowHtml(j, ++n);
       if (j.kind !== 'video' && (App.expanded.has(j.id) || f)) {
         const kids = kidsOf(j).filter(c => !f || hit(j) || hit(c));
+        shown.push(...kids.map(c => c.id));
         kids.slice(0, 200).forEach((c, i) => { rows += rowHtml(c, `${n}.${i + 1}`, true); });
-        if (kids.length > 200) rows += `<div class="qr child"><span></span><span></span><span></span><span class="fs12 t2">+ ${kids.length - 200}</span></div>`;
-      }
+        if (kids.length > 200) rows += `<div class="qr child"><span></span><span></span><span></span><span></span><span class="fs12 t2">+ ${kids.length - 200}</span></div>`;
+      } else shown.push(j.id);
     }
-    html += `<div class="card qlist" id="qlist">${rows}</div>`;
+    App.qshown = shown;
+    const cnt = qCount(q);
+    const bulk = `<div class="row gap8 wrap" style="padding:10px 16px;border-bottom:1px solid var(--border)"><button class="btn sm" id="qsa" title="${T('Vybere zobrazená videa. Playlist se vybere celý jen tehdy, když jsou vybraná všechna jeho videa.', 'Selects the displayed videos. A playlist is selected as a whole only when all its videos are selected.')}">${T('Vybrat zobrazené', 'Select shown')}</button>
+      ${App.qsel.size ? `<button class="btn sm" id="qsn">${T('Zrušit výběr', 'Clear selection')}</button><span class="grow"></span><b class="fs12">${T('Vybráno', 'Selected')}: ${cnt}</b><button class="btn sm danger" id="qdel">${ic('trash', 13)} ${T('Odebrat vybrané', 'Remove selected')} (${cnt})</button>` : ''}</div>`;
+    html += `<div class="card qlist" id="qlist">${bulk}${rows}</div>`;
   }
   const wasFocused = document.activeElement && document.activeElement.id === 'qf', caret = wasFocused ? document.activeElement.selectionStart : 0;
   box.innerHTML = html;
   box.classList.toggle('nothumb', !thumbsOn());
+  $$('.qsel', box).forEach(cb => {   // playlist s částí vybraných videí = „neurčitý“ stav
+    const j = q.find(x => x.id === +cb.dataset.id);
+    if (j && j.kind !== 'video' && !cb.checked) cb.indeterminate = q.some(c => c.parent_id === j.id && App.qsel.has(c.id));
+  });
+  const qsa = $('#qsa', box), qsn = $('#qsn', box), qdel = $('#qdel', box);
+  if (qsa) qsa.onclick = () => { qSelectShown(q); renderQueueDyn(); };
+  if (qsn) qsn.onclick = () => { App.qsel.clear(); renderQueueDyn(); };
+  if (qdel) qdel.onclick = () => qRemoveSelected(q);
   const qth = $('#qth', box); if (qth) qth.onclick = () => { setThumbs(!thumbsOn()); renderQueueDyn(); };
   const qf = $('#qf', box);
   if (qf) {
