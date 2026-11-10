@@ -66,3 +66,83 @@ def test_secrets_password(data):
     assert "tajne123" not in (data / "secrets.json").read_text()
     sec.set_password("")
     assert not sec.has_password()
+
+
+# ---------------------------------------------------------------- migrace schématu
+def test_fresh_db_gets_latest_schema_version(tmp_path):
+    from viddown import db as dbm
+    d = dbm.DB(tmp_path / "a.db")
+    assert d.schema_version == dbm.MIGRATIONS[-1][0]
+    assert d.migrate() == []          # druhé spuštění nic nedělá
+    assert not list(tmp_path.glob("*.bak"))
+
+
+def test_legacy_db_without_version_is_adopted(tmp_path):
+    import sqlite3
+    from viddown import db as dbm
+    p = tmp_path / "legacy.db"
+    c = sqlite3.connect(p)
+    c.executescript(dbm.SCHEMA)       # databáze z doby před migracemi: tabulky jsou, user_version = 0
+    c.execute("insert into jobs(url,pos,created_at,updated_at) values('https://x',1,1,1)")
+    c.commit()
+    c.close()
+    d = dbm.DB(p)
+    assert d.schema_version == dbm.MIGRATIONS[-1][0]
+    assert d.query("select url from jobs")[0]["url"] == "https://x"
+
+
+def test_new_migration_runs_with_backup_and_keeps_data(tmp_path, monkeypatch):
+    from viddown import db as dbm
+    p = tmp_path / "m.db"
+    d = dbm.DB(p)
+    jid = d.add("https://x")
+    monkeypatch.setattr(dbm, "MIGRATIONS", dbm.MIGRATIONS + [(2, "alter table jobs add column note text;")])
+    d2 = dbm.DB(p)
+    assert d2.schema_version == 2
+    d2.update(jid, note="ahoj")
+    assert d2.get(jid)["note"] == "ahoj"
+    bak = tmp_path / "m.db.v1.bak"
+    assert bak.exists()               # záloha stavu před migrací, bez nového sloupce
+    import sqlite3
+    cols = [r[1] for r in sqlite3.connect(bak).execute("pragma table_info(jobs)")]
+    assert "note" not in cols
+
+
+def test_failed_migration_rolls_back(tmp_path, monkeypatch):
+    import pytest
+    from viddown import db as dbm
+    p = tmp_path / "f.db"
+    dbm.DB(p).add("https://x")
+    bad = "alter table jobs add column ok_col text; alter table nonexistent add column z text;"
+    monkeypatch.setattr(dbm, "MIGRATIONS", dbm.MIGRATIONS + [(2, bad)])
+    with pytest.raises(Exception):
+        dbm.DB(p)
+    monkeypatch.undo()
+    d = dbm.DB(p)
+    assert d.schema_version == 1
+    assert "ok_col" not in [r["name"] for r in d.query("pragma table_info(jobs)")]
+    assert len(d.query("select * from jobs")) == 1
+
+
+def test_db_from_newer_version_is_refused(tmp_path):
+    import sqlite3
+    import pytest
+    from viddown import db as dbm
+    p = tmp_path / "n.db"
+    dbm.DB(p)
+    c = sqlite3.connect(p)
+    c.execute("pragma user_version=99")
+    c.close()
+    with pytest.raises(dbm.SchemaTooNew):
+        dbm.DB(p)
+
+
+def test_remap_paths(tmp_path):
+    from viddown import db as dbm
+    d = dbm.DB(tmp_path / "r.db")
+    a = d.add("https://a", status="done", filepath="/nas/Videos/x/a.mkv")
+    b = d.add("https://b", status="done", filepath="/nas/Videos2/b.mkv")   # jiná složka, stejný začátek
+    assert d.remap_paths("/nas/Videos/", "/downloads", dry_run=True) == 1
+    assert d.remap_paths("/nas/Videos", "/downloads") == 1
+    assert d.get(a)["filepath"] == "/downloads/x/a.mkv"
+    assert d.get(b)["filepath"] == "/nas/Videos2/b.mkv"

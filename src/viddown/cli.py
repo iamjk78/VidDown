@@ -165,6 +165,22 @@ def cmd_telegram(a) -> int:
     return 0
 
 
+def cmd_db(a) -> int:
+    db = _db()
+    if a.action == "info":
+        n = db.query("select status, count(*) n from jobs group by status order by n desc")
+        print(f"Databáze: {db.path}")
+        print(f"Schéma:   verze {db.schema_version}")
+        print("Úlohy:    " + (", ".join(f"{r['status']} {r['n']}" for r in n) or "žádné"))
+        return 0
+    if not a.old or not a.new:
+        print("Použití: viddown db remap-paths STARÁ_CESTA NOVÁ_CESTA [--dry-run]")
+        return 1
+    n = db.remap_paths(a.old, a.new, dry_run=a.dry_run)
+    print(f"{'Změnilo by se' if a.dry_run else 'Změněno'} {n} cest v historii ({a.old} → {a.new}).")
+    return 0
+
+
 def cmd_autostart(a) -> int:
     from . import autostart
     if a.action == "on":
@@ -222,6 +238,7 @@ def cmd_doctor(a) -> int:
     line(True, "Telegram", ("token nastaven" if sec.telegram_token else "bez tokenu (volitelné)") +
          (f", chat ID {s.get('telegram_chat_id')}" if s.get("telegram_chat_id") else ""))
     info = running_info()
+    line(True, "Databáze", f"schéma verze {_db().schema_version}")
     line(True, "Démon", f"běží (PID {info.get('pid')}, port {info.get('port')})" if info is not None else "neběží")
     return 0 if ok_all else 1
 
@@ -259,12 +276,26 @@ def main(argv=None) -> int:
     sp = sub.add_parser("telegram", help="token a chat ID Telegram bota")
     sp.add_argument("--token")
     sp.add_argument("--chat")
+    sp = sub.add_parser("db", help="databáze: info, přepsání cest po přesunu na jiný počítač")
+    sp.add_argument("action", choices=["info", "remap-paths"])
+    sp.add_argument("old", nargs="?")
+    sp.add_argument("new", nargs="?")
+    sp.add_argument("--dry-run", action="store_true", help="jen vypíše, kolik záznamů by se změnilo")
     sp = sub.add_parser("autostart", help="spouštění po přihlášení")
     sp.add_argument("action", choices=["on", "off", "status"])
     sub.add_parser("doctor", help="kontrola závislostí")
     sub.add_parser("version", help="verze")
 
     a = p.parse_args(argv)
+    from .db import SchemaTooNew
+    try:
+        return _dispatch(p, a)
+    except SchemaTooNew as e:
+        print(f"Chyba: {e}", file=sys.stderr)
+        return 2
+
+
+def _dispatch(p, a) -> int:
     if a.cmd is None:
         from .daemon import serve
         return serve(open_browser=True)
@@ -277,7 +308,8 @@ def main(argv=None) -> int:
     if a.cmd == "config" and a.action == "set" and (a.key is None or a.value is None):
         p.error("config set KLÍČ HODNOTA")
     return {"add": cmd_add, "queue": cmd_queue, "history": cmd_history, "engine": cmd_engine, "config": cmd_config,
-            "password": cmd_password, "telegram": cmd_telegram, "autostart": cmd_autostart, "doctor": cmd_doctor}[a.cmd](a)
+            "password": cmd_password, "telegram": cmd_telegram, "autostart": cmd_autostart, "doctor": cmd_doctor,
+            "db": cmd_db}[a.cmd](a)
 
 
 if __name__ == "__main__":

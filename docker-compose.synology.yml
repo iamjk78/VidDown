@@ -1,0 +1,23 @@
+# VidDown na Synology (Container Manager → Projekt) nebo kdekoli, kde stačí stáhnout hotový obraz.
+# Obraz se do registru nahrává z vývojového počítače příkazem scripts/release.sh.
+#
+# Jednorázově na NAS (SSH nebo plánovač úloh jako root):
+#   docker login ghcr.io -u <GitHub uživatel>     # heslo = osobní token se scope read:packages
+# Aktualizace:
+#   docker compose -f docker-compose.synology.yml pull && docker compose -f docker-compose.synology.yml up -d
+services:
+  viddown:
+    image: ghcr.io/iamjk78/viddown:latest      # pro pevnou verzi např. ghcr.io/iamjk78/viddown:0.1.0
+    container_name: viddown
+    restart: unless-stopped
+    ports:
+      - "8765:8765"          # GUI: http://<adresa-NAS>:8765  (přes Tailscale/VPN; veřejně nevystavovat!)
+    environment:
+      TZ: Europe/Prague
+      PUID: "1026"           # vlastník stažených souborů: uživatel NAS (v SSH `id <uživatel>`)
+      PGID: "100"            # skupina (na Synology běžně 100 = users)
+      VIDDOWN_ALLOW_NO_PASSWORD: "1"   # bez hesla – jen když je NAS dostupný jen přes VPN (nebo nastavte VIDDOWN_PASSWORD)
+      # VIDDOWN_PASSWORD: "silne-heslo"
+    volumes:
+      - /volume1/docker/viddown/data:/data           # databáze, nastavení, token, cookies, enginy, logy
+      - /volume1/video/VidDown:/downloads      # sem se ukládají videa (cílová složka v GUI: /downloads)

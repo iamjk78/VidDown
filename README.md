@@ -63,6 +63,39 @@ V GUI pak zadejte cestu uvnitř kontejneru, např. `/nas/Videos`. Při uložení
 Když cílová složka za provozu přestane být dostupná (odpojený NAS), fronta se pozastaví a po obnovení
 přístupu sama pokračuje. Už stažené video počká v dočasné složce a znovu se nestahuje.
 
+#### Hotový obraz a Synology
+
+Bez GitHub Actions se obraz sestavuje ručně na vývojovém počítači a posílá do soukromého registru
+GitHub Container Registry (`ghcr.io/iamjk78/viddown`). Obsahuje `linux/amd64` (Synology s Intel/AMD) i `linux/arm64`.
+
+```bash
+docker login ghcr.io -u iamjk78      # jednorázově; heslo = osobní token se scope write:packages
+scripts/release.sh                   # sestaví a nahraje :<verze> a :latest (--dry-run = jen sestavit)
+```
+
+Na NAS použijte [docker-compose.synology.yml](docker-compose.synology.yml) (Container Manager › Projekt, nebo SSH).
+Upravte `PUID`/`PGID` a cesty svazků, jednou se přihlaste `docker login ghcr.io` (token se scope `read:packages`) a spusťte.
+**Aktualizace:** `docker compose -f docker-compose.synology.yml pull && docker compose -f docker-compose.synology.yml up -d`.
+Data (`/data`) leží mimo obraz, takže se zachovají; databáze se při startu sama upgraduje (viz níže).
+
+**Přesun existující instalace (např. z Macu) na Synology:**
+
+1. Na starém počítači zastavte VidDown (`docker compose down`) – Telegram bot smí běžet jen na jednom místě.
+2. Zkopírujte složku `data` na NAS (např. `/volume1/docker/viddown/data`), **bez** podsložek `engines/`, `tmp/` a `ms-playwright/`
+   (jsou pro jinou architekturu procesoru; na NAS se samy znovu stáhnou při prvním spuštění).
+3. Spusťte projekt. V GUI (Nastavení › Cílová složka) zadejte novou cestu, např. `/downloads`.
+4. Přepište cesty stažených souborů v historii, ať se videa nehlásí jako smazaná:
+
+   ```bash
+   docker exec viddown viddown db remap-paths /nas/Videos /downloads --dry-run
+   docker exec viddown viddown db remap-paths /nas/Videos /downloads
+   ```
+5. Token Telegram bota, cookies, nastavení a seznam už stažených videí (`archive.txt`) se přenesou s složkou `data`.
+
+**Migrace databáze:** verze schématu je v databázi (`pragma user_version`). Při startu se chybějící migrace provedou
+automaticky a před tím se uloží záloha `viddown.db.v<stará verze>.bak` vedle databáze. Databázi z novější verze VidDown
+starší verze odmítne otevřít (chrání před poškozením při downgradu). Stav ukáže `viddown db info` a `viddown doctor`.
+
 ### Ze zdrojového kódu
 
 Vyžaduje Python 3.10+.

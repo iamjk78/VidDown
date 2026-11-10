@@ -61,14 +61,86 @@ create table if not exists kv (key text primary key, value text);
 ACTIVE = ("new", "probing", "confirm", "queued", "running")
 FINAL = ("done", "failed", "cancelled", "skipped")
 
+# Migrace schématu. Verze se ukládá do `pragma user_version`. Každá položka je (verze, SQL nebo funkce(conn)).
+# NIKDY neupravujte hotovou migraci – změnu schématu přidejte jako novou položku na konec seznamu.
+MIGRATIONS: list[tuple[int, object]] = [
+    (1, SCHEMA),   # základní schéma (VidDown 0.1.0)
+]
+
+
+def _split_sql(script: str) -> list[str]:
+    """Rozdělí skript na příkazy (kvůli transakci; executescript by ji předčasně potvrdil)."""
+    out, buf = [], ""
+    for line in script.splitlines():
+        code = line.split("--", 1)[0]
+        buf += code + "\n"
+        if sqlite3.complete_statement(buf):
+            if buf.strip():
+                out.append(buf.strip())
+            buf = ""
+    if buf.strip():
+        out.append(buf.strip())
+    return out
+
+
+class SchemaTooNew(RuntimeError):
+    """Databáze pochází z novější verze VidDown, než je tato."""
+
 
 class DB:
     def __init__(self, path: Path):
         self.path = path
         self._local = threading.local()
         with self.conn() as c:
-            c.executescript(SCHEMA)
             c.execute("pragma journal_mode=wal")
+        self.migrate()
+
+    @property
+    def schema_version(self) -> int:
+        with self.conn() as c:
+            return c.execute("pragma user_version").fetchone()[0]
+
+    def migrate(self) -> list[int]:
+        """Provede chybějící migrace. U existující databáze před tím uloží zálohu `<db>.v<stará verze>.bak`.
+        Vrací seznam provedených verzí. Novější databázi než zná tento kód odmítne (ochrana před downgradem)."""
+        latest = MIGRATIONS[-1][0]
+        with self.conn() as c:
+            cur = c.execute("pragma user_version").fetchone()[0]
+            if cur > latest:
+                raise SchemaTooNew(f"Databáze {self.path} má schéma verze {cur}, tato verze VidDown umí nejvýše {latest}. "
+                                   "Spusťte novější VidDown, nebo obnovte zálohu databáze.")
+            existing = c.execute("select 1 from sqlite_master where type='table' and name='jobs'").fetchone() is not None
+            if cur == 0 and existing:
+                cur = 1   # databáze z doby před migracemi = základní schéma
+            pending = [m for m in MIGRATIONS if m[0] > cur]
+            if not pending:
+                if c.execute("pragma user_version").fetchone()[0] != latest:
+                    c.execute(f"pragma user_version={latest}")
+                return []
+            if existing and cur >= 1:
+                bak = self.path.with_name(f"{self.path.name}.v{cur}.bak")
+                dst = sqlite3.connect(bak)
+                try:
+                    c.backup(dst)
+                finally:
+                    dst.close()
+            done = []
+            for ver, step in pending:
+                try:
+                    c.execute("begin immediate")
+                    if callable(step):
+                        step(c)
+                    else:
+                        for stmt in _split_sql(str(step)):
+                            c.execute(stmt)
+                    c.execute(f"pragma user_version={int(ver)}")
+                    c.execute("commit")
+                except Exception:
+                    if c.in_transaction:
+                        c.execute("rollback")
+                    raise
+                done.append(ver)
+            return done
 
     @contextmanager
     def conn(self):
@@ -225,6 +297,16 @@ class DB:
             n = c.execute(f"delete from jobs{where}", args).rowcount
             c.execute("delete from jobs where status='expanded' and not exists(select 1 from jobs c where c.parent_id=jobs.id)")
             return n
+
+    def remap_paths(self, old: str, new: str, dry_run: bool = False) -> int:
+        """Přepíše začátek cest stažených souborů (po přesunu na jiný počítač nebo svazek). Vrací počet záznamů."""
+        old, new = old.rstrip("/"), new.rstrip("/")
+        where, args = "filepath is not null and (filepath=? or substr(filepath,1,?)=?)", (old, len(old) + 1, old + "/")
+        with self.conn() as c:
+            if dry_run:
+                return c.execute(f"select count(*) from jobs where {where}", args).fetchone()[0]
+            return c.execute(f"update jobs set filepath=? || substr(filepath, ?) where {where}",
+                             (new, len(old) + 1, *args)).rowcount
 
     def purge_older(self, days: int) -> int:
         if not days:
