@@ -42,6 +42,7 @@ DEFAULTS: dict = {
     "temp_dir": "",
     "min_free_gb": 2.0,
     "concurrency": 2,
+    "queue_previews": True,         # u položek ve frontě na pozadí doplnit název a náhled (po jedné, s odstupem)
     "perf_mode": "full",            # full | balanced | eco – omezení výkonu (priorita, vlákna, souběžnost)
     "quality": "max",               # max | compat
     "audio_only": False,

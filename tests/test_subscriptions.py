@@ -556,3 +556,22 @@ def test_api_check_hours_validation(client, tmp_path, fake_pages):
     assert c.put(f"/api/subscriptions/{sid}", json={"check_hours": ""}).json()["check_hours"] is None
     r = c.post("/api/subscriptions", json={"url": "https://w.example/tv", "kind": "page", "check_hours": 168, "folder": str(tmp_path / "p")})
     assert r.status_code == 200 and r.json()["check_hours"] == 168
+
+
+def test_preview_fills_title_thumb_and_full_info(rt, monkeypatch):
+    jid = rt.db.add("https://x.example/v/1", status="queued", kind="video", title="https://x.example/v/1", info={"playlist_index": 3})
+    other = rt.db.add("https://x.example/v/2", status="queued", kind="video")
+
+    async def fake(url, ctx, timeout=0):
+        if url.endswith("/2"):
+            raise ResolveError("nejde", "other")
+        return {"id": "1", "title": "Pěkné video", "thumbnail": "http://t/1.jpg", "duration": 61, "uploader": "Kanál",
+                "requested_formats": [{"format_id": "a", "filesize": 1000, "height": 720}], "height": 720}
+    monkeypatch.setattr(runner_mod.ytdlp, "full_info", fake)
+    run(rt._preview(rt.db.get(jid)))
+    j = rt.db.get(jid)
+    info = json.loads(j["info"])
+    assert (j["title"], j["thumb_url"], j["duration"], j["channel"]) == ("Pěkné video", "http://t/1.jpg", 61, "Kanál")
+    assert info["full"] is True and info["playlist_index"] == 3 and j["size_est"] == 1000
+    run(rt._preview(rt.db.get(other)))
+    assert json.loads(rt.db.get(other)["info"])["preview_tried"] is True      # chybná položka se nezkouší dokola

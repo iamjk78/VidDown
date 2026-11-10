@@ -53,6 +53,8 @@ class Runner:
         self.data = data
         self.cpu = cpu.Monitor()
         self.phases: dict[int, dict] = {}
+        self._prev_task: asyncio.Task | None = None
+        self._prev_next = 0.0
         self._temp_cache: tuple[float, int] = (-1e9, 0)
         self.running: dict[int, tuple[asyncio.Task, ProcHolder]] = {}
         self.probing: dict[int, asyncio.Task] = {}
@@ -214,6 +216,15 @@ class Runner:
             if sub:
                 self._sub_task = asyncio.create_task(self._check_sub(sub["id"]))
 
+        # 3c) náhledy a názvy čekajících položek (po jedné s odstupem, ať to nezatěžuje web ani procesor)
+        if s.get("queue_previews", True) and (self._prev_task is None or self._prev_task.done()) and time.monotonic() >= self._prev_next \
+                and self.cpu.mode != "eco":
+            job = self.db.query(
+                "select * from jobs where kind='video' and status='queued' and thumb_url is null and method is null "
+                "and coalesce(info,'') not like '%\"preview_tried\"%' order by pos limit 1")
+            if job:
+                self._prev_task = asyncio.create_task(self._preview(job[0]))
+
         if qpaused or not window:
             return
 
@@ -332,6 +343,33 @@ class Runner:
             self.db.update(jid, url=res["resolved_url"])
             cur = self.db.get(jid)
         self.apply_probe(cur, res)
+
+    async def _preview(self, job: dict) -> None:
+        """Doplní čekající položce název, náhled, délku a odhad velikosti (a uloží plné info, takže ho stažení nemusí
+        zjišťovat znovu). Při chybě se položka označí, aby se nezkoušela pořád dokola."""
+        jid = job["id"]
+        try:
+            fi = await ytdlp.full_info(job["url"], self.ctx(), timeout=90)
+            cur = self.db.get(jid)
+            if not cur or cur["status"] != "queued":
+                return
+            old = json.loads(cur["info"]) if cur["info"] else {}
+            info = trim_info(fi)
+            if old.get("playlist_index"):
+                info["playlist_index"] = old["playlist_index"]
+            self.db.update(jid, info=info, title=cur["title"] if cur["title"] and not str(cur["title"]).startswith("http") else fi.get("title"),
+                           height=ytdlp.best_height(fi), size_est=ytdlp.size_estimate(fi),
+                           channel=cur["channel"] or fi.get("channel") or fi.get("uploader"),
+                           thumb_url=cur["thumb_url"] or fi.get("thumbnail"), duration=cur["duration"] or fi.get("duration"))
+        except Exception as e:  # noqa: BLE001
+            log.debug("náhled položky %s: %s", jid, e)
+            cur = self.db.get(jid)
+            if cur and cur["status"] == "queued":
+                old = json.loads(cur["info"]) if cur["info"] else {}
+                old["preview_tried"] = True
+                self.db.update(jid, info=old)
+        finally:
+            self._prev_next = time.monotonic() + random.uniform(2.0, 4.0)
 
     # ------------------------------------------------------------ odběry
     async def _check_sub(self, sid: int) -> dict:

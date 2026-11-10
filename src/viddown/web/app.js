@@ -75,6 +75,9 @@ function applyTheme(theme) {
   const dark = theme === 'dark' || (theme === 'system' && matchMedia('(prefers-color-scheme: dark)').matches);
   document.documentElement.dataset.theme = dark ? 'dark' : 'light';
 }
+/* zobrazení miniatur ve frontě (jen v tomto prohlížeči) */
+function thumbsOn() { try { return localStorage.getItem('vd_thumbs') !== '0'; } catch (e) { return true; } }
+function setThumbs(on) { try { localStorage.setItem('vd_thumbs', on ? '1' : '0'); } catch (e) { /* bez úložiště */ } }
 function thumbHtml(j, w, h, opts = {}) {
   const busy = j.status === 'new' || j.status === 'probing';
   const inner = busy ? '<div class="spin"></div>' : ic('film', 20);
@@ -211,7 +214,7 @@ function rowHtml(j, pos, child = false) {
   const toggle = isGroup ? `<button class="ibtn" data-a="expand" data-id="${j.id}" title="${T('Rozbalit', 'Expand')}">${ic(App.expanded.has(j.id) ? 'up' : 'down', 15)}</button>` : '';
   return `<div class="qr${pz}${child ? ' child' : ''}" data-row="${j.id}" ${child ? '' : 'draggable="true"'}>
    <span class="grip">${child ? '' : ic('grip', 15)}</span><span class="pos">${pos ?? ''}</span>
-   <div class="fade">${thumbHtml(j, child ? 72 : 96, child ? 40 : 54, { cls: isGroup ? 'stack' : '' })}</div>
+   <div class="fade">${thumbsOn() ? thumbHtml(j, child ? 72 : 96, child ? 40 : 54, { cls: isGroup ? 'stack' : '' }) : ''}</div>
    <div style="min-width:0"><div class="b6 ell fade" title="${esc(title)}">${esc(title)}</div><div class="mm">${meta}</div></div>
    <div class="fade hide-s">${methodBadge(j.method)}</div><div class="t2 fs12 fade hide-s">${right}</div>
    <div class="acts">${toggle}${acts}<button class="ibtn" title="${T('Odstranit z fronty', 'Remove from queue')}" data-a="cancel" data-id="${j.id}">${ic('x', 15)}</button></div></div>`;
@@ -219,7 +222,7 @@ function rowHtml(j, pos, child = false) {
 
 function runHtml(j) {
   const p = j.progress; const sn = j.method === 'sniffer';
-  return `<div class="card run">${thumbHtml(j, 176, 99, { res: true })}
+  return `<div class="card run">${thumbsOn() ? thumbHtml(j, 176, 99, { res: true }) : ''}
   <div class="grow"><div class="row gap8"><span class="b6 fs15 ell">${esc(j.title || j.url)}</span>${methodBadge(j.method)}</div>
   <div class="t2 fs12 row gap6" style="margin-top:4px">${esc(j.channel || '')}${j.channel ? ' · ' : ''}${j.height ? j.height + 'p · ' : ''}${T('přidáno přes', 'added via')} ${srcName(j.source)}</div>
   <div class="bar thick ${sn ? 'sn' : ''} ${p == null ? 'ind' : ''}" style="margin-top:14px"><i style="width:${p == null ? 35 : Math.max(1, p * 100)}%"></i></div>
@@ -235,7 +238,12 @@ function renderQueueDyn() {
   const top = q.filter(j => !j.parent_id);
   const running = q.filter(j => j.status === 'running');
   const confirm = top.filter(j => j.status === 'confirm');
-  const waiting = top.filter(j => j.status !== 'running' && j.status !== 'confirm');
+  const waitingAll = top.filter(j => j.status !== 'running' && j.status !== 'confirm');
+  // filtr podle názvu (i podle kanálu a URL); playlist se ukáže, když vyhovuje on nebo některá jeho položka
+  const f = (App.qf || '').trim().toLowerCase();
+  const hit = j => !f || [j.title, j.url, j.channel].some(x => x && String(x).toLowerCase().includes(f));
+  const kidsOf = j => q.filter(c => c.parent_id === j.id && c.status !== 'running');
+  const waiting = f ? waitingAll.filter(j => hit(j) || (j.kind !== 'video' && kidsOf(j).some(hit))) : waitingAll;
   let html = '';
   if (st.queue_paused) {
     const disk = st.pause_reason === 'disk';
@@ -266,8 +274,10 @@ function renderQueueDyn() {
    ${!st.pause_hard && running.length ? `<button class="btn sm" data-q="pause_all" title="${T('Přeruší i rozpracovaná stahování. Stahování z internetu po obnovení naváže, zpracování ffmpeg začne znovu od začátku.', 'Interrupts downloads in progress too. Downloading resumes, ffmpeg processing restarts from the beginning.')}">${ic('pause', 13)} ${T('Pozastavit vše', 'Pause all')}</button>` : ''}</div>`;
   html += running.length ? `<div class="col gap10">${running.map(runHtml).join('')}</div>`
     : `<div class="card empty" style="padding:22px">${T('Nic se právě nestahuje.', 'Nothing is downloading right now.')}</div>`;
-  html += `<div class="sec"><h2>${T('Čeká ve frontě', 'Waiting')}</h2><span class="chip"><b>${waiting.length}</b></span><span class="grow"></span><span class="t2 fs12 row gap6">${ic('grip', 14)} ${T('Přetažením změníte pořadí', 'Drag to reorder')}</span></div>`;
-  if (!waiting.length && !running.length && !confirm.length) {
+  html += `<div class="sec"><h2>${T('Čeká ve frontě', 'Waiting')}</h2><span class="chip"><b>${f ? waiting.length + ' / ' + waitingAll.length : waiting.length}</b></span><span class="grow"></span><button class="btn sm ${thumbsOn() ? '' : 'ghost'}" id="qth" title="${T('Zobrazit nebo skrýt miniatury ve frontě', 'Show or hide thumbnails in the queue')}">${ic('film', 13)} ${T('Miniatury', 'Thumbnails')}: ${thumbsOn() ? T('zap', 'on') : T('vyp', 'off')}</button>${waitingAll.length > 1 || f ? `<div class="inwrap" style="height:30px;width:240px">${ic('search', 14)}<input id="qf" placeholder="${T('Filtrovat podle názvu…', 'Filter by name…')}" value="${esc(App.qf || '')}" autocomplete="off"></div>` : ''}<span class="t2 fs12 row gap6">${ic('grip', 14)} ${T('Přetažením změníte pořadí', 'Drag to reorder')}</span></div>`;
+  if (f && !waiting.length && waitingAll.length) {
+    html += `<div class="card empty" style="padding:22px">${T('Filtru neodpovídá žádná čekající položka.', 'No waiting item matches the filter.')}</div>`;
+  } else if (!waiting.length && !running.length && !confirm.length) {
     html += App.subFilter
       ? `<div class="card empty">${ic('rss', 32)}<h3>${T('Fronta odběru je prázdná', 'This subscription has nothing queued')}</h3><p>${T('Nová videa se zařadí sama při příští kontrole. Můžete ji spustit tlačítkem nahoře.', 'New videos are queued automatically at the next check. You can start one with the button above.')}</p></div>`
       : `<div class="card empty">${ic('download', 32)}<h3>${T('Fronta je prázdná', 'The queue is empty')}</h3><p>${T('Vložte odkaz na video, playlist nebo kanál do pole nahoře, nebo ho pošlete Telegram botovi.', 'Paste a link to a video, playlist or channel above, or send it to the Telegram bot.')}</p></div>`;
@@ -275,15 +285,23 @@ function renderQueueDyn() {
     let rows = '', n = 0;
     for (const j of waiting) {
       rows += rowHtml(j, ++n);
-      if (j.kind !== 'video' && App.expanded.has(j.id)) {
-        const kids = q.filter(c => c.parent_id === j.id && c.status !== 'running');
+      if (j.kind !== 'video' && (App.expanded.has(j.id) || f)) {
+        const kids = kidsOf(j).filter(c => !f || hit(j) || hit(c));
         kids.slice(0, 200).forEach((c, i) => { rows += rowHtml(c, `${n}.${i + 1}`, true); });
         if (kids.length > 200) rows += `<div class="qr child"><span></span><span></span><span></span><span class="fs12 t2">+ ${kids.length - 200}</span></div>`;
       }
     }
     html += `<div class="card qlist" id="qlist">${rows}</div>`;
   }
+  const wasFocused = document.activeElement && document.activeElement.id === 'qf', caret = wasFocused ? document.activeElement.selectionStart : 0;
   box.innerHTML = html;
+  box.classList.toggle('nothumb', !thumbsOn());
+  const qth = $('#qth', box); if (qth) qth.onclick = () => { setThumbs(!thumbsOn()); renderQueueDyn(); };
+  const qf = $('#qf', box);
+  if (qf) {
+    qf.oninput = e => { App.qf = e.target.value; renderQueueDyn(); };
+    if (wasFocused) { qf.focus(); qf.setSelectionRange(caret, caret); }
+  }
 }
 
 document.addEventListener('click', async e => {
@@ -793,6 +811,7 @@ const SECTIONS = () => [
     { k: 'playlist_confirm_threshold', type: 'number', min: 1, suffix: ['videí', 'videos'], label: ['Potvrdit playlist nad', 'Confirm playlists over'], hint: ['Větší playlist nebo kanál se nejdřív potvrdí', 'Larger playlists ask first'] },
     { k: 'subscription_check_hours', type: 'number', min: 0, suffix: 'h', label: ['Kontrola odběrů po', 'Check subscriptions every'], hint: ['Jak často se hledají nová videa v odběrech; 0 = vypnuto', 'How often subscriptions look for new videos; 0 = off'] },
     { k: 'live_from_start', type: 'toggle', label: ['Nahrávat živé přenosy od začátku', 'Record live streams from start'], hint: ['Jinak se probíhající přenos přeskočí', 'Otherwise live streams are skipped'] },
+    { k: 'queue_previews', type: 'toggle', label: ['Náhledy a názvy ve frontě', 'Previews and titles in the queue'], hint: ['Na pozadí doplní miniaturu a název čekajícím videím (po jednom, s odstupem). V režimu Šetrný se nenačítá.', 'Fills in the thumbnail and title of waiting videos in the background (one at a time). Off in Eco mode.'] },
     { k: 'subtitles', type: 'toggle', label: ['Titulky', 'Subtitles'], hint: ['Vloží se do souboru videa', 'Embedded into the video file'] },
     { k: 'subtitle_langs', type: 'text', w: 120, label: ['Jazyky titulků', 'Subtitle languages'] },
     { k: 'auto_subtitles', type: 'toggle', label: ['Včetně automatických titulků', 'Include auto-generated'] },
