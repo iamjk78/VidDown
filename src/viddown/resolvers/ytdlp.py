@@ -178,8 +178,13 @@ async def download(url: str, info: dict | None, ctx: Ctx, staging: Path, name: s
         raise Cancelled()
     if skipped:
         return {"skipped": skipped}
+    if code == 0 and not filepath and not any(l.startswith("ERROR") for l in tail):
+        # --print vypíná hlášky yt-dlp: úspěšný konec bez souboru = video už je v archivu stažených
+        return {"skipped": "archive"}
     if code != 0 or not filepath:
         msg = _error_from("\n".join(tail))
+        if code != 0 or not tail:
+            log.warning("yt-dlp skončil s kódem %s, souborem %r; poslední řádky: %s", code, filepath, " | ".join(tail[-6:]))
         if use_subs and "subtitle" in msg.lower():
             # titulky jsou doplněk (YouTube je často omezuje – HTTP 429): video stáhneme i bez nich
             log.warning("titulky se nepodařilo stáhnout (%s), zkouším bez titulků", msg)

@@ -108,3 +108,10 @@ def test_free_space_unreliable_for_docker_desktop_volumes(tmp_path, monkeypatch)
     monkeypatch.setattr(util, "_mount_source", lambda p: "/run/host_mark/Users")
     free, ok = util.free_space(tmp_path)
     assert ok and free > 0
+
+
+def test_private_video_is_not_cookies_error():
+    msg = ("[youtube] x: Private video. If the owner of this video has granted you access, please sign in. "
+           "Use --cookies-from-browser or --cookies for the authentication.")
+    assert util.classify_error(msg) == "login"
+    assert util.classify_error("could not find firefox cookies database in /root") == "cookies"

@@ -131,10 +131,14 @@ async def sniff(url: str, ctx: Ctx) -> dict:
             context = await browser.new_context(user_agent=UA, viewport={"width": 1280, "height": 720},
                                                 ignore_https_errors=True, locale="cs-CZ")
             if ctx.cookies_file:
-                try:
-                    await context.add_cookies(parse_netscape_cookies(ctx.cookies_file))
-                except Exception as e:  # noqa: BLE001
-                    log.warning("cookies nelze načíst: %s", e)
+                bad = 0
+                for ck in parse_netscape_cookies(ctx.cookies_file):
+                    try:
+                        await context.add_cookies([ck])
+                    except Exception:  # noqa: BLE001  – jedna vadná cookie nesmí zahodit ostatní
+                        bad += 1
+                if bad:
+                    log.warning("cookies: %d položek se nepodařilo načíst do prohlížeče, přeskočeno", bad)
             await context.add_init_script(INIT_JS)
             page = await context.new_page()
 

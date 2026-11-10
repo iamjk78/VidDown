@@ -58,7 +58,7 @@ services:
       # - /volume1:/nas         # Synology: celý svazek
 ```
 
-V GUI pak zadejte cestu uvnitř kontejneru, např. `/nas/sdileni/VidDown`. Při uložení se ověří,
+V GUI pak zadejte cestu uvnitř kontejneru, např. `/nas/Videos`. Při uložení se ověří,
 že složka leží na připojeném svazku a že do ní jde zapisovat. Jinak se uložení odmítne s vysvětlením.
 Když cílová složka za provozu přestane být dostupná (odpojený NAS), fronta se pozastaví a po obnovení
 přístupu sama pokračuje. Už stažené video počká v dočasné složce a znovu se nestahuje.
