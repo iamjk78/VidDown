@@ -156,3 +156,19 @@ def test_history_pagination_and_stream(client, tmp_path):
     r = c.get(f"/api/stream/{j}", headers={"Range": "bytes=0-9"})
     assert r.status_code == 206 and r.content == b"0123456789"
     assert r.headers["content-type"].startswith("video/mp4") and r.headers["content-disposition"].startswith("inline")
+
+
+def test_history_bulk_delete(client):
+    c, st = client
+    ids = [st.db.add(f"https://v/{i}", status="failed" if i < 4 else "done", title=f"Vid{i}", finished_at=100.0 + i) for i in range(6)]
+    active = st.db.add("https://v/active", status="queued", title="Vid-active")
+    # vybrané ID
+    assert c.request("DELETE", "/api/history", json={"ids": ids[:2]}).json()["deleted"] == 2
+    # podle filtru: všechny chyby
+    assert c.request("DELETE", "/api/history", json={"filter": {"status": "failed"}}).json()["deleted"] == 2
+    # podle názvu
+    assert c.request("DELETE", "/api/history", json={"filter": {"q": "Vid5"}}).json()["deleted"] == 1
+    assert c.get("/api/history").json()["matched"] == 1
+    assert st.db.get(active) is not None   # aktivní úlohy se nikdy nemažou
+    assert c.request("DELETE", "/api/history", json={"filter": {}}).json()["deleted"] == 1
+    assert st.db.get(active) is not None

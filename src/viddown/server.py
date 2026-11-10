@@ -292,6 +292,9 @@ def create_app(app_state) -> FastAPI:
             body = await req.json()
         except Exception:  # noqa: BLE001
             body = {}
+        f = body.get("filter")
+        if isinstance(f, dict):  # hromadně podle aktuálního filtru (hledání, stav, období)
+            return {"deleted": S.db.delete_history_matching(str(f.get("q") or ""), str(f.get("status") or ""), int(f.get("days") or 0))}
         return {"deleted": S.db.delete_history(body.get("ids"))}
 
     # ------------------------------------------------------------ nastavení

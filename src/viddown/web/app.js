@@ -296,11 +296,12 @@ async function renderHistory() {
    <span class="seg" id="hst">${[['', T('Vše', 'All')], ['done', T('Hotovo', 'Done')], ['failed', T('Chyby', 'Failed')], ['cancelled', T('Zrušeno', 'Cancelled')], ['skipped', T('Přeskočeno', 'Skipped')]].map(([v, l]) => `<button class="${H.status === v ? 'on' : ''}" data-v="${v}">${l}</button>`).join('')}</span>
    <select class="input sm" id="hdays" style="width:170px">${[[1, T('Posledních 24 h', 'Last 24 h')], [7, T('Posledních 7 dní', 'Last 7 days')], [30, T('Posledních 30 dní', 'Last 30 days')], [0, T('Vše', 'All time')]].map(([v, l]) => `<option value="${v}" ${H.days === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
    <button class="btn sm" id="hclear">${ic('trash', 13)} ${T('Vymazat historii', 'Clear history')}</button></div>
+   <div id="hbulk"></div>
    <div class="card" style="overflow:hidden" id="hlist"><div class="empty"><div class="spin" style="margin:auto"></div></div></div>
    <div class="row gap10 wrap" id="hpager"></div>`;
-  let tmr; $('#hq').oninput = e => { clearTimeout(tmr); tmr = setTimeout(() => { H.q = e.target.value; H.offset = 0; loadHistory(); }, 300); };
-  $$('#hst button').forEach(b => b.onclick = () => { H.status = b.dataset.v; H.offset = 0; $$('#hst button').forEach(x => x.classList.toggle('on', x === b)); loadHistory(); });
-  $('#hdays').onchange = e => { H.days = +e.target.value; H.offset = 0; loadHistory(); };
+  let tmr; $('#hq').oninput = e => { clearTimeout(tmr); tmr = setTimeout(() => { H.q = e.target.value; H.offset = 0; resetSel(); loadHistory(); }, 300); };
+  $$('#hst button').forEach(b => b.onclick = () => { H.status = b.dataset.v; H.offset = 0; resetSel(); $$('#hst button').forEach(x => x.classList.toggle('on', x === b)); loadHistory(); });
+  $('#hdays').onchange = e => { H.days = +e.target.value; H.offset = 0; resetSel(); loadHistory(); };
   $('#hclear').onclick = async () => { if (confirm(T('Smazat celou historii? Stažené soubory zůstanou na disku.', 'Delete all history? Downloaded files stay on disk.'))) { await act(() => api('/api/history', { method: 'DELETE', body: {} }), T('Historie smazána', 'History cleared')); H.offset = 0; loadHistory(); } };
   loadHistory();
 }
@@ -314,8 +315,32 @@ function pagerHtml(matched, offset, limit) {
     ${pages > 1 ? `<span class="row gap4">${btn(cur - 1, ic('right', 12).replace('M9 6l6 6-6 6', 'M15 6l-6 6 6 6'), cur <= 1)}${nums.map(p => p === '…' ? '<span class="t2">…</span>' : btn(p)).join('')}${btn(cur + 1, ic('right', 12), cur >= pages)}</span>` : ''}
     <label class="row gap6 t2 fs12">${T('Na stránku', 'Per page')}<select class="input sm" id="hlimit" style="width:76px">${PAGE_SIZES.map(n => `<option ${n === limit ? 'selected' : ''}>${n}</option>`).join('')}</select></label>`;
 }
+function resetSel() { const H = App.hist; H.sel = new Set(); H.all = false; }
+function bulkBar(matched) {
+  const H = App.hist, el = $('#hbulk'); if (!el) return;
+  const n = H.all ? matched : H.sel.size;
+  if (!n) { el.innerHTML = ''; return; }
+  const allPage = H.items.length > 0 && H.items.every(x => H.sel.has(x.id));
+  el.innerHTML = `<div class="card row gap10 wrap" style="padding:10px 16px;margin-bottom:12px"><b>${T('Vybráno', 'Selected')}: ${n}</b>
+    ${!H.all && allPage && matched > H.sel.size ? `<button class="btn sm" id="bsall">${T(`Vybrat všech ${matched} odpovídajících filtru`, `Select all ${matched} matching the filter`)}</button>` : ''}
+    <button class="btn sm" id="bsnone">${T('Zrušit výběr', 'Clear selection')}</button><span class="grow"></span>
+    <button class="btn sm danger" id="bsdel">${ic('trash', 13)} ${T('Odstranit vybrané', 'Delete selected')} (${n})</button></div>`;
+  const refresh = () => {
+    $$('.hsel', $('#hlist')).forEach(c => { c.checked = H.all || H.sel.has(+c.dataset.id); c.closest('.hr').classList.toggle('sel', c.checked); });
+    const a = $('#hall'); if (a) a.checked = H.all || (H.items.length > 0 && H.items.every(x => H.sel.has(x.id)));
+    bulkBar(matched);
+  };
+  const b1 = $('#bsall'); if (b1) b1.onclick = () => { H.all = true; refresh(); };
+  $('#bsnone').onclick = () => { resetSel(); refresh(); };
+  $('#bsdel').onclick = async () => {
+    if (!confirm(T(`Odstranit ${n} záznamů z historie? Stažené soubory zůstanou na disku.`, `Delete ${n} records from history? Downloaded files stay on disk.`))) return;
+    const body = H.all ? { filter: { q: H.q, status: H.status, days: H.days } } : { ids: [...H.sel] };
+    const ok = await act(() => api('/api/history', { method: 'DELETE', body }), T('Záznamy odstraněny', 'Records deleted'));
+    if (ok) { resetSel(); H.offset = 0; loadHistory(); }
+  };
+}
 async function loadHistory() {
-  const H = App.hist;
+  const H = App.hist; if (!H.sel) resetSel();
   const r = await act(() => api(`/api/history?q=${encodeURIComponent(H.q)}&status=${H.status}&days=${H.days}&offset=${H.offset}&limit=${H.limit}`)); if (!r) return;
   if (!r.items.length && r.matched && H.offset >= r.matched) { H.offset = Math.max(0, Math.floor((r.matched - 1) / H.limit) * H.limit); return loadHistory(); }
   H.items = r.items;
@@ -335,12 +360,27 @@ async function loadHistory() {
         (local ? `<button class="ibtn" title="${T('Zobrazit ve složce', 'Show in folder')}" data-h="open" data-id="${h.id}">${ic('folder', 15)}</button>` : '') +
         `<a class="ibtn" title="${T('Stáhnout soubor', 'Download file')}" href="/api/file/${h.id}">${ic('download', 15)}</a>`
       : `<button class="btn sm" data-h="retry" data-id="${h.id}">${ic('refresh', 12)} ${T('Znovu', 'Retry')}</button>`;
-    return `<div class="hr"><div ${playable ? `data-h="play" data-id="${h.id}" style="cursor:pointer" title="${T('Přehrát', 'Play')}"` : ''}>${thumbHtml(h, 104, 58)}</div><div style="min-width:0"><div class="b6 fs14 ell" title="${esc(h.filepath || h.url)}">${esc(h.title || h.url)}</div>${sub}</div>
+    const on = H.all || H.sel.has(h.id);
+    return `<div class="hr ${on ? 'sel' : ''}"><div><input type="checkbox" class="hsel" data-id="${h.id}" ${on ? 'checked' : ''}></div><div ${playable ? `data-h="play" data-id="${h.id}" style="cursor:pointer" title="${T('Přehrát', 'Play')}"` : ''}>${thumbHtml(h, 104, 58)}</div><div style="min-width:0"><div class="b6 fs14 ell" title="${esc(h.filepath || h.url)}">${esc(h.title || h.url)}</div>${sub}</div>
      <div>${gone ? `<span class="badge b-warn">${ic('trash', 11)} ${T('Soubor smazán', 'File deleted')}</span>` : badge[h.status] || ''}</div><div class="hide-s">${methodBadge(h.method)}</div><div class="b5 hide-s">${h.status === 'done' && !gone ? fmtBytes(h.filesize) : '—'}</div><div class="t2">${fmtDate(h.finished_at)}</div>
      <div class="acts">${acts}<a class="ibtn" title="${esc(h.url)}" href="${esc(h.url)}" target="_blank" rel="noopener noreferrer">${ic('link', 15)}</a><button class="ibtn" title="${T('Smazat záznam', 'Delete record')}" data-h="del" data-id="${h.id}">${ic('trash', 14)}</button></div></div>`;
   }).join('');
-  $('#hlist').innerHTML = r.items.length ? `<div class="hr h"><span></span><span>Video</span><span>${T('Stav', 'Status')}</span><span class="hide-s">${T('Metoda', 'Method')}</span><span class="hide-s">${T('Velikost', 'Size')}</span><span>${T('Dokončeno', 'Finished')}</span><span></span></div>${rows}`
+  $('#hlist').innerHTML = r.items.length ? `<div class="hr h"><span><input type="checkbox" id="hall" title="${T('Vybrat vše na stránce', 'Select all on page')}"></span><span></span><span>Video</span><span>${T('Stav', 'Status')}</span><span class="hide-s">${T('Metoda', 'Method')}</span><span class="hide-s">${T('Velikost', 'Size')}</span><span>${T('Dokončeno', 'Finished')}</span><span></span></div>${rows}`
     : `<div class="empty">${ic('history', 30)}<h3>${T('Historie je prázdná', 'History is empty')}</h3><p>${T('Dokončená a neúspěšná stahování se zobrazí tady.', 'Finished and failed downloads show up here.')}</p></div>`;
+  const markRows = () => $$('.hsel', $('#hlist')).forEach(c => c.closest('.hr').classList.toggle('sel', c.checked));
+  $$('.hsel', $('#hlist')).forEach(c => c.onchange = () => {
+    const id = +c.dataset.id;
+    if (H.all) { H.all = false; H.items.forEach(x => H.sel.add(x.id)); }  // ruční zásah ruší „vše dle filtru“
+    if (c.checked) H.sel.add(id); else H.sel.delete(id);
+    markRows(); const a = $('#hall'); if (a) a.checked = H.items.every(x => H.sel.has(x.id));
+    bulkBar(r.matched);
+  });
+  const ha = $('#hall');
+  if (ha) {
+    ha.checked = H.all || (H.items.length > 0 && H.items.every(x => H.sel.has(x.id)));
+    ha.onchange = () => { H.all = false; H.items.forEach(x => { if (ha.checked) H.sel.add(x.id); else H.sel.delete(x.id); }); $$('.hsel', $('#hlist')).forEach(c => { c.checked = ha.checked; }); markRows(); bulkBar(r.matched); };
+  }
+  bulkBar(r.matched);
   $('#hpager').innerHTML = r.matched ? pagerHtml(r.matched, r.offset, r.limit) : '';
   $$('[data-page]', $('#hpager')).forEach(b => b.onclick = () => { H.offset = (+b.dataset.page - 1) * H.limit; loadHistory(); $('#mainwrap').scrollTop = 0; });
   const sel = $('#hlimit'); if (sel) sel.onchange = e => { H.limit = +e.target.value; try { localStorage.setItem('vd_hist_limit', H.limit); } catch (er) { /* bez úložiště */ } H.offset = 0; loadHistory(); };
@@ -728,6 +768,7 @@ function renderHelp() {
       <li>Playlist nebo kanál s více videi než nastavený práh (výchozí 50) se nejdřív <b>potvrdí</b>.</li>
       <li>Mezi videi z jednoho playlistu je krátká náhodná pauza (5–15 s), aby web stahování nezablokoval. Platí pro každé souběžné stahování zvlášť, takže souběžnost se tím nesnižuje.</li>
       <li>Už stažená videa se znovu nestahují. Opakované vložení kanálu stáhne jen nová videa – i když jste některá videa mezitím ručně smazali.</li>
+      <li><b>Hromadné odstranění záznamů:</b> zaškrtněte políčka u záznamů (nebo horní políčko pro celou stránku). Filtr „Chyby“ nebo hledání podle názvu pak dovolí tlačítkem <b>Vybrat všech … odpovídajících filtru</b> označit i záznamy na dalších stránkách. Odstraní se jen záznamy, soubory na disku zůstanou.</li>
       <li>Když soubor na úložišti ručně smažete, historie ho označí <b>Soubor smazán</b>. Tlačítkem <b>Stáhnout znovu</b> video vyřadíte z archivu stažených a zařadíte do fronty.</li>
       <li>Videa z playlistu/kanálu se ukládají do <b>samostatné složky</b> pojmenované podle playlistu/kanálu (lze vypnout).</li></ul>`, `
       <ul><li>Playlist and channel links expand into individual videos, grouped under one row in the queue (expand it with the arrow).</li>
@@ -735,6 +776,7 @@ function renderHelp() {
       <li>Playlists larger than the threshold (default 50) ask for <b>confirmation</b> first.</li>
       <li>There's a short random pause (5–15 s) between videos of one playlist so the site doesn't block you. It applies per parallel download, so it doesn't reduce parallelism.</li>
       <li>Already downloaded videos are skipped. Re-adding a channel only fetches new videos – even if you deleted some files meanwhile.</li>
+      <li><b>Bulk delete of records:</b> tick the boxes (or the header box for the whole page). With the “Failed” filter or a title search, <b>Select all … matching the filter</b> also covers other pages. Only records are removed; files on disk stay.</li>
       <li>If you delete a file on the storage, history marks it <b>File deleted</b>. <b>Download again</b> removes it from the download archive and queues it.</li>
       <li>Playlist/channel videos go to a <b>separate folder</b> named after it (can be turned off).</li></ul>`)],
     ['naming', T('Pojmenování souborů', 'File naming'), T(`

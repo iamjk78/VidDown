@@ -218,6 +218,14 @@ class DB:
             c.execute("delete from jobs where status='expanded' and not exists(select 1 from jobs c where c.parent_id=jobs.id)")
             return n
 
+    def delete_history_matching(self, q: str = "", status: str = "", days: int = 0) -> int:
+        """Smaže všechny záznamy historie odpovídající filtru (hledání, stav, období)."""
+        where, args = self._history_where(q, status, days)
+        with self.conn() as c:
+            n = c.execute(f"delete from jobs{where}", args).rowcount
+            c.execute("delete from jobs where status='expanded' and not exists(select 1 from jobs c where c.parent_id=jobs.id)")
+            return n
+
     def purge_older(self, days: int) -> int:
         if not days:
             return 0
