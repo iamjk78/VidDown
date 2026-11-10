@@ -118,7 +118,10 @@ async def _list_result(kind: str, title: str, thumb: str | None, entries: list[d
 
 
 async def _probe_sniffer(url: str, ctx: Ctx) -> dict:
-    sn = await sniffer.sniff(url, ctx)
+    return _sniff_result(await sniffer.sniff(url, ctx), url)
+
+
+def _sniff_result(sn: dict, url: str) -> dict:
     cands = sn["candidates"]
     if not cands:
         if sn["drm"]:
@@ -139,10 +142,13 @@ async def probe_url(url: str, ctx: Ctx) -> dict:
     if pages.is_story_url(url):
         # Facebook Story: video leží za odkazem (sdílený reel) – najdeme ho a zkontrolujeme jako běžné video
         try:
-            target = await pages.resolve_embedded(url, ctx)
+            st = await pages.open_story(url, ctx)
+            if "sniff" in st:  # story má vlastní video (ne sdílený reel)
+                return _sniff_result(st["sniff"], url)
         except ResolveError as e:
             log.info("probe %s (story): %s (%s)", url, e, e.kind)
             return {"type": "none", "error": str(e), "error_kind": e.kind}
+        target = st["link"]
         res = await probe_url(target, ctx)
         if res.get("type") != "none":
             res["resolved_url"] = target

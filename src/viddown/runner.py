@@ -21,7 +21,7 @@ from .db import ACTIVE, DB
 from .i18n import t
 from .probe import probe_url, trim_info
 from .resolvers import Cancelled, Ctx, ProcHolder, ResolveError
-from .resolvers import sniffer, ytdlp
+from .resolvers import pages, sniffer, ytdlp
 from .util import (classify_error, fallback_allowed, free_space, in_schedule, render_template, retry_allowed,
                    sanitize_filename, unique_target)
 
@@ -466,7 +466,13 @@ class Runner:
     async def _dl_sniffer(self, job, info, ctx, staging, holder, on_progress):
         sn = info.get("sniff")
         if not sn or time.time() - float(info.get("sniffed_at", 0)) > 600:
-            sn = await sniffer.sniff(job["url"], ctx)
+            if pages.is_story_url(job["url"]):
+                st = await pages.open_story(job["url"], ctx)
+                if "sniff" not in st:
+                    raise ResolveError("story už neobsahuje vlastní video", "unsupported")
+                sn = st["sniff"]
+            else:
+                sn = await sniffer.sniff(job["url"], ctx)
             if not sn["candidates"]:
                 raise ResolveError("video je chráněné DRM" if sn["drm"] else "na stránce nebylo nalezeno žádné video",
                                    "drm" if sn["drm"] else "unsupported")

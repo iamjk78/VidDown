@@ -34,7 +34,7 @@ def test_probe_resolves_story_to_embedded_video(monkeypatch):
     from viddown.resolvers import ResolveError
 
     async def fake_resolve(url, ctx):
-        return "https://www.facebook.com/reel/1/"
+        return {"link": "https://www.facebook.com/reel/1/"}
 
     async def fake_ytdlp(url, ctx):
         assert url == "https://www.facebook.com/reel/1/"
@@ -45,7 +45,7 @@ def test_probe_resolves_story_to_embedded_video(monkeypatch):
             @staticmethod
             def get(k, d=None):
                 return ["ytdlp"] if k == "methods" else d
-    monkeypatch.setattr(probe.pages, "resolve_embedded", fake_resolve)
+    monkeypatch.setattr(probe.pages, "open_story", fake_resolve)
     monkeypatch.setattr(probe, "_probe_ytdlp", fake_ytdlp)
     story = "https://www.facebook.com/stories/1/abc/"
     res = asyncio.run(probe.probe_url(story, Ctx()))
@@ -53,5 +53,22 @@ def test_probe_resolves_story_to_embedded_video(monkeypatch):
 
     async def fail_resolve(url, ctx):
         raise ResolveError("žádný odkaz", "unsupported")
-    monkeypatch.setattr(probe.pages, "resolve_embedded", fail_resolve)
+    monkeypatch.setattr(probe.pages, "open_story", fail_resolve)
     assert asyncio.run(probe.probe_url(story, Ctx()))["type"] == "none"
+
+
+def test_story_media_helpers():
+    import base64
+    import json
+    from viddown.resolvers import pages
+
+    def efg(tag):
+        return base64.urlsafe_b64encode(json.dumps({"vencode_tag": tag}).encode()).decode().rstrip("=")
+    base = "https://scontent.x/o1/v/a.mp4?_nc_cat=1&efg=%s&bytestart=0&byteend=906&oh=abc"
+    assert pages.stream_kind(base % efg("dash_ln_heaac_vbr3_audio")) == "audio"
+    assert pages.stream_kind(base % efg("dash_av1_540p_video")) == "video"
+    assert pages.stream_kind("https://x/a.mp4") == "video"
+    u = pages.whole_file_url(base % "E")
+    assert "bytestart" not in u and "byteend" not in u and "oh=abc" in u and "_nc_cat=1" in u
+    assert pages.story_author("Počet nepřečtených upozornění\n18\nRadio Kiss\n15 h\nPošlete zprávu") == "Radio Kiss"
+    assert pages.story_author("nic") is None

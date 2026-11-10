@@ -311,6 +311,17 @@ class FFmpeg(Engine):
     binaries = ("ffmpeg", "ffprobe")
     description = "Spojování a převod videa"
 
+    @staticmethod
+    def prefer_system() -> bool:
+        """Na Linuxu (Docker) má přednost systémový ffmpeg: staticky sestavený ffmpeg z eugeneware/ffmpeg-static
+        neumí překládat názvy serverů (DNS), takže nestáhne nic ze sítě (HLS, přímé odkazy)."""
+        return sys.platform.startswith("linux") and shutil.which("ffmpeg") is not None
+
+    def bin_path(self, binary: str | None = None, version: str | None = None) -> str | None:
+        if not version and self.prefer_system():
+            return shutil.which(binary or self.binaries[0])
+        return super().bin_path(binary, version)
+
     def version_args(self):
         return ["-version"]
 
@@ -465,6 +476,9 @@ class EngineManager:
             self.log(name, f"nelze zjistit nejnovější verzi: {ex}")
             return {"status": "error", "message": str(ex)}
         self._record_check(name, rel.version)
+        if name == "ffmpeg" and e.prefer_system():
+            self.log(name, "na Linuxu se používá systémový ffmpeg (stažená statická verze neumí DNS) – aktualizace přeskočena")
+            return {"status": "up-to-date", "version": f"{e.system_version()} (systém)"}
         if old is None:
             sysv = e.system_version()
             if sysv and _vkey(sysv) >= _vkey(rel.version):
