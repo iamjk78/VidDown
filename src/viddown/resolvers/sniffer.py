@@ -63,6 +63,8 @@ def parse_netscape_cookies(path: Path) -> list[dict]:
         c = {"name": name, "value": value, "domain": dom, "path": path_ or "/", "secure": secure.upper() == "TRUE"}
         try:
             e = int(float(exp))
+            if e > 10 ** 11:  # některé exporty (Firefox) mají čas v milisekundách
+                e //= 1000
             if e > 0:
                 c["expires"] = e
         except ValueError:
