@@ -329,6 +329,11 @@ class DB:
 
     def find_active_url(self, url: str) -> dict | None:
         r = self.query("select * from jobs where url=? and status in ('new','probing','confirm','queued','running') limit 1", (url,))
+        if r:
+            return r[0]
+        # už rozbalený playlist/kanál, jehož videa ještě čekají nebo se stahují
+        r = self.query("select * from jobs where url=? and status='expanded' and exists(select 1 from jobs c where c.parent_id=jobs.id "
+                       "and c.status in ('new','probing','confirm','queued','running')) limit 1", (url,))
         return r[0] if r else None
 
     def children(self, parent_id: int) -> list[dict]:

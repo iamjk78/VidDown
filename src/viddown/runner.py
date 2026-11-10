@@ -360,12 +360,25 @@ class Runner:
             entries = (json.loads(job["info"] or "{}")).get("entries") or []
         folder = (job["kind"] == "playlist" and s.get("playlist_folder")) or (job["kind"] == "channel" and s.get("channel_folder"))
         subdir = sanitize_filename(job["title"] or "playlist") if folder else None
+        # videa, která už jsou ve frontě (z jiného playlistu nebo zadaná zvlášť), se nepřidávají podruhé
+        seen: set[str] = set()
+        kept = []
+        for e in entries:
+            u = e.get("url")
+            if u and (u in seen or self.db.find_active_url(u)):
+                continue
+            seen.add(u)
+            kept.append(e)
+        if len(kept) != len(entries):
+            log.info("playlist %s: %d videí už je ve frontě, přeskočeno", job["id"], len(entries) - len(kept))
+        total = len(entries)
+        entries = kept
         for i, e in enumerate(entries, 1):
             e.setdefault("info", {})
             if e["info"] is not None:
                 e["info"]["playlist_index"] = i
         self.db.add_children(job["id"], entries, subdir, job["source"])
-        self.db.update(job["id"], status="expanded", info={"count": len(entries)})
+        self.db.update(job["id"], status="expanded", info={"count": len(entries), "duplicates": total - len(entries)})
 
     def confirm(self, jid: int) -> bool:
         job = self.db.get(jid)

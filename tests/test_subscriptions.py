@@ -345,3 +345,18 @@ def test_migration_backfills_downloads(data):
     assert d.schema_version == dbm.MIGRATIONS[-1][0]
     rows = d.query("select * from downloads order by ts")
     assert [(r["ok"], r["bytes"], r["site"]) for r in rows] == [(1, 500, "vimeo.com"), (0, 0, "x.cz")]
+
+
+def test_expand_skips_videos_already_queued_and_duplicate_playlist_is_refused(rt):
+    entries = lambda: [{"url": f"https://x/v{i}", "title": f"V{i}"} for i in range(3)]  # noqa: E731
+    p1, new1 = rt.add("https://x/list")
+    assert new1
+    rt._expand(rt.db.get(p1), entries())
+    assert len(rt.db.children(p1)) == 3
+    # stejná adresa playlistu, jehož videa čekají, se znovu nepřidá
+    p2, new2 = rt.add("https://x/list")
+    assert (p2, new2) == (p1, False)
+    # jiný playlist s týmiž videi nepřidá nic navíc
+    other = rt.db.add("https://x/other", status="probing", kind="playlist")
+    rt._expand(rt.db.get(other), entries() + [{"url": "https://x/v9", "title": "N"}])
+    assert [c["url"] for c in rt.db.children(other)] == ["https://x/v9"]
