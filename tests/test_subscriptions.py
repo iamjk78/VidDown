@@ -520,3 +520,39 @@ def test_api_page_subscription_with_name(client, tmp_path, fake_pages):
     assert s["kind"] == "page" and s["title"] == "Autosalón" and s["config"]["page_param"] == "pg"
     assert c.post("/api/subscriptions", json={"url": "https://w.example/tv", "kind": "page"}).status_code == 409
     assert c.post("/api/subscriptions", json={"url": "https://w.example/bad", "kind": "page"}).status_code == 400
+
+
+def test_api_suggests_page_mode_for_listing_pages(client, tmp_path, fake_pages, monkeypatch):
+    c, rt = client
+    from viddown import server
+
+    async def none(url, ctx):
+        return {"type": "none", "error": "na stránce nebylo nalezeno žádné video"}
+    monkeypatch.setattr(server, "probe_url", none)
+    r = c.post("/api/subscriptions", json={"url": "https://w.example/tv", "folder": str(tmp_path / "x")})
+    assert r.status_code == 400 and "Stránka s videi" in r.json()["detail"]
+    r = c.post("/api/subscriptions", json={"url": "https://w.example/nic", "folder": str(tmp_path / "x")})
+    assert r.status_code == 400 and "nepodařilo zkontrolovat" in r.json()["detail"]
+
+
+def test_per_subscription_check_interval(rt, tmp_path):
+    now = time.time()
+    a = add_sub(rt, tmp_path); b = rt.db.sub_add("https://x/b", str(tmp_path / "b"), kind="playlist", title="B", since=None)
+    rt.db.sub_update(a, last_check=now - 5 * 3600)              # globálně 6 h → ještě ne
+    rt.db.sub_update(b, last_check=now - 5 * 3600, check_hours=3)   # vlastní 3 h → už ano
+    assert subs.due(rt.db, 6, now)["id"] == b
+    rt.db.sub_update(b, last_check=now)
+    assert subs.due(rt.db, 6, now) is None
+    assert subs.due(rt.db, 0, now - 0) is None                  # globálně vypnuto a bez vlastního intervalu
+    rt.db.sub_update(a, last_check=now - 30 * 86400, check_hours=720)
+    assert subs.due(rt.db, 0, now)["id"] == a                   # vlastní interval funguje i při vypnutém globálním
+
+
+def test_api_check_hours_validation(client, tmp_path, fake_pages):
+    c, rt = client
+    sid = add_sub(rt, tmp_path)
+    assert c.put(f"/api/subscriptions/{sid}", json={"check_hours": 72}).json()["check_hours"] == 72
+    assert c.put(f"/api/subscriptions/{sid}", json={"check_hours": 5}).status_code == 400
+    assert c.put(f"/api/subscriptions/{sid}", json={"check_hours": ""}).json()["check_hours"] is None
+    r = c.post("/api/subscriptions", json={"url": "https://w.example/tv", "kind": "page", "check_hours": 168, "folder": str(tmp_path / "p")})
+    assert r.status_code == 200 and r.json()["check_hours"] == 168

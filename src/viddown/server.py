@@ -285,12 +285,24 @@ def create_app(app_state) -> FastAPI:
     # ------------------------------------------------------------ odběry
     def sub_out(s: dict, counts: dict) -> dict:
         d = {k: s[k] for k in ("id", "url", "kind", "title", "thumb_url", "folder", "since", "enabled", "last_check",
-                               "last_error", "created_at")}
+                               "last_error", "created_at", "check_hours")}
         d["tabs"] = json.loads(s["tabs"]) if s["tabs"] else None
         d["config"] = json.loads(s["config"]) if s.get("config") else None
         d["pending"] = len(json.loads(s["pending"])) if s["pending"] else 0
         d.update({"queued": 0, "running": 0, "done": 0, "failed": 0, "bytes": 0}, **counts.get(s["id"], {}))
         return d
+
+    def parse_hours(v):
+        """Vlastní interval kontroly v hodinách; prázdné/„default“ = globální nastavení."""
+        if v in (None, "", "default", 0, "0"):
+            return None
+        try:
+            h = float(v)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "Neplatný interval kontroly.")
+        if h not in subscriptions.CHECK_CHOICES:
+            raise HTTPException(400, "Interval kontroly: 3 h, 6 h, 12 h, 1 den, 3 dny, 1 týden nebo 1 měsíc.")
+        return h
 
     def parse_tabs(v):
         if v in (None, "", []):
@@ -358,19 +370,27 @@ def create_app(app_state) -> FastAPI:
             title = name or det.get("title") or urlparse(url).netloc
             folder = str(body.get("folder") or "").strip() or str(Path(S.settings.get("download_dir")) / sanitize_filename(title))
             folder = await check_folder(folder)
-            sid = S.db.sub_add(url, folder, kind="page", title=title, since=since, config=cfg)
+            sid = S.db.sub_add(url, folder, kind="page", title=title, since=since, config=cfg, check_hours=parse_hours(body.get("check_hours")))
             return sub_out(S.db.sub_get(sid), S.db.sub_counts())
         res = await probe_url(url, S.runner.ctx())
         if name:
             res["title"] = name
         if res["type"] == "none":
+            # není to kanál ani video? Možná je to stránka se seznamem videí (odběr typu „Stránka“)
+            try:
+                det = await pagelist.analyze(url, S.settings.all())
+            except pagelist.PageError:
+                det = None
+            if det and len(det["items"]) >= 2:
+                raise HTTPException(400, f"Tato adresa není kanál ani playlist, ale vypadá jako stránka se seznamem videí "
+                                         f"(nalezeno {len(det['items'])}). Přepněte zdroj na „Stránka s videi“.")
             raise HTTPException(400, f"URL se nepodařilo zkontrolovat: {res['error']}")
         if res["type"] not in ("channel", "playlist"):
             raise HTTPException(400, "Tato URL je jedno video, ne kanál ani playlist. Odběr jde zřídit jen na seznam videí.")
         folder = str(body.get("folder") or "").strip() or str(Path(S.settings.get("download_dir")) / sanitize_filename(res["title"] or "odběr"))
         folder = await check_folder(folder)
         sid = S.db.sub_add(url, folder, kind=res["type"], title=res.get("title"), thumb_url=res.get("thumb_url"),
-                           since=since, tabs=tabs)
+                           since=since, tabs=tabs, check_hours=parse_hours(body.get("check_hours")))
         return sub_out(S.db.sub_get(sid), S.db.sub_counts())
 
     def need_sub(sid: int) -> dict:
@@ -398,6 +418,8 @@ def create_app(app_state) -> FastAPI:
             ch["seen_old"] = None   # závěry „starší než datum“ platily pro původní datum
         if "enabled" in body:
             ch["enabled"] = 1 if body["enabled"] else 0
+        if "check_hours" in body:
+            ch["check_hours"] = parse_hours(body["check_hours"])
         if "tabs" in body:
             ch["tabs"] = parse_tabs(body["tabs"])
         if "title" in body and str(body["title"]).strip():

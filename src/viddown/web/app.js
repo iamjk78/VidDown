@@ -144,7 +144,7 @@ function renderSide() {
   const disk = st ? st.disk : null;
   const dark = document.documentElement.dataset.theme === 'dark';
   side.innerHTML = `<div class="logo"><div class="mk">${ic('download', 16)}</div>VidDown</div>
-  <div class="col gap4 navs">${nav.map(([v, i, l, c]) => `<button class="nav ${App.view === v ? 'on' : ''}" data-go="${v}">${ic(i, 17)}${l}${c ? `<span class="n">${c}</span>` : ''}</button>${v === 'subs' ? subNav : ''}`).join('')}</div>
+  <div class="col gap4 navs">${nav.map(([v, i, l, c]) => `<button class="nav ${App.view === v ? 'on' : ''}" data-go="${v}">${ic(i, 17)}${l}${c ? `<span class="n">${c}</span>` : ''}</button>${v === 'subs' && (App.view === 'subs' || App.view === 'sub') ? subNav : ''}`).join('')}</div>
   <div class="grow"></div>
   <div class="sfoot col gap8">
    ${disk ? `<div class="card" style="padding:12px;background:var(--surface2)">${disk.same_disk
@@ -369,6 +369,13 @@ function sinceValue(cur) {
   if (cur.mode === 'date') { if (!cur.date) throw new Error(T('Vyberte datum, od kterého se mají videa stahovat.', 'Pick the date to download from.')); return cur.date; }
   return cur.mode;
 }
+const CHECK_OPTS = () => [[3, T('3 hodiny', '3 hours')], [6, T('6 hodin', '6 hours')], [12, T('12 hodin', '12 hours')], [24, T('1 den', '1 day')], [72, T('3 dny', '3 days')], [168, T('1 týden', '1 week')], [720, T('1 měsíc', '1 month')]];
+function intervalControl(prefix, cur) {
+  const g = (App.settings && App.settings.values.subscription_check_hours) || 0;
+  return `<div class="col gap6"><span class="fs12 b6">${T('Kontrola nového obsahu', 'Check for new content')}</span>
+   <select class="input" id="${prefix}chk" style="max-width:260px"><option value="">${T('Výchozí', 'Default')} (${g ? T('každých', 'every') + ' ' + g + ' h' : T('vypnuto', 'off')})</option>${CHECK_OPTS().map(([v, l]) => `<option value="${v}" ${+cur === v ? 'selected' : ''}>${T('každé', 'every')} ${l}</option>`).join('')}</select>
+   <span class="fs12 muted">${T('Jak často se na zdroji hledají nová videa. Výchozí hodnota je v Nastavení › Stahování.', 'How often the source is checked for new videos. The default is in Settings › Downloads.')}</span></div>`;
+}
 function tabsControl(prefix, tabs) {
   const all = [['videos', T('Videa', 'Videos')], ['shorts', 'Shorts'], ['streams', T('Živé přenosy', 'Live streams')]];
   return `<div class="row gap8 wrap" id="${prefix}tabs">${all.map(([v, l]) => `<button type="button" class="chip ${tabs.includes(v) ? 'on' : ''}" data-v="${v}">${l}</button>`).join('')}</div>`;
@@ -397,6 +404,7 @@ function renderSubNew() {
      <span class="fs12 muted">${T('Při uložení se ověří, že do složky jde zapisovat.', 'Write access is checked when you save.')}</span></div>
     <div class="col gap6"><span class="fs12 b6">${T('Stahovat videa', 'Download videos')}</span>${sinceControl('sa', since, true)}
      <span class="fs12 muted">${T('Starší videa se nestáhnou. Nová videa po tomto datu ano, i v budoucnu.', 'Older videos are not downloaded. New ones after this date are, also in the future.')}</span></div>
+    ${intervalControl('sa', null)}
     <div class="col gap6" id="satabs"><span class="fs12 b6">${T('Z kanálu YouTube stahovat', 'From a YouTube channel download')}</span>${tabsControl('sa', tabs)}</div>
     <div class="banner" id="saerr" style="display:none"></div>
     <div class="row gap8"><button class="btn primary lg" id="saok">${ic('plus', 14)} ${T('Přidat odběr', 'Add subscription')}</button><button class="btn lg" data-go="subs">${T('Zrušit', 'Cancel')}</button></div></div>`;
@@ -429,14 +437,16 @@ function renderSubNew() {
     const btn = $('#saok'); const url = $('#sau').value.trim();
     try {
       if (!url) throw new Error(T('Zadejte URL kanálu nebo playlistu.', 'Enter a channel or playlist URL.'));
-      const body = { url, folder: $('#saf').value.trim(), since: sinceValue(since), tabs: tabsValue(tabs), title: $('#sat').value.trim() };
+      const body = { url, folder: $('#saf').value.trim(), since: sinceValue(since), tabs: tabsValue(tabs), title: $('#sat').value.trim(), check_hours: $('#sachk').value };
       if (mode === 'page') { body.kind = 'page'; if (det && $('#sare')) { body.item_regex = $('#sare').value.trim(); body.page_template = $('#sapt').value.trim(); } }
       btn.disabled = true; btn.innerHTML = `<span class="spin" style="width:13px;height:13px"></span> ${T('Kontroluji URL…', 'Checking URL…')}`;
       const r = await api('/api/subscriptions', { method: 'POST', body });
       toast(T('Odběr přidán', 'Subscription added')); if (App.st && App.st.subs && !subById(r.id)) App.st.subs.push(r); go(`sub/${r.id}`);
     } catch (e) {
       if (e.message === 'auth') return;
-      err.innerHTML = `${ic('alert', 18)}<span class="grow">${esc(e.message)}</span>`; err.style.display = 'flex';
+      const hint = mode === 'feed' && e.message.includes('Stránka s videi');
+      err.innerHTML = `${ic('alert', 18)}<span class="grow">${esc(e.message)}</span>${hint ? `<button class="btn sm" id="saswitch">${T('Přepnout na Stránku s videi', 'Switch to Page with videos')}</button>` : ''}`; err.style.display = 'flex';
+      if (hint) $('#saswitch').onclick = () => { err.style.display = 'none'; $('#samode [data-v="page"]').click(); $('#sapv').click(); };
       btn.disabled = false; btn.innerHTML = `${ic('plus', 14)} ${T('Přidat odběr', 'Add subscription')}`;
     }
   };
@@ -486,6 +496,7 @@ function renderSubSettings(s) {
     <div class="col gap6"><span class="fs12 b6">${T('Složka pro videa', 'Folder for videos')}</span><div class="row gap8"><input class="input grow mono fs12" id="ssf" value="${esc(s.folder)}"><button class="btn" id="ssbr">${ic('folder', 14)} ${T('Vybrat…', 'Browse…')}</button></div>
      <span class="fs12 muted">${T('Platí i pro videa, která už čekají ve frontě. Už stažené soubory se nepřesouvají.', 'Also applies to videos already waiting in the queue. Files already downloaded are not moved.')}</span></div>
     <div class="col gap6"><span class="fs12 b6">${T('Stahovat videa', 'Download videos')}</span>${sinceControl('ss', since, false)}</div>
+    ${intervalControl('ss', s.check_hours)}
     ${s.kind === 'channel' ? `<div class="col gap6"><span class="fs12 b6">${T('Z kanálu YouTube stahovat', 'From a YouTube channel download')}</span>${tabsControl('ss', tabs)}</div>` : ''}
     <div class="row gap8"><button class="btn primary" id="ssok">${T('Uložit změny', 'Save changes')}</button></div></div>
    <div class="card col gap10" style="padding:20px;max-width:720px"><h3>${T('Smazat odběr', 'Delete subscription')}</h3>
@@ -495,7 +506,7 @@ function renderSubSettings(s) {
   $('#ssbr').onclick = () => openDirPicker($('#ssf').value, p => { $('#ssf').value = p; });
   $('#ssok').onclick = async () => {
     let body;
-    try { body = { title: $('#ssn').value.trim(), folder: $('#ssf').value.trim(), since: sinceValue(since) }; } catch (e) { return toast(e.message, true); }
+    try { body = { title: $('#ssn').value.trim(), folder: $('#ssf').value.trim(), since: sinceValue(since), check_hours: $('#sschk').value }; } catch (e) { return toast(e.message, true); }
     if (s.kind === 'channel') body.tabs = tabsValue(tabs);
     if (since.mode === 'all') body.since = 'all';
     const r = await act(() => api(`/api/subscriptions/${s.id}`, { method: 'PUT', body }), T('Uloženo', 'Saved'));

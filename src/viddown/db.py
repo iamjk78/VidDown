@@ -143,6 +143,10 @@ PAGE_SUBS_V6 = """
 alter table subscriptions add column config text;    -- JSON nastavení odběru typu 'page' (vzor odkazů, stránkování)
 """
 
+SUB_INTERVAL_V7 = """
+alter table subscriptions add column check_hours real;   -- vlastní interval kontroly (h); null = globální nastavení
+"""
+
 MIGRATIONS: list[tuple[int, object]] = [
     (1, SCHEMA),   # základní schéma (VidDown 0.1.0)
     (2, SUBSCRIPTIONS_V2),   # odběry
@@ -150,6 +154,7 @@ MIGRATIONS: list[tuple[int, object]] = [
     (4, _downloads_v4),      # statistiky stahování
     (5, PHASES_V5),          # fáze stahování
     (6, PAGE_SUBS_V6),       # odběr ze stránky s videi
+    (7, SUB_INTERVAL_V7),    # vlastní interval kontroly odběru
 ]
 
 

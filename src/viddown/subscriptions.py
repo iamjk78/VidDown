@@ -76,15 +76,27 @@ def archive_ids(data_dir) -> set[str]:
     return {l.split(" ", 1)[-1].strip() for l in p.read_text(encoding="utf-8", errors="replace").splitlines() if l.strip()}
 
 
+CHECK_CHOICES = (3, 6, 12, 24, 72, 168, 720)    # hodiny: 3 h, 6 h, 12 h, 1 den, 3 dny, 1 týden, 1 měsíc
+
+
+def interval_hours(sub: dict, default: float) -> float:
+    """Interval kontroly odběru: vlastní, jinak globální (0 = nekontrolovat)."""
+    return float(sub["check_hours"]) if sub.get("check_hours") else float(default or 0)
+
+
 def due(db, hours: float, now: float | None = None) -> dict | None:
-    """Nejdřív na řadě zapnutý odběr, který nečeká na potvrzení a naposledy se kontroloval před víc než `hours`."""
+    """Nejdřív na řadě zapnutý odběr, který nečeká na potvrzení a naposledy se kontroloval před víc než jeho interval
+    (vlastní, jinak globální `hours`; 0 = nekontrolovat)."""
     now = now or time.time()
     best = None
     for s in db.sub_list():
         if not s["enabled"] or s["pending"]:
             continue
+        h = interval_hours(s, hours)
+        if h <= 0:
+            continue
         last = s["last_check"]
-        if last is not None and now - last < hours * 3600:
+        if last is not None and now - last < h * 3600:
             continue
         if best is None or (last or 0) < (best["last_check"] or 0):
             best = s

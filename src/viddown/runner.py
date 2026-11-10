@@ -209,7 +209,7 @@ class Runner:
 
         # 3b) odběry: kontrola nových videí (po jednom odběru, jen když fronta není pozastavená)
         hours = float(s.get("subscription_check_hours") or 0)
-        if hours > 0 and not qpaused and (self._sub_task is None or self._sub_task.done()):
+        if not qpaused and (self._sub_task is None or self._sub_task.done()):
             sub = subscriptions.due(self.db, hours, now)
             if sub:
                 self._sub_task = asyncio.create_task(self._check_sub(sub["id"]))
