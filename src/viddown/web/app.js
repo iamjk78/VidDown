@@ -343,7 +343,7 @@ function renderSubsDyn() {
   const box = $('#subsdyn'); if (!box) return;
   if (!App.st) { box.innerHTML = '<div class="empty"><div class="spin" style="margin:auto"></div></div>'; return; }
   const list = subList();
-  box.innerHTML = list.length ? `<div class="sgrid">${list.map(subCard).join('')}</div>`
+  box.innerHTML = list.length ? `<div class="subgrid">${list.map(subCard).join('')}</div>`
     : `<div class="card empty">${ic('rss', 32)}<h3>${T('Zatím žádné odběry', 'No subscriptions yet')}</h3><p>${T('Odběr sleduje kanál nebo playlist a sám stáhne nová videa do vybrané složky. Můžete zvolit, od kterého data se mají stahovat.', 'A subscription watches a channel or playlist and downloads new videos into a folder you choose, starting from a date you choose.')}</p>
       <div style="margin-top:14px"><button class="btn primary" data-go="subs/new">${ic('plus', 14)} ${T('Přidat první odběr', 'Add your first subscription')}</button></div></div>`;
 }

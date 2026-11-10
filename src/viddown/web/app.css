@@ -171,7 +171,7 @@ button.chip{cursor:pointer}
 .side .logo{padding:0 8px}.side .sfoot{display:none}.side .navs{flex-direction:row!important}.nav{width:auto}.main{padding:16px}.run{flex-direction:column;align-items:stretch}.run .th{width:100%!important;height:auto!important;aspect-ratio:16/9}}
 
 /* odběry */
-.sgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:14px}
+.subgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:14px}
 .scard{padding:16px;display:flex;flex-direction:column;gap:12px;cursor:pointer;transition:border-color .12s}
 .scard:hover{border-color:var(--border2)}
 .sth{position:relative;border-radius:12px;overflow:hidden;background:var(--surface2);display:flex;align-items:center;justify-content:center;color:var(--muted);flex:none}
