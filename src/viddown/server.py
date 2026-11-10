@@ -687,7 +687,12 @@ def create_app(app_state) -> FastAPI:
 
     @app.get("/")
     async def index():
-        return FileResponse(WEB / "index.html", headers={"Cache-Control": "no-cache"})
+        # odkazy na JS a CSS dostanou číslo verze podle obsahu, takže prohlížeč nikdy nepoužije starou kopii
+        html = (WEB / "index.html").read_text(encoding="utf-8")
+        for name in ("app.js", "app.css"):
+            v = hashlib.md5((WEB / name).read_bytes()).hexdigest()[:10]
+            html = html.replace(f"/static/{name}", f"/static/{name}?v={v}")
+        return Response(html, media_type="text/html", headers={"Cache-Control": "no-cache"})
 
     @app.get("/favicon.ico")
     async def favicon():

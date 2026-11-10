@@ -382,3 +382,9 @@ def test_static_files_are_revalidated(client):
     c, _ = client
     r = c.get("/static/app.js")
     assert r.status_code == 200 and r.headers["cache-control"] == "no-cache"
+
+
+def test_index_links_are_versioned(client):
+    c, _ = client
+    html = c.get("/").text
+    assert "/static/app.js?v=" in html and "/static/app.css?v=" in html
