@@ -63,8 +63,32 @@ FINAL = ("done", "failed", "cancelled", "skipped")
 
 # Migrace schématu. Verze se ukládá do `pragma user_version`. Každá položka je (verze, SQL nebo funkce(conn)).
 # NIKDY neupravujte hotovou migraci – změnu schématu přidejte jako novou položku na konec seznamu.
+SUBSCRIPTIONS_V2 = """
+create table subscriptions (
+    id integer primary key autoincrement,
+    url text not null,
+    kind text not null default 'channel',      -- channel | playlist
+    title text,
+    thumb_url text,
+    folder text not null,                       -- absolutní cesta, kam se ukládají videa odběru
+    since text,                                 -- 'YYYY-MM-DD'; null = bez omezení (vše)
+    tabs text,                                  -- JSON seznam záložek kanálu; null = globální nastavení
+    enabled integer not null default 1,
+    last_check real,
+    last_error text,
+    seen_old text,                              -- JSON seznam ID videí starších než 'since' (aby se nevyhodnocovala znovu)
+    pending text,                               -- JSON: nalezená videa čekající na potvrzení (první kontrola nad prahem)
+    created_at real not null,
+    updated_at real not null
+);
+alter table jobs add column sub_id integer;      -- odběr, ze kterého úloha vznikla
+alter table jobs add column target_dir text;     -- vlastní cílová složka úlohy (odběr), jinak download_dir
+create index if not exists jobs_sub on jobs(sub_id);
+"""
+
 MIGRATIONS: list[tuple[int, object]] = [
     (1, SCHEMA),   # základní schéma (VidDown 0.1.0)
+    (2, SUBSCRIPTIONS_V2),   # odběry
 ]
 
 
@@ -321,6 +345,65 @@ class DB:
         d = {x["status"]: x for x in r}
         return {"done": d.get("done", {}).get("n", 0), "failed": d.get("failed", {}).get("n", 0),
                 "bytes": d.get("done", {}).get("b", 0)}
+
+    # ------------------------------------------------------------ odběry
+    def sub_add(self, url: str, folder: str, **fields) -> int:
+        now = time.time()
+        cols = {"url": url, "folder": folder, "created_at": now, "updated_at": now, **fields}
+        for k in ("tabs", "seen_old", "pending"):
+            if k in cols and not isinstance(cols[k], (str, type(None))):
+                cols[k] = json.dumps(cols[k], ensure_ascii=False)
+        with self.conn() as c:
+            return c.execute(f"insert into subscriptions({','.join(cols)}) values({','.join('?' * len(cols))})",
+                             list(cols.values())).lastrowid
+
+    def sub_get(self, sid: int) -> dict | None:
+        r = self.query("select * from subscriptions where id=?", (sid,))
+        return r[0] if r else None
+
+    def sub_list(self) -> list[dict]:
+        return self.query("select * from subscriptions order by lower(coalesce(title, url)), id")
+
+    def sub_update(self, sid: int, **kw) -> None:
+        if not kw:
+            return
+        kw["updated_at"] = time.time()
+        for k in ("tabs", "seen_old", "pending"):
+            if k in kw and not isinstance(kw[k], (str, type(None))):
+                kw[k] = json.dumps(kw[k], ensure_ascii=False)
+        with self.conn() as c:
+            c.execute(f"update subscriptions set {', '.join(f'{k}=?' for k in kw)} where id=?", (*kw.values(), sid))
+
+    def sub_delete(self, sid: int, keep_history: bool = True) -> None:
+        """Smaže odběr. Rozpracované a čekající úlohy odběru zruší; záznamy o hotových stahováních
+        buď zůstanou v celkové historii (bez vazby na odběr), nebo se odstraní."""
+        with self.conn() as c:
+            c.execute("begin immediate")
+            c.execute("update jobs set status='cancelled', finished_at=?, updated_at=? "
+                      "where sub_id=? and status in ('new','probing','confirm','queued')", (time.time(), time.time(), sid))
+            if keep_history:
+                c.execute("update jobs set sub_id=null where sub_id=?", (sid,))
+            else:
+                c.execute("delete from jobs where sub_id=? and status in ('done','failed','cancelled','skipped')", (sid,))
+                c.execute("update jobs set sub_id=null where sub_id=?", (sid,))   # ještě běžící úloha doběhne bez odběru
+            c.execute("delete from subscriptions where id=?", (sid,))
+            c.execute("commit")
+
+    def sub_counts(self) -> dict[int, dict]:
+        rows = self.query("select sub_id, status, count(*) n, coalesce(sum(filesize),0) b from jobs "
+                          "where sub_id is not null group by sub_id, status")
+        out: dict[int, dict] = {}
+        for r in rows:
+            d = out.setdefault(r["sub_id"], {"queued": 0, "running": 0, "done": 0, "failed": 0, "bytes": 0})
+            if r["status"] in ("new", "probing", "confirm", "queued"):
+                d["queued"] += r["n"]
+            elif r["status"] == "running":
+                d["running"] += r["n"]
+            elif r["status"] in ("done", "failed"):
+                d[r["status"]] += r["n"]
+            if r["status"] == "done":
+                d["bytes"] += r["b"]
+        return out
 
     # ------------------------------------------------------------ kv
     def kv_get(self, key: str, default=None):

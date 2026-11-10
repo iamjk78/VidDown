@@ -15,15 +15,17 @@ from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import __version__, thumbs
+from . import __version__, subscriptions, thumbs
 from .config import DEFAULTS, CHOICES, cookies_path
-from .util import check_dir_writable, extract_urls, in_docker, in_schedule
+from .probe import probe_url
+from .util import check_dir_writable, extract_urls, in_docker, in_schedule, sanitize_filename
 
 WEB = Path(__file__).parent / "web"
 
 JOB_FIELDS = ("id", "url", "title", "status", "kind", "method", "parent_id", "pos", "paused", "source", "channel",
               "duration", "height", "size_est", "approx", "progress", "downloaded", "total", "speed", "eta", "filepath",
-              "filesize", "error", "error_kind", "attempts", "not_before", "created_at", "finished_at", "thumb_url", "subdir")
+              "filesize", "error", "error_kind", "attempts", "not_before", "created_at", "finished_at", "thumb_url", "subdir",
+              "sub_id")
 
 
 def job_out(j: dict) -> dict:
@@ -267,6 +269,118 @@ def create_app(app_state) -> FastAPI:
         return {"ok": True}
 
     # ------------------------------------------------------------ historie
+    # ------------------------------------------------------------ odběry
+    def sub_out(s: dict, counts: dict) -> dict:
+        d = {k: s[k] for k in ("id", "url", "kind", "title", "thumb_url", "folder", "since", "enabled", "last_check",
+                               "last_error", "created_at")}
+        d["tabs"] = json.loads(s["tabs"]) if s["tabs"] else None
+        d["pending"] = len(json.loads(s["pending"])) if s["pending"] else 0
+        d.update({"queued": 0, "running": 0, "done": 0, "failed": 0, "bytes": 0}, **counts.get(s["id"], {}))
+        return d
+
+    def parse_tabs(v):
+        if v in (None, "", []):
+            return None
+        if not isinstance(v, list) or any(x not in ("videos", "shorts", "streams") for x in v):
+            raise HTTPException(400, "záložky kanálu: videos, shorts, streams")
+        return v
+
+    async def check_folder(folder: str) -> str:
+        folder = str(folder or "").strip()
+        ok, msg = await asyncio.to_thread(check_dir_writable, folder)
+        if not ok:
+            raise HTTPException(400, msg)
+        return str(Path(folder).expanduser())
+
+    @app.get("/api/subscriptions")
+    async def subs_list():
+        counts = S.db.sub_counts()
+        return {"items": [sub_out(s, counts) for s in S.db.sub_list()],
+                "check_hours": S.settings.get("subscription_check_hours")}
+
+    @app.post("/api/subscriptions")
+    async def subs_add(req: Request):
+        body = await req.json()
+        urls = extract_urls(str(body.get("url") or ""))
+        if not urls:
+            raise HTTPException(400, "Zadejte platnou URL kanálu nebo playlistu.")
+        url = urls[0]
+        if S.db.query("select 1 from subscriptions where url=?", (url,)):
+            raise HTTPException(409, "Tento odběr už existuje.")
+        try:
+            since = subscriptions.parse_since(body.get("since", "now"))
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        tabs = parse_tabs(body.get("tabs"))
+        res = await probe_url(url, S.runner.ctx())
+        if res["type"] == "none":
+            raise HTTPException(400, f"URL se nepodařilo zkontrolovat: {res['error']}")
+        if res["type"] not in ("channel", "playlist"):
+            raise HTTPException(400, "Tato URL je jedno video, ne kanál ani playlist. Odběr jde zřídit jen na seznam videí.")
+        folder = str(body.get("folder") or "").strip() or str(Path(S.settings.get("download_dir")) / sanitize_filename(res["title"] or "odběr"))
+        folder = await check_folder(folder)
+        sid = S.db.sub_add(url, folder, kind=res["type"], title=res.get("title"), thumb_url=res.get("thumb_url"),
+                           since=since, tabs=tabs)
+        return sub_out(S.db.sub_get(sid), S.db.sub_counts())
+
+    def need_sub(sid: int) -> dict:
+        s = S.db.sub_get(sid)
+        if not s:
+            raise HTTPException(404, "Odběr neexistuje.")
+        return s
+
+    @app.get("/api/subscriptions/{sid}")
+    async def subs_get(sid: int):
+        return sub_out(need_sub(sid), S.db.sub_counts())
+
+    @app.put("/api/subscriptions/{sid}")
+    async def subs_put(sid: int, req: Request):
+        need_sub(sid)
+        body = await req.json()
+        ch: dict = {}
+        if "folder" in body:
+            ch["folder"] = await check_folder(body["folder"])
+        if "since" in body:
+            try:
+                ch["since"] = subscriptions.parse_since(body["since"])
+            except ValueError as e:
+                raise HTTPException(400, str(e))
+        if "enabled" in body:
+            ch["enabled"] = 1 if body["enabled"] else 0
+        if "tabs" in body:
+            ch["tabs"] = parse_tabs(body["tabs"])
+        if "title" in body and str(body["title"]).strip():
+            ch["title"] = str(body["title"]).strip()
+        S.db.sub_update(sid, **ch)
+        if "folder" in ch:   # už zařazená videa odběru se uloží do nové složky
+            S.db.update_where("sub_id=? and status in ('new','probing','confirm','queued')", (sid,), target_dir=ch["folder"])
+        return sub_out(S.db.sub_get(sid), S.db.sub_counts())
+
+    @app.delete("/api/subscriptions/{sid}")
+    async def subs_delete(sid: int, keep_history: bool = True):
+        need_sub(sid)
+        for j in S.db.query("select id from jobs where sub_id=? and status='running'", (sid,)):
+            S.runner.cancel(j["id"])
+        S.db.sub_delete(sid, keep_history=keep_history)
+        return {"ok": True}
+
+    @app.post("/api/subscriptions/{sid}/check")
+    async def subs_check(sid: int):
+        need_sub(sid)
+        if not S.runner.check_subscription_now(sid):
+            raise HTTPException(409, "Právě se kontroluje jiný odběr, zkuste to za chvíli.")
+        return {"ok": True}
+
+    @app.post("/api/subscriptions/{sid}/confirm")
+    async def subs_confirm(sid: int):
+        need_sub(sid)
+        return {"queued": subscriptions.confirm_pending(S.db, sid)}
+
+    @app.post("/api/subscriptions/{sid}/reject")
+    async def subs_reject(sid: int):
+        need_sub(sid)
+        return {"rejected": subscriptions.reject_pending(S.db, sid)}
+
     @app.get("/api/history")
     async def history(q: str = "", status: str = "", days: int = 0, offset: int = 0, limit: int = 50):
         limit = max(1, min(int(limit), 500))

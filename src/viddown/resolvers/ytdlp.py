@@ -65,9 +65,12 @@ async def _run_json(cmd: list[str], timeout: float) -> dict:
         raise ResolveError(msg, classify_error(msg))
 
 
-async def probe(url: str, ctx: Ctx, timeout: float = 300) -> dict:
-    """Metadata bez stahování. Playlist/kanál vrací plochý seznam položek."""
-    cmd = base_cmd(ctx) + ["-J", "--flat-playlist", url]
+async def probe(url: str, ctx: Ctx, timeout: float = 300, playlist_end: int | None = None) -> dict:
+    """Metadata bez stahování. Playlist/kanál vrací plochý seznam položek (volitelně jen prvních `playlist_end`)."""
+    cmd = base_cmd(ctx) + ["-J", "--flat-playlist"]
+    if playlist_end:
+        cmd += ["--playlist-end", str(int(playlist_end))]
+    cmd.append(url)
     return await _run_json(cmd, timeout)
 
 

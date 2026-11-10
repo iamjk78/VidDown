@@ -1,6 +1,6 @@
 # VidDown – plán
 
-Stav: **etapy 1–4 implementovány** (listopad 2026). Tento dokument shrnuje potvrzené požadavky, pravidla chování a návrh. Odchylky a doplňky z vývoje jsou v kapitole 17.
+Stav: **etapy 1–4 implementovány** (listopad 2026), odběry a statistiky (kap. 17) rozpracovány – hotová etapa 1. Tento dokument shrnuje potvrzené požadavky, pravidla chování a návrh. Odchylky a doplňky z vývoje jsou v kapitole 17.
 
 ## 1. Cíl
 
@@ -309,7 +309,13 @@ Nové menu **Statistiky** s přepínačem období: 24 h, 7 dní, 30 dní, 12 mě
 
 ### 17.4 Etapy
 
-1. Migrace databáze + `subscriptions` + kontrola nových videí + API (bez GUI) + testy.
+1. ✅ **Hotovo (11. 2026):** migrace databáze + `subscriptions` + kontrola nových videí + API (bez GUI) + testy. Ověřeno na skutečném YouTube kanálu (název a miniatura při zakládání, výběr videí podle data, vlastní cílová složka). Podrobnosti:
+   - Migrace: schéma verze 2 (`subscriptions`, `jobs.sub_id`, `jobs.target_dir`); před migrací se uloží záloha `viddown.db.v<verze>.bak`. Příznaky skrytí historie (`hide_sub`, `hide_global`) přijdou s etapou 3, tabulka `downloads` s etapou 4.
+   - Kontrola: první kontrola vyhodnotí nejvýše 500 nejnovějších videí, další jen 60 nejnovějších. U kanálu se čtení zastaví u prvního videa staršího než „od data“ (jeho ID se zapamatuje v `seen_old`), u playlistu se projdou všechna. Videa bez data v seznamu se dohledají plným načtením (nejvýše 40 na kontrolu). Odběr bez omezení „od data“ (`since` = null) bere všechno.
+   - Fronta pozastavená uživatelem nebo kvůli cookies kontroly odběrů zastaví; ruční „Zkontrolovat teď“ (`POST /api/subscriptions/{id}/check`) ji ignoruje.
+   - První kontrola nad prahem potvrzení (50) nic nezařadí; videa čekají v `subscriptions.pending` a řeší se `POST …/confirm` nebo `…/reject`.
+   - Úloha z odběru má `target_dir` (absolutní složka odběru; mění se i u čekajících úloh po úpravě odběru) a pro kanál se použije šablona názvu kanálu.
+   - API: `GET/POST /api/subscriptions`, `GET/PUT/DELETE /api/subscriptions/{id}` (`?keep_history=false` smaže i záznamy), `POST …/check|confirm|reject`. Nastavení `subscription_check_hours` (výchozí 6, 0 = vypnuto) zatím jen v `settings.json` / `viddown config set`.
 2. GUI Odběry (přehled, přidání, podmenu s frontou, historií a nastavením).
 3. Dvojí historie (příznaky skrytí, volba „z jedné / z obou“).
 4. Tabulka `downloads` + API + GUI Statistiky.

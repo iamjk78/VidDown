@@ -59,7 +59,9 @@ def _flatten(entries) -> list[dict]:
         if not u:
             continue
         out.append({"url": u, "title": e.get("title"), "thumb_url": _thumb(e), "duration": e.get("duration"),
-                    "channel": e.get("channel") or e.get("uploader")})
+                    "channel": e.get("channel") or e.get("uploader"), "id": e.get("id"),
+                    "upload_date": e.get("upload_date"), "timestamp": e.get("timestamp"),
+                    "live_status": e.get("live_status")})
     return out
 
 

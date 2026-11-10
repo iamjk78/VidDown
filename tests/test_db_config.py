@@ -96,12 +96,12 @@ def test_new_migration_runs_with_backup_and_keeps_data(tmp_path, monkeypatch):
     p = tmp_path / "m.db"
     d = dbm.DB(p)
     jid = d.add("https://x")
-    monkeypatch.setattr(dbm, "MIGRATIONS", dbm.MIGRATIONS + [(2, "alter table jobs add column note text;")])
+    monkeypatch.setattr(dbm, "MIGRATIONS", dbm.MIGRATIONS + [(dbm.MIGRATIONS[-1][0] + 1, "alter table jobs add column note text;")])
     d2 = dbm.DB(p)
-    assert d2.schema_version == 2
+    assert d2.schema_version == dbm.MIGRATIONS[-1][0]
     d2.update(jid, note="ahoj")
     assert d2.get(jid)["note"] == "ahoj"
-    bak = tmp_path / "m.db.v1.bak"
+    bak = tmp_path / f"m.db.v{len(dbm.MIGRATIONS) - 1}.bak"
     assert bak.exists()               # záloha stavu před migrací, bez nového sloupce
     import sqlite3
     cols = [r[1] for r in sqlite3.connect(bak).execute("pragma table_info(jobs)")]
@@ -114,12 +114,12 @@ def test_failed_migration_rolls_back(tmp_path, monkeypatch):
     p = tmp_path / "f.db"
     dbm.DB(p).add("https://x")
     bad = "alter table jobs add column ok_col text; alter table nonexistent add column z text;"
-    monkeypatch.setattr(dbm, "MIGRATIONS", dbm.MIGRATIONS + [(2, bad)])
+    monkeypatch.setattr(dbm, "MIGRATIONS", dbm.MIGRATIONS + [(dbm.MIGRATIONS[-1][0] + 1, bad)])
     with pytest.raises(Exception):
         dbm.DB(p)
     monkeypatch.undo()
     d = dbm.DB(p)
-    assert d.schema_version == 1
+    assert d.schema_version == dbm.MIGRATIONS[-1][0]   # neúspěšná migrace se vrátila zpět, zůstala poslední platná verze
     assert "ok_col" not in [r["name"] for r in d.query("pragma table_info(jobs)")]
     assert len(d.query("select * from jobs")) == 1
 

@@ -15,7 +15,7 @@ import shutil
 import time
 from pathlib import Path
 
-from . import thumbs
+from . import subscriptions, thumbs
 from .config import Settings
 from .db import ACTIVE, DB
 from .i18n import t
@@ -57,6 +57,7 @@ class Runner:
         self.sibling_gate: dict[int, list[float]] = {}
         self.listeners: list = []
         self._engine_task: asyncio.Task | None = None
+        self._sub_task: asyncio.Task | None = None
         self._disk_warned = False
         self._target_checked = -1e9
 
@@ -188,6 +189,13 @@ class Runner:
                 self.db.kv_set("engine_last_auto", now)
                 self._engine_task = asyncio.create_task(asyncio.to_thread(self.engines.update_all))
 
+        # 3b) odběry: kontrola nových videí (po jednom odběru, jen když fronta není pozastavená)
+        hours = float(s.get("subscription_check_hours") or 0)
+        if hours > 0 and not qpaused and (self._sub_task is None or self._sub_task.done()):
+            sub = subscriptions.due(self.db, hours, now)
+            if sub:
+                self._sub_task = asyncio.create_task(self._check_sub(sub["id"]))
+
         if qpaused or not window:
             return
 
@@ -287,6 +295,24 @@ class Runner:
             cur = self.db.get(jid)
         self.apply_probe(cur, res)
 
+    # ------------------------------------------------------------ odběry
+    async def _check_sub(self, sid: int) -> dict:
+        try:
+            return await subscriptions.check(self, sid)
+        except Exception as e:  # noqa: BLE001
+            log.exception("odběr %s", sid)
+            self.db.sub_update(sid, last_check=time.time(), last_error=str(e))
+            return {"error": str(e)}
+
+    def check_subscription_now(self, sid: int) -> bool:
+        """Spustí kontrolu odběru hned. False, když se právě kontroluje (jiný) odběr."""
+        if self._sub_task is not None and not self._sub_task.done():
+            return False
+        if not self.db.sub_get(sid):
+            return False
+        self._sub_task = asyncio.create_task(self._check_sub(sid))
+        return True
+
     def needs_confirm(self, job: dict, count: int) -> bool:
         s = self.settings.all()
         if job["auto_confirm"]:
@@ -361,7 +387,9 @@ class Runner:
     def _name(self, job: dict, info: dict) -> str:
         s = self.settings.all()
         parent = self.db.get(job["parent_id"]) if job["parent_id"] else None
-        tpl = s["channel_name_template"] if parent and parent["kind"] == "channel" else s["name_template"]
+        sub = self.db.sub_get(job["sub_id"]) if job.get("sub_id") else None
+        is_channel = (parent and parent["kind"] == "channel") or (sub and sub["kind"] == "channel")
+        tpl = s["channel_name_template"] if is_channel else s["name_template"]
         merged = dict(info)
         merged.setdefault("title", job["title"])
         merged.setdefault("channel", job["channel"])
@@ -493,7 +521,8 @@ class Runner:
             return
         s = self.settings.all()
         src: Path = result["file"]
-        target_dir = Path(s["download_dir"]) / (job["subdir"] or "")
+        # úloha z odběru má vlastní cílovou složku, ostatní ukládá do download_dir (případně do podsložky playlistu)
+        target_dir = Path(job["target_dir"]) if job.get("target_dir") else Path(s["download_dir"]) / (job["subdir"] or "")
         try:
             target_dir.mkdir(parents=True, exist_ok=True)
             dest = unique_target(target_dir, src.stem, src.suffix)

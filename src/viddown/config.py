@@ -47,6 +47,7 @@ DEFAULTS: dict = {
     "audio_format": "mp3",          # mp3 | m4a
     "channel_tabs": ["videos"],     # videos | shorts | streams
     "playlist_confirm_threshold": 50,
+    "subscription_check_hours": 6,  # jak často se kontrolují odběry (kanály, playlisty)
     "live_from_start": False,
     "subtitles": False,
     "subtitle_langs": "cs,en",
