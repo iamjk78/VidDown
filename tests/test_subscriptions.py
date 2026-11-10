@@ -388,3 +388,17 @@ def test_index_links_are_versioned(client):
     c, _ = client
     html = c.get("/").text
     assert "/static/app.js?v=" in html and "/static/app.css?v=" in html
+
+
+def test_phases_recorded_and_stats_expose_them(client):
+    c, rt = client
+    now = time.time()
+    jid = rt.db.add("https://www.youtube.com/watch?v=p", source="gui")
+    rt.db.update(jid, status="done", filesize=10, started_at=now - 30, finished_at=now)
+    rt.db.record_download(rt.db.get(jid), True, {"dl": 10.0, "post": 15.0, "move": 5.0})
+    r = c.get("/api/stats", params={"t0": now - 3600}).json()
+    assert r["phases"]["n"] == 1 and (r["phases"]["dl"], r["phases"]["post"], r["phases"]["move"]) == (10.0, 15.0, 5.0)
+    rt.db.update(jid, stage="post")
+    assert rt.db.get(jid)["stage"] == "post"
+    assert "temp_used" in rt.disk_status()
+    assert set(c.get("/api/cpu").json()["rate_history"]) == {"net_in", "net_out", "io_w", "io_r"}

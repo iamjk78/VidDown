@@ -179,7 +179,7 @@ async def download(url: str, info: dict | None, ctx: Ctx, staging: Path, name: s
         if line.startswith("VDPOST "):
             if line.startswith("VDPOST started"):   # stažení je hotové, běží ffmpeg: ukázat 100 % bez rychlosti
                 done = int(sum(x[0] for x in parts.values()) or sum(x[1] for x in parts.values()) or 0)
-                on_progress(progress=1.0, speed=None, eta=None, **({"downloaded": done, "total": done} if done else {}))
+                on_progress(progress=1.0, speed=None, eta=None, phase="post", **({"downloaded": done, "total": done} if done else {}))
             continue
         if line.startswith("VDFILE "):
             filepath = line[7:].strip()

@@ -52,6 +52,8 @@ class Runner:
         self.engines = engines
         self.data = data
         self.cpu = cpu.Monitor()
+        self.phases: dict[int, dict] = {}
+        self._temp_cache: tuple[float, int] = (-1e9, 0)
         self.running: dict[int, tuple[asyncio.Task, ProcHolder]] = {}
         self.probing: dict[int, asyncio.Task] = {}
         self.stop_reason: dict[int, str] = {}
@@ -233,6 +235,26 @@ class Runner:
             self.running[job["id"]] = (asyncio.create_task(self._execute(job["id"], holder)), holder)
             slots -= 1
 
+    def temp_usage(self) -> int:
+        """Velikost rozpracovaných stahování v dočasné složce (počítá se nejvýše jednou za 30 s – na síťovém disku je to pomalé)."""
+        now = time.monotonic()
+        if now - self._temp_cache[0] < 30:
+            return self._temp_cache[1]
+        total = 0
+        base = self.staging(0).parent
+        try:
+            for d in base.glob("job-*"):
+                for root, _dirs, files in os.walk(d):
+                    for f in files:
+                        try:
+                            total += os.path.getsize(os.path.join(root, f))
+                        except OSError:
+                            pass
+        except OSError:
+            pass
+        self._temp_cache = (now, total)
+        return total
+
     def disk_status(self, s: dict | None = None) -> dict:
         """Volné místo v dočasné složce (tam vznikají rozpracovaná stahování) a v cílové složce.
 
@@ -253,7 +275,7 @@ class Runner:
         elif temp_free is not None and temp_free < limit:
             low = "temp"
         return {"target_free": target_free, "target_reliable": target_ok, "temp_free": temp_free, "temp_dir": str(temp_dir),
-                "same_disk": same, "low": low}
+                "same_disk": same, "low": low, "temp_used": self.temp_usage()}
 
     def _pause_for_cookies(self, msg: str) -> None:
         if self.db.kv_get("queue_pause_reason") == "cookies":
@@ -429,8 +451,13 @@ class Runner:
             methods = ["sniffer"]
         errors: list[tuple[str, ResolveError]] = []
         progress_state = {"t": 0.0}
+        ph = self.phases[jid] = {"t0": time.monotonic()}
+        self.db.update(jid, stage="download")
 
         def on_progress(**kw):
+            if kw.pop("phase", None) == "post" and "post" not in ph:
+                ph["post"] = time.monotonic()
+                self.db.update(jid, stage="post")
             now = time.monotonic()
             if now - progress_state["t"] < 0.4 and kw.get("progress") != 1.0:
                 return
@@ -474,6 +501,8 @@ class Runner:
                 msg = str(first) if len(errors) == 1 else " · ".join(
                     f"{'yt-dlp' if m == 'ytdlp' else m}: {e}" for m, e in errors)
                 raise ResolveError(msg, first.kind)
+            ph["end"] = time.monotonic()
+            self.db.update(jid, stage="move")
             self._finalize(jid, result, used, staging)
         except Cancelled:
             reason = self.stop_reason.pop(jid, "cancel")
@@ -493,6 +522,8 @@ class Runner:
             self._failed(jid, str(e), "other", staging)
         finally:
             self.running.pop(jid, None)
+            self.phases.pop(jid, None)
+            self.db.update(jid, stage=None)
             self._check_parent(jid)
 
     async def _dl_ytdlp(self, job, info, ctx, staging, holder, on_progress):
@@ -564,7 +595,13 @@ class Runner:
                        downloaded=size, total=size, speed=None, eta=None, method=method, error=None, error_kind=None)
         shutil.rmtree(staging, ignore_errors=True)
         done = self.db.get(jid)
-        self.db.record_download(done, True)
+        ph = self.phases.get(jid) or {}
+        if ph.get("end"):
+            now = time.monotonic()
+            dl_end = ph.get("post") or ph["end"]
+            self.db.record_download(done, True, {"dl": dl_end - ph["t0"], "post": ph["end"] - dl_end, "move": now - ph["end"]})
+        else:
+            self.db.record_download(done, True)
         self.emit("on_done", done)
 
     def _failed(self, jid: int, msg: str, kind: str, staging: Path) -> None:

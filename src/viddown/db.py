@@ -132,11 +132,19 @@ def _downloads_v4(c) -> None:
                    r["channel"], _site(r["url"]), r["source"], r["method"], r["sub_id"], r["error_kind"]))
 
 
+PHASES_V5 = """
+alter table jobs add column stage text;          -- aktuální fáze běžící úlohy: download | post | move
+alter table downloads add column t_dl real;      -- doba stahování (s)
+alter table downloads add column t_post real;    -- doba zpracování po stažení (ffmpeg: metadata, miniatura, titulky)
+alter table downloads add column t_move real;    -- doba přesunu do cílové složky
+"""
+
 MIGRATIONS: list[tuple[int, object]] = [
     (1, SCHEMA),   # základní schéma (VidDown 0.1.0)
     (2, SUBSCRIPTIONS_V2),   # odběry
     (3, HISTORY_FLAGS_V3),   # dvojí historie (celková + odběr)
     (4, _downloads_v4),      # statistiky stahování
+    (5, PHASES_V5),          # fáze stahování
 ]
 
 
@@ -391,14 +399,17 @@ class DB:
         with self.conn() as c:
             return self._remove(c, where, args, sub, scope)
 
-    def record_download(self, job: dict, ok: bool) -> None:
+    def record_download(self, job: dict, ok: bool, phases: dict | None = None) -> None:
         """Zapíše dokončené stahování do statistik (nezávislé na historii)."""
         ts = job.get("finished_at") or time.time()
         secs = max(0.0, ts - job["started_at"]) if job.get("started_at") else None
         with self.conn() as c:
-            c.execute("insert into downloads(job_id,ts,ok,bytes,secs,channel,site,source,method,sub_id,error_kind) values(?,?,?,?,?,?,?,?,?,?,?)",
+            ph = phases or {}
+            c.execute("insert into downloads(job_id,ts,ok,bytes,secs,channel,site,source,method,sub_id,error_kind,t_dl,t_post,t_move) "
+                      "values(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                       (job["id"], ts, 1 if ok else 0, (job.get("filesize") or 0) if ok else 0, secs, job.get("channel"),
-                       _site(job["url"]), job.get("source"), job.get("method"), job.get("sub_id"), job.get("error_kind")))
+                       _site(job["url"]), job.get("source"), job.get("method"), job.get("sub_id"), job.get("error_kind"),
+                       ph.get("dl"), ph.get("post"), ph.get("move")))
 
     def stats(self, t0: float, t1: float, tz_min: int = 0, sub: int = 0) -> dict:
         """Souhrn statistik za období <t0, t1) v časovém pásmu tz_min (minuty východně od UTC)."""
@@ -419,6 +430,8 @@ class DB:
             return q(f"select coalesce(nullif({col},''),'—') name, sum(ok) n, coalesce(sum(bytes),0) bytes, sum(1-ok) failed, max(sub_id) sub_id "
                      f"from downloads@W group by name having n>0 or failed>0 order by n desc, bytes desc limit {limit}")
         return {"done": k["done"], "failed": k["failed"], "bytes": k["bytes"], "secs": k["secs"], "first": k["first"], "last": k["last"],
+                "phases": self.query("select coalesce(sum(t_dl),0) dl, coalesce(sum(t_post),0) post, coalesce(sum(t_move),0) move, "
+                                   "count(t_dl) n from downloads" + w + " and ok=1", a)[0],
                 "fmt": fmt, "series": series, "channels": group("channel", 50), "sources": group("source"),
                 "methods": group("method"), "sites": group("site")}
 

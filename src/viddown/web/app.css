@@ -180,3 +180,5 @@ button.chip{cursor:pointer}
 .nav.sub{height:30px;padding-left:30px;font-size:13px;gap:8px}
 .nav.sub .dot{flex:none}
 @media (max-width:760px){.subnav{display:none}}
+.sysgrid{display:grid;grid-template-columns:1fr 1fr;gap:18px 22px;margin-top:12px}
+@media (max-width:900px){.sysgrid{grid-template-columns:1fr}}

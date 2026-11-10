@@ -151,6 +151,8 @@ function renderSide() {
       ? `<div class="row fs12 t2" style="justify-content:space-between"><span class="row gap6">${ic('hdd', 14)} ${T('Disk', 'Disk')}</span><span><b style="color:var(--text)">${fmtBytes(disk.target_free)}</b> ${T('volno', 'free')}</span></div>`
       : `<div class="row fs12 t2" style="justify-content:space-between" title="${esc(disk.dir)}"><span class="row gap6">${ic('folder', 14)} ${T('Cíl', 'Target')}</span>${disk.target_reliable ? `<span><b style="color:var(--text)">${fmtBytes(disk.target_free)}</b> ${T('volno', 'free')}</span>` : `<span class="muted" title="${T('Docker Desktop na macOS u složek z /Volumes (síťové disky) hlásí místo interního disku Macu, proto se nezobrazuje.', 'Docker Desktop on macOS reports the Mac disk for folders from /Volumes (network shares), so it is not shown.')}">${T('nelze zjistit', 'unknown')} ⓘ</span>`}</div>
        <div class="row fs12 t2" style="justify-content:space-between;margin-top:4px" title="${T('Rozpracovaná stahování', 'Downloads in progress')}: ${esc(disk.temp_dir)}"><span class="row gap6">${ic('hdd', 14)} ${T('Dočasná', 'Temp')}</span><span><b style="color:var(--text)">${fmtBytes(disk.temp_free)}</b> ${T('volno', 'free')}</span></div>`}
+   ${disk.temp_used ? `<div class="row fs12 t2" style="justify-content:space-between;margin-top:4px" title="${T('Velikost rozpracovaných stahování v dočasné složce', 'Size of downloads in progress in the temp folder')}"><span>${T('Rozpracováno', 'In progress')}</span><b style="color:var(--text)">${fmtBytes(disk.temp_used)}</b></div>` : ''}
+   ${st.stats.need ? (() => { const bad = disk.target_reliable && disk.target_free != null && st.stats.need > disk.target_free * 0.9; return `<div class="row fs12" style="justify-content:space-between;margin-top:4px;${bad ? 'color:var(--err)' : ''}" title="${T('Odhad místa, které ještě zabere fronta (podle odhadu velikostí videí)', 'Estimated space the queue will still need (based on video size estimates)')}"><span class="${bad ? '' : 't2'}">${T('Fronta zabere', 'Queue needs')}</span><b style="${bad ? '' : 'color:var(--text)'}">~${fmtBytes(st.stats.need)}${bad ? ' ⚠' : ''}</b></div>`; })() : ''}
    <div class="fs11 muted ell" style="margin-top:6px" title="${esc(disk.dir)}">${esc(disk.dir)}</div></div>` : ''}
    ${cpuBox(st)}
    <div class="row gap8 fs12 t2" style="padding:6px 6px 0"><span class="dot ${tg.state === 'ok' ? 'g' : tg.state === 'error' ? 'r' : ''}"></span>${tgTxt}</div>
@@ -221,7 +223,7 @@ function runHtml(j) {
   <div class="grow"><div class="row gap8"><span class="b6 fs15 ell">${esc(j.title || j.url)}</span>${methodBadge(j.method)}</div>
   <div class="t2 fs12 row gap6" style="margin-top:4px">${esc(j.channel || '')}${j.channel ? ' · ' : ''}${j.height ? j.height + 'p · ' : ''}${T('přidáno přes', 'added via')} ${srcName(j.source)}</div>
   <div class="bar thick ${sn ? 'sn' : ''} ${p == null ? 'ind' : ''}" style="margin-top:14px"><i style="width:${p == null ? 35 : Math.max(1, p * 100)}%"></i></div>
-  <div class="row fs12 t2 wrap" style="margin-top:8px;gap:18px"><span><b style="color:var(--text);font-size:13px">${p != null ? pct(p) : j.downloaded ? T('Stahuji…', 'Downloading…') : T('Načítám informace o videu…', 'Fetching video info…')}</b></span>
+  <div class="row fs12 t2 wrap" style="margin-top:8px;gap:18px"><span><b style="color:var(--text);font-size:13px">${j.stage === 'post' ? T('Zpracovávám (ffmpeg: metadata, miniatura)…', 'Processing (ffmpeg: metadata, thumbnail)…') : j.stage === 'move' ? T('Přesouvám do cílové složky…', 'Moving to the target folder…') : p != null ? pct(p) : j.downloaded ? T('Stahuji…', 'Downloading…') : T('Načítám informace o videu…', 'Fetching video info…')}</b></span>
    <span>${fmtBytes(j.downloaded)}${j.total ? ' ' + T('z', 'of') + ' ' + fmtBytes(j.total) : ''}</span>
    <span class="row gap4">${ic('bolt', 13)} ${fmtSpeed(j.speed)}</span><span class="row gap4">${ic('clock', 13)} ${T('zbývá', 'left')} ${j.eta != null ? fmtDur(j.eta) : '—'}</span></div></div>
   <div class="row gap6" style="align-self:flex-start"><button class="ibtn b" title="${T('Pozastavit', 'Pause')}" data-a="pause" data-id="${j.id}">${ic('pause', 15)}</button><button class="ibtn b" title="${T('Zrušit', 'Cancel')}" data-a="cancel" data-id="${j.id}">${ic('x', 15)}</button></div></div>`;
@@ -499,20 +501,38 @@ const PERF_MODES = () => [['full', T('Plný', 'Full'), T('Plný výkon – bez o
   ['eco', T('Šetrný', 'Eco'), T('Nejnižší priorita, 1 vlákno ffmpeg, nejvýše 1 souběžné stahování', 'Lowest priority, 1 ffmpeg thread, at most 1 parallel download')]];
 function cpuBox(st) {
   const c = st && st.cpu; if (!c) return '';
+  const rt = c.rates || {};
   const pc = c.percent, col = pc == null ? 'var(--muted)' : pc >= 85 ? 'var(--err)' : pc >= 60 ? 'var(--warn)' : 'var(--ok)';
   return `<div class="card" style="padding:12px;background:var(--surface2)" title="${T('Vytížení procesoru touto aplikací (100 % = všechna jádra)', 'CPU load of this app (100% = all cores)')}">
    <div class="row fs12 t2" style="justify-content:space-between"><span class="row gap6">${ic('cpu', 14)} ${T('Procesor', 'CPU')}</span><b style="color:var(--text)">${pc == null ? '—' : Math.round(pc) + ' %'}</b></div>
    <div class="bar" style="margin-top:6px"><i style="width:${pc || 0}%;background:${col}"></i></div>
    ${c.mem ? (() => { const mp = c.mem.total ? c.mem.used / c.mem.total * 100 : 0, mc = mp >= 90 ? 'var(--err)' : mp >= 75 ? 'var(--warn)' : 'var(--ok)'; return `<div class="row fs12 t2" style="justify-content:space-between;margin-top:10px" title="${T('Paměť používaná touto aplikací a jejími procesy z celkové paměti', 'Memory used by this app and its processes out of total memory')}"><span class="row gap6">${ic('hdd', 14)} RAM</span><span><b style="color:var(--text)">${fmtBytes(c.mem.used)}</b> / ${fmtBytes(c.mem.total)}</span></div><div class="bar" style="margin-top:6px"><i style="width:${Math.max(1, mp)}%;background:${mc}"></i></div>`; })() : ''}
+   <div class="row fs12 t2" style="justify-content:space-between;margin-top:10px" title="${T('Provoz sítě kontejneru: přijato (stahování) / odesláno (např. zápis na síťový disk)', 'Container network traffic: received (download) / sent (e.g. writes to a network drive)')}"><span class="row gap6">${ic('globe', 14)} ${T('Síť', 'Net')}</span><span><b style="color:var(--text)">↓ ${fmtRate(rt.net_in)}</b> ↑ ${fmtRate(rt.net_out)}</span></div>
+   ${rt.io_w != null ? `<div class="row fs12 t2" style="justify-content:space-between;margin-top:4px" title="${T('Zápis a čtení souborů procesy aplikace (zápis zahrnuje i síťový disk)', 'File writes and reads by the app processes (writes include network drives)')}"><span class="row gap6">${ic('hdd', 14)} Disk</span><span><b style="color:var(--text)">${T('Z', 'W')} ${fmtRate(rt.io_w)}</b> ${T('Č', 'R')} ${fmtRate(rt.io_r)}</span></div>` : ''}
    <span class="seg" style="display:flex;margin-top:10px">${PERF_MODES().map(([v, l, d]) => `<button style="flex:1;padding:4px 0" class="${c.mode === v ? 'on' : ''}" data-perf="${v}" title="${esc(d)}">${l}</button>`).join('')}</span></div>`;
+}
+const fmtRate = n => n == null ? '—' : n ? fmtBytes(n) + '/s' : '0 B/s';
+function lineChart(title, now, series, max, unit) {
+  const W = 450, H = 64, n = Math.max(...series.map(x => x.v.length), 2);
+  const top = max || Math.max(1, ...series.flatMap(x => x.v)) * 1.1;
+  const pts = v => v.map((y, i) => `${(W * (n - v.length + i) / (n - 1)).toFixed(1)},${(H - 2 - Math.min(1, y / top) * (H - 4)).toFixed(1)}`).join(' ');
+  const body = series.map(x => x.v.length > 1 ? `<polygon points="0,${H} ${pts(x.v)} ${W},${H}" fill="${x.c}" opacity=".12"/><polyline points="${pts(x.v)}" fill="none" stroke="${x.c}" stroke-width="1.6" vector-effect="non-scaling-stroke"/>` : '').join('');
+  return `<div><div class="row gap8 fs12" style="justify-content:space-between"><b>${title}</b><span class="t2">${now}</span></div>
+    <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:64px;margin-top:6px;background:var(--surface2);border-radius:8px">${body}</svg>
+    <div class="row gap10 fs11 muted" style="margin-top:3px">${series.map(x => `<span class="row gap4"><i style="width:8px;height:8px;border-radius:2px;background:${x.c};display:inline-block"></i>${x.l}</span>`).join('')}<span class="grow"></span><span>${unit || ''}</span></div></div>`;
 }
 async function drawCpuChart() {
   const box = $('#cpuchart'); if (!box) return;
   const r = await api('/api/cpu').catch(() => null); if (!r || !$('#cpuchart')) return;
-  const h = r.history.slice(-450), mh = (r.mem_history || []).slice(-450);
-  box.innerHTML = h.length ? `<div class="bars" style="height:90px;margin-top:10px;padding-bottom:0">${h.map(v => `<div class="bcol" title="${v} %"><i style="height:${Math.max(2, v)}%;background:${v >= 85 ? 'var(--err)' : v >= 60 ? 'var(--warn)' : 'var(--accent)'}"></i></div>`).join('')}</div>
-    <div class="row fs12 t2" style="justify-content:space-between;margin-top:4px"><span>${T('před', 'ago')} ${Math.round(h.length * r.step / 60)} min</span><span>${T('teď', 'now')}</span></div>
-    ${mh.length ? `<div class="row gap10" style="margin-top:14px"><b>${T('Paměť RAM', 'Memory (RAM)')}</b><span class="grow"></span><span class="t2 fs12">${r.mem ? fmtBytes(r.mem.used) + ' / ' + fmtBytes(r.mem.total) : ''}</span></div><div class="bars" style="height:70px;margin-top:8px;padding-bottom:0">${mh.map(v => `<div class="bcol" title="${v} %"><i style="height:${Math.max(2, v)}%;background:${v >= 90 ? 'var(--err)' : v >= 75 ? 'var(--warn)' : 'var(--ok)'}"></i></div>`).join('')}</div>` : ''}`
+  const h = r.history.slice(-450), mh = (r.mem_history || []).slice(-450), rh = r.rate_history || {}, tl = k => (rh[k] || []).slice(-450);
+  const ac = 'var(--accent)', ok = 'var(--ok)', wn = 'var(--warn)';
+  const mem = r.mem, rt = r.rates || {};
+  box.innerHTML = h.length ? `<div class="sysgrid">
+    ${lineChart(T('Procesor', 'CPU'), r.percent == null ? '—' : Math.round(r.percent) + ' %', [{ v: h, c: ac, l: T('vytížení', 'load') }], 100, '0–100 %')}
+    ${lineChart('RAM', mem ? fmtBytes(mem.used) + ' / ' + fmtBytes(mem.total) : '—', [{ v: mh, c: ok, l: T('využití', 'usage') }], 100, '0–100 %')}
+    ${lineChart(T('Síť', 'Network'), `↓ ${fmtRate(rt.net_in)} · ↑ ${fmtRate(rt.net_out)}`, [{ v: tl('net_in'), c: ac, l: T('přijato (stahování)', 'received (download)') }, { v: tl('net_out'), c: wn, l: T('odesláno (např. zápis na síťový disk)', 'sent (e.g. writes to a network drive)') }])}
+    ${lineChart(T('Disk', 'Disk'), `${T('zápis', 'write')} ${fmtRate(rt.io_w)} · ${T('čtení', 'read')} ${fmtRate(rt.io_r)}`, [{ v: tl('io_w'), c: ac, l: T('zápis souborů', 'file writes') }, { v: tl('io_r'), c: wn, l: T('čtení z disku', 'disk reads') }])}
+  </div><div class="t2 fs11" style="margin-top:8px">${T('Posledních', 'Last')} ${Math.round(h.length * r.step / 60)} min</div>`
     : `<div class="t2 fs12" style="padding:8px 0">${T('Měření se právě rozbíhá…', 'Measurement is starting…')}</div>`;
   clearTimeout(App.cpuTmr); App.cpuTmr = setTimeout(drawCpuChart, 4000);
 }
@@ -533,7 +553,7 @@ function renderStats() {
   $('#main').innerHTML = `<div class="row gap16 wrap"><div><h1>${T('Statistiky', 'Statistics')}</h1><div class="t2" style="margin-top:3px">${T('Počty a objemy stahování. Nezávisí na historii – mazání historie statistiky nemění.', 'Download counts and volumes. Independent of history – clearing history does not change them.')}</div></div><span class="grow"></span>
     <span class="seg" id="stp">${periods.map(([v, l]) => `<button data-v="${v}" class="${STATS.p === v ? 'on' : ''}">${l}</button>`).join('')}</span></div>
     <div class="row gap8 wrap" id="stcustom" style="margin-top:10px;${STATS.p === 'custom' ? '' : 'display:none'}"><span class="t2 fs12">${T('Od', 'From')}</span><input type="date" class="input sm" id="stfrom" value="${STATS.from}" style="width:150px"><span class="t2 fs12">${T('do (včetně)', 'to (inclusive)')}</span><input type="date" class="input sm" id="stto" value="${STATS.to}" style="width:150px"></div>
-    <div class="card" style="padding:16px 18px;margin-top:14px"><div class="row gap10"><b>${T('Vytížení procesoru a paměti (posledních 15 minut)', 'CPU and memory load (last 15 minutes)')}</b><span class="grow"></span><span class="t2 fs12" id="cpunow"></span></div><div id="cpuchart"></div></div>
+    <div class="card" style="padding:16px 18px;margin-top:14px"><div class="row gap10"><b>${T('Systém: procesor, paměť, síť a disk', 'System: CPU, memory, network and disk')}</b><span class="grow"></span><span class="t2 fs12" id="cpunow"></span></div><div id="cpuchart"></div></div>
     <div id="stbody" style="margin-top:16px"><div class="empty"><div class="spin" style="margin:auto"></div></div></div>`;
   $$('#stp button').forEach(b => b.onclick = () => { STATS.p = b.dataset.v; $$('#stp button').forEach(x => x.classList.toggle('on', x === b)); $('#stcustom').style.display = STATS.p === 'custom' ? '' : 'none'; loadStats(); });
   $('#stfrom').onchange = e => { STATS.from = e.target.value; loadStats(); };
@@ -566,6 +586,11 @@ async function loadStats() {
     ${kpi(T('Čas stahování', 'Download time'), r.secs ? fmtDur(r.secs) : '—', r.secs && r.bytes ? `Ø ${fmtBytes(r.bytes / r.secs)}/s` : '')}</div>
     <div class="card" style="padding:16px 18px;margin-top:14px"><div class="row gap10"><b>${r.fmt === '%Y-%m' ? T('Po měsících', 'By month') : r.fmt === '%Y-%m-%d' ? T('Po dnech', 'By day') : T('Po hodinách', 'By hour')}</b><span class="grow"></span>
       <span class="seg" id="stm">${[['n', T('Počet', 'Count')], ['b', T('Objem', 'Volume')]].map(([v, l]) => `<button data-v="${v}" class="${STATS.metric === v ? 'on' : ''}">${l}</button>`).join('')}</span></div>${chart}</div>
+    ${r.phases && r.phases.n ? (() => { const ph = r.phases, tot = ph.dl + ph.post + ph.move || 1, seg = [[ph.dl, T('Stahování', 'Download'), 'var(--accent)'], [ph.post, T('Zpracování (ffmpeg)', 'Processing (ffmpeg)'), 'var(--warn)'], [ph.move, T('Přesun do cílové složky', 'Move to target'), 'var(--ok)']];
+      return `<div class="card" style="padding:16px 18px;margin-top:14px"><div class="row gap10"><b>${T('Čas podle fáze', 'Time by phase')}</b><span class="grow"></span><span class="t2 fs12">${ph.n} ${T('videí', 'videos')} · Ø ${fmtDur(tot / ph.n)} ${T('na video', 'per video')}</span></div>
+        <div class="row" style="height:14px;border-radius:99px;overflow:hidden;margin-top:12px;background:var(--track)">${seg.map(([v, , c]) => `<i style="width:${v / tot * 100}%;background:${c};display:block"></i>`).join('')}</div>
+        <div class="row gap16 wrap fs12" style="margin-top:10px">${seg.map(([v, l, c]) => `<span class="row gap6"><i style="width:9px;height:9px;border-radius:2px;background:${c};display:inline-block"></i>${l}: <b>${Math.round(v / tot * 100)} %</b> <span class="t2">(Ø ${fmtDur(v / ph.n)})</span></span>`).join('')}</div>
+        <div class="t2 fs11" style="margin-top:8px">${T('Měří se od nasazení této funkce; starší stažení se nezapočítávají.', 'Measured since this feature was added; older downloads are not counted.')}</div></div>`; })() : ''}
     <div class="sgrid" style="margin-top:14px">
       <div class="card" style="padding:16px 18px"><b>${T('Podle zdroje', 'By source')}</b><div class="col gap10" style="margin-top:10px">${top(r.sources, x => srcName(x.name))}</div></div>
       <div class="card" style="padding:16px 18px"><b>${T('Podle metody', 'By method')}</b><div class="col gap10" style="margin-top:10px">${top(r.methods, x => x.name)}</div></div>

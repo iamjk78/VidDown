@@ -112,6 +112,8 @@ def create_app(app_state) -> FastAPI:
                 "paused": sum(1 for j in q if j["paused"] and j["kind"] == "video"),
                 "size_est": sum((j["size_est"] or 0) for j in waiting),
                 "speed": sum((j["speed"] or 0) for j in running),
+                # kolik místa ještě budou potřebovat videa ve frontě (odhad velikosti čekajících + zbytek rozpracovaných)
+                "need": sum((j["size_est"] or 0) for j in waiting) + sum(max(0, (j["total"] or 0) - (j["downloaded"] or 0)) for j in running),
                 "rate_limit": s["rate_limit_mbps"] if s["rate_limit_enabled"] else None,
                 "today": S.db.stats_today(),
             },
@@ -444,7 +446,8 @@ def create_app(app_state) -> FastAPI:
 
     @app.get("/api/cpu")
     async def cpu_info():
-        return dict(S.runner.cpu.out(), history=list(S.runner.cpu.history), mem_history=list(S.runner.cpu.mem_history), step=2)
+        return dict(S.runner.cpu.out(), history=list(S.runner.cpu.history), mem_history=list(S.runner.cpu.mem_history),
+                    rate_history={k: list(v) for k, v in S.runner.cpu.rate_history.items()}, step=2)
 
     # ------------------------------------------------------------ statistiky
     @app.get("/api/stats")

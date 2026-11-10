@@ -125,6 +125,19 @@ def _psutil_mem() -> tuple[float, float] | None:
     return used, float(psutil.virtual_memory().total)
 
 
+def _net_totals() -> tuple[float, float] | None:
+    """(přijato, odesláno) v bajtech přes všechna rozhraní kromě lo – v Dockeru jen provoz kontejneru."""
+    if not psutil:
+        return None
+    try:
+        c = psutil.net_io_counters(pernic=True)
+    except Exception:  # noqa: BLE001
+        return None
+    rx = sum(v.bytes_recv for k, v in c.items() if k != "lo" and not k.startswith("lo"))
+    tx = sum(v.bytes_sent for k, v in c.items() if k != "lo" and not k.startswith("lo"))
+    return float(rx), float(tx)
+
+
 class Monitor:
     def __init__(self) -> None:
         self.percent: float | None = None
@@ -132,6 +145,11 @@ class Monitor:
         self.history: deque[float] = deque(maxlen=HISTORY)
         self.mem_history: deque[float] = deque(maxlen=HISTORY)   # využití paměti v %
         self.mem: tuple[float, float] | None = None
+        # rychlosti v B/s: síť přijato/odesláno (celý kontejner), zápis a čtení souborů procesy aplikace
+        self.rates: dict[str, float | None] = {"net_in": None, "net_out": None, "io_w": None, "io_r": None}
+        self.rate_history: dict[str, deque[float]] = {k: deque(maxlen=HISTORY) for k in self.rates}
+        self._net_prev: tuple[float, float] | None = None
+        self._io_prev: dict[int, tuple[float, float]] = {}
         self.mode = "full"
         self.source = "cgroup" if _cgroup_usage() else ("psutil" if psutil else None)
         self._last_t = 0.0
@@ -184,7 +202,37 @@ class Monitor:
                 self.mem_history.append(round(self.mem[0] / self.mem[1] * 100, 1))
         except Exception as e:  # noqa: BLE001
             log.debug("měření paměti selhalo: %s", e)
+        try:
+            self._rates(dt)
+        except Exception as e:  # noqa: BLE001
+            log.debug("měření I/O selhalo: %s", e)
         self._renice()
+
+    def _rates(self, dt: float) -> None:
+        out: dict[str, float | None] = {k: None for k in self.rates}
+        nt = _net_totals()
+        if nt:
+            if self._net_prev:
+                out["net_in"] = max(0.0, (nt[0] - self._net_prev[0]) / dt)
+                out["net_out"] = max(0.0, (nt[1] - self._net_prev[1]) / dt)
+            self._net_prev = nt
+        if psutil and sys.platform.startswith("linux"):
+            me = psutil.Process()
+            cur: dict[int, tuple[float, float]] = {}
+            for p in [me, *me.children(recursive=True)]:
+                try:
+                    io = p.io_counters()
+                except (psutil.Error, OSError):
+                    continue
+                cur[p.pid] = (float(io.write_chars), float(io.read_bytes))   # write_chars zahrnuje i zápis na síťový disk
+            if self._io_prev:
+                out["io_w"] = max(0.0, sum(v[0] - self._io_prev.get(pid, (0.0, 0.0))[0] for pid, v in cur.items()) / dt)
+                out["io_r"] = max(0.0, sum(v[1] - self._io_prev.get(pid, (0.0, 0.0))[1] for pid, v in cur.items()) / dt)
+            self._io_prev = cur
+        self.rates = out
+        for k, v in out.items():
+            if v is not None:
+                self.rate_history[k].append(round(v))
 
     def _renice(self) -> None:
         """Podprocesy, které vznikly mimo náš kód (Chromium, node), převedeme na cílovou prioritu."""
@@ -215,4 +263,5 @@ class Monitor:
     def out(self) -> dict:
         return {"percent": None if self.percent is None else round(self.percent, 1), "mode": self.mode,
                 "cores": round(self.cores, 2), "source": self.source,
-                "mem": {"used": int(self.mem[0]), "total": int(self.mem[1])} if self.mem else None}
+                "mem": {"used": int(self.mem[0]), "total": int(self.mem[1])} if self.mem else None,
+                "rates": {k: (None if v is None else int(v)) for k, v in self.rates.items()}}
