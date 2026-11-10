@@ -63,6 +63,8 @@ def create_app(app_state) -> FastAPI:
         resp = await call_next(req)
         if p.startswith("/api/"):
             resp.headers["Cache-Control"] = "no-store"
+        elif p.startswith("/static/"):
+            resp.headers["Cache-Control"] = "no-cache"   # vždy ověřit (ETag), ať se po aktualizaci nenačte stará verze GUI
         return resp
 
     @app.get("/api/session")

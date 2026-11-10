@@ -376,3 +376,9 @@ def test_cpu_modes_and_api(client):
     assert c.put("/api/settings", json={"perf_mode": "nope"}).status_code in (400, 422)
     assert c.post("/api/restart").status_code == 501   # v testu není hlavní smyčka
     cpu._nice = 0
+
+
+def test_static_files_are_revalidated(client):
+    c, _ = client
+    r = c.get("/static/app.js")
+    assert r.status_code == 200 and r.headers["cache-control"] == "no-cache"
