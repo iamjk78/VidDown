@@ -73,6 +73,20 @@ def parse_netscape_cookies(path: Path) -> list[dict]:
     return out
 
 
+async def add_cookies(context, path: Path) -> int:
+    """Načte cookies.txt do prohlížeče po jedné; vadná položka nezahodí ostatní. Vrací počet načtených."""
+    ok = bad = 0
+    for ck in parse_netscape_cookies(path):
+        try:
+            await context.add_cookies([ck])
+            ok += 1
+        except Exception:  # noqa: BLE001
+            bad += 1
+    if bad:
+        log.warning("cookies: %d položek se nepodařilo načíst do prohlížeče, přeskočeno", bad)
+    return ok
+
+
 def parse_m3u8(text: str, base: str) -> dict:
     """Rozpozná master/media playlist. U master vybere variantu s nejvyšším datovým tokem."""
     lines = [l.strip() for l in text.splitlines() if l.strip()]
@@ -133,14 +147,7 @@ async def sniff(url: str, ctx: Ctx) -> dict:
             context = await browser.new_context(user_agent=UA, viewport={"width": 1280, "height": 720},
                                                 ignore_https_errors=True, locale="cs-CZ")
             if ctx.cookies_file:
-                bad = 0
-                for ck in parse_netscape_cookies(ctx.cookies_file):
-                    try:
-                        await context.add_cookies([ck])
-                    except Exception:  # noqa: BLE001  – jedna vadná cookie nesmí zahodit ostatní
-                        bad += 1
-                if bad:
-                    log.warning("cookies: %d položek se nepodařilo načíst do prohlížeče, přeskočeno", bad)
+                await add_cookies(context, ctx.cookies_file)
             await context.add_init_script(INIT_JS)
             page = await context.new_page()
 

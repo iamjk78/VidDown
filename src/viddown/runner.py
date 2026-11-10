@@ -281,6 +281,10 @@ class Runner:
         cur = self.db.get(jid)
         if not cur or cur["status"] != "probing":
             return  # mezitím zrušeno
+        if res.get("resolved_url") and res["resolved_url"] != cur["url"]:
+            # story odkazovala na jiné video: stahuje se jeho adresa, původní URL zůstává v info (origin_url)
+            self.db.update(jid, url=res["resolved_url"])
+            cur = self.db.get(jid)
         self.apply_probe(cur, res)
 
     def needs_confirm(self, job: dict, count: int) -> bool:

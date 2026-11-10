@@ -8,7 +8,7 @@ import logging
 import time
 
 from .resolvers import Ctx, ResolveError
-from .resolvers import sniffer, ytdlp
+from .resolvers import pages, sniffer, ytdlp
 from .util import domain, fallback_allowed, youtube_channel_base
 
 log = logging.getLogger("viddown.probe")
@@ -136,6 +136,19 @@ async def _probe_sniffer(url: str, ctx: Ctx) -> dict:
 
 async def probe_url(url: str, ctx: Ctx) -> dict:
     """Projde metody podle nastaveného pořadí. Na další metodu přejde jen když video nebylo nalezeno."""
+    if pages.is_story_url(url):
+        # Facebook Story: video leží za odkazem (sdílený reel) – najdeme ho a zkontrolujeme jako běžné video
+        try:
+            target = await pages.resolve_embedded(url, ctx)
+        except ResolveError as e:
+            log.info("probe %s (story): %s (%s)", url, e, e.kind)
+            return {"type": "none", "error": str(e), "error_kind": e.kind}
+        res = await probe_url(target, ctx)
+        if res.get("type") != "none":
+            res["resolved_url"] = target
+            if isinstance(res.get("info"), dict):
+                res["info"]["origin_url"] = url
+        return res
     errors: list[ResolveError] = []
     for m in ctx.settings.get("methods") or ["ytdlp", "sniffer"]:
         try:
