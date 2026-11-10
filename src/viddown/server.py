@@ -293,9 +293,22 @@ def create_app(app_state) -> FastAPI:
         except Exception:  # noqa: BLE001
             body = {}
         f = body.get("filter")
+        forgot = 0
+        if body.get("forget_archive"):
+            # vyřadit z archivu stažených jen hotová a přeskočená videa (jen u nich archiv záznam má);
+            # musí proběhnout dřív, než záznamy zmizí z databáze
+            if isinstance(f, dict):
+                jobs = S.db.history(q=str(f.get("q") or ""), status=str(f.get("status") or ""), days=int(f.get("days") or 0), limit=10 ** 9)
+            elif body.get("ids"):
+                jobs = [j for j in (S.db.get(int(i)) for i in body["ids"]) if j]
+            else:
+                jobs = S.db.history(limit=10 ** 9)
+            forgot = S.runner.archive_forget_many([j for j in jobs if j["status"] in ("done", "skipped")])
         if isinstance(f, dict):  # hromadně podle aktuálního filtru (hledání, stav, období)
-            return {"deleted": S.db.delete_history_matching(str(f.get("q") or ""), str(f.get("status") or ""), int(f.get("days") or 0))}
-        return {"deleted": S.db.delete_history(body.get("ids"))}
+            n = S.db.delete_history_matching(str(f.get("q") or ""), str(f.get("status") or ""), int(f.get("days") or 0))
+        else:
+            n = S.db.delete_history(body.get("ids"))
+        return {"deleted": n, "archive_removed": forgot}
 
     # ------------------------------------------------------------ nastavení
     def settings_out():

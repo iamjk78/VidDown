@@ -172,3 +172,23 @@ def test_history_bulk_delete(client):
     assert st.db.get(active) is not None   # aktivní úlohy se nikdy nemažou
     assert c.request("DELETE", "/api/history", json={"filter": {}}).json()["deleted"] == 1
     assert st.db.get(active) is not None
+
+
+def test_history_bulk_delete_forgets_archive(client):
+    c, st = client
+    arch = st.data / "archive.txt"
+    arch.write_text("youtube AAAAAAAAAAA\nyoutube BBBBBBBBBBB\nyoutube CCCCCCCCCCC\n")
+    a = st.db.add("https://www.youtube.com/watch?v=AAAAAAAAAAA", status="done", finished_at=1.0)
+    b = st.db.add("https://www.youtube.com/watch?v=BBBBBBBBBBB", status="skipped", finished_at=2.0)
+    f = st.db.add("https://www.youtube.com/watch?v=CCCCCCCCCCC", status="failed", finished_at=3.0)
+    r = c.request("DELETE", "/api/history", json={"ids": [a, f], "forget_archive": True}).json()
+    assert r == {"deleted": 2, "archive_removed": 1}
+    # chyba (f) archiv neovlivní, hotové A je pryč, B zůstalo, protože nebylo vybráno
+    assert arch.read_text().split() == ["youtube", "BBBBBBBBBBB", "youtube", "CCCCCCCCCCC"]
+    r = c.request("DELETE", "/api/history", json={"filter": {"status": "skipped"}, "forget_archive": True}).json()
+    assert r == {"deleted": 1, "archive_removed": 1}
+    assert "BBBBBBBBBBB" not in arch.read_text()
+    # bez zaškrtnutí se archiv nemění
+    d = st.db.add("https://www.youtube.com/watch?v=CCCCCCCCCCC", status="done", finished_at=4.0)
+    c.request("DELETE", "/api/history", json={"ids": [d]})
+    assert "CCCCCCCCCCC" in arch.read_text()

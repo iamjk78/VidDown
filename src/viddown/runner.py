@@ -587,8 +587,8 @@ class Runner:
         new_id, _ = self.add(job["url"], source=job["source"], auto_confirm=True)
         return new_id
 
-    def archive_forget(self, job: dict) -> bool:
-        """Odebere video z archivu stažených (archive.txt, řádky „extractor id“)."""
+    @staticmethod
+    def _archive_key(job: dict) -> tuple[str | None, str]:
         try:
             info = json.loads(job["info"] or "{}")
         except ValueError:
@@ -597,15 +597,29 @@ class Runner:
         if not vid:
             m = re.search(r"(?:v=|youtu\.be/|/shorts/)([\w-]{11})", job["url"] or "")
             vid, ext = (m.group(1), "youtube") if m else (None, ext)
+        return vid, ext
+
+    def archive_forget_many(self, jobs: list[dict]) -> int:
+        """Odebere videa z archivu stažených (archive.txt, řádky „extractor id“) jedním přepsáním souboru.
+        Vrací počet odebraných řádků."""
+        keys = {k for k in (self._archive_key(j) for j in jobs) if k[0]}
         arch = self.data / "archive.txt"
-        if not vid or not arch.exists():
-            return False
+        if not keys or not arch.exists():
+            return 0
         lines = arch.read_text(encoding="utf-8").splitlines()
-        keep = [l for l in lines if not (l.split(" ", 1)[-1].strip() == vid and (not ext or l.lower().startswith(ext + " ")))]
+
+        def hit(line: str) -> bool:
+            low, vid = line.lower(), line.split(" ", 1)[-1].strip()
+            return any(vid == v and (not e or low.startswith(e + " ")) for v, e in keys)
+        keep = [l for l in lines if not hit(l)]
         if len(keep) == len(lines):
-            return False
+            return 0
         tmp = arch.with_suffix(".tmp")
         tmp.write_text("".join(l + "\n" for l in keep), encoding="utf-8")
         os.replace(tmp, arch)
-        log.info("video %s %s vyřazeno z archivu (stáhne se znovu)", ext, vid)
-        return True
+        log.info("z archivu vyřazeno %d videí (stáhnou se znovu)", len(lines) - len(keep))
+        return len(lines) - len(keep)
+
+    def archive_forget(self, job: dict) -> bool:
+        """Odebere jedno video z archivu stažených."""
+        return self.archive_forget_many([job]) > 0

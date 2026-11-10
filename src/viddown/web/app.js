@@ -324,6 +324,7 @@ function bulkBar(matched) {
   el.innerHTML = `<div class="card row gap10 wrap" style="padding:10px 16px;margin-bottom:12px"><b>${T('Vybráno', 'Selected')}: ${n}</b>
     ${!H.all && allPage && matched > H.sel.size ? `<button class="btn sm" id="bsall">${T(`Vybrat všech ${matched} odpovídajících filtru`, `Select all ${matched} matching the filter`)}</button>` : ''}
     <button class="btn sm" id="bsnone">${T('Zrušit výběr', 'Clear selection')}</button><span class="grow"></span>
+    <label class="row gap6 fs12" style="cursor:pointer" title="${T('Hotová a přeskočená videa se vyřadí z archivu stažených, takže půjdou stáhnout znovu. U chyb se nic neděje, ty v archivu nejsou.', 'Done and skipped videos are removed from the download archive so they can be downloaded again. Failed items are not in the archive.')}"><input type="checkbox" id="bsarch" ${H.forget ? 'checked' : ''}>${T('Odstranit i z archivu stažených', 'Also remove from the download archive')}</label>
     <button class="btn sm danger" id="bsdel">${ic('trash', 13)} ${T('Odstranit vybrané', 'Delete selected')} (${n})</button></div>`;
   const refresh = () => {
     $$('.hsel', $('#hlist')).forEach(c => { c.checked = H.all || H.sel.has(+c.dataset.id); c.closest('.hr').classList.toggle('sel', c.checked); });
@@ -332,9 +333,12 @@ function bulkBar(matched) {
   };
   const b1 = $('#bsall'); if (b1) b1.onclick = () => { H.all = true; refresh(); };
   $('#bsnone').onclick = () => { resetSel(); refresh(); };
+  $('#bsarch').onchange = e => { H.forget = e.target.checked; };
   $('#bsdel').onclick = async () => {
-    if (!confirm(T(`Odstranit ${n} záznamů z historie? Stažené soubory zůstanou na disku.`, `Delete ${n} records from history? Downloaded files stay on disk.`))) return;
-    const body = H.all ? { filter: { q: H.q, status: H.status, days: H.days } } : { ids: [...H.sel] };
+    const f = !!H.forget;
+    if (!confirm(T(`Odstranit ${n} záznamů z historie${f ? ' a hotová videa i z archivu stažených (půjdou stáhnout znovu)' : ''}? Stažené soubory zůstanou na disku.`,
+      `Delete ${n} records from history${f ? ' and remove done videos from the download archive (they can be downloaded again)' : ''}? Downloaded files stay on disk.`))) return;
+    const body = H.all ? { filter: { q: H.q, status: H.status, days: H.days }, forget_archive: f } : { ids: [...H.sel], forget_archive: f };
     const ok = await act(() => api('/api/history', { method: 'DELETE', body }), T('Záznamy odstraněny', 'Records deleted'));
     if (ok) { resetSel(); H.offset = 0; loadHistory(); }
   };
