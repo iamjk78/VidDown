@@ -156,3 +156,14 @@ button.chip{cursor:pointer}
 .qr{grid-template-columns:18px 22px 80px minmax(0,1fr) 96px}.qr .hide-s{display:none}.hr{grid-template-columns:22px 104px minmax(0,1fr) 90px 100px 150px}.hr .hide-s{display:none}}
 @media (max-width:760px){.layout{flex-direction:column;height:auto}.side{width:auto;flex-direction:row;align-items:center;padding:8px;gap:4px;overflow-x:auto}
 .side .logo{padding:0 8px}.side .sfoot{display:none}.side .navs{flex-direction:row!important}.nav{width:auto}.main{padding:16px}.run{flex-direction:column;align-items:stretch}.run .th{width:100%!important;height:auto!important;aspect-ratio:16/9}}
+
+/* odběry */
+.sgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:14px}
+.scard{padding:16px;display:flex;flex-direction:column;gap:12px;cursor:pointer;transition:border-color .12s}
+.scard:hover{border-color:var(--border2)}
+.sth{position:relative;border-radius:12px;overflow:hidden;background:var(--surface2);display:flex;align-items:center;justify-content:center;color:var(--muted);flex:none}
+.sth img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block}
+.subnav{display:flex;flex-direction:column;gap:2px;max-height:34vh;overflow-y:auto;margin:2px 0 4px}
+.nav.sub{height:30px;padding-left:30px;font-size:13px;gap:8px}
+.nav.sub .dot{flex:none}
+@media (max-width:760px){.subnav{display:none}}

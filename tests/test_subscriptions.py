@@ -242,6 +242,9 @@ def test_api_update_check_and_delete(client, tmp_path):
     r = c.put(f"/api/subscriptions/{sid}", json={"folder": str(tmp_path / "b"), "enabled": False, "since": None})
     assert r.status_code == 200 and r.json()["enabled"] == 0 and r.json()["since"] is None
     assert rt.db.get(j)["target_dir"] == str(tmp_path / "b")        # čekající úlohy dostanou novou složku
+    rt.db.sub_update(sid, seen_old=["x"])
+    c.put(f"/api/subscriptions/{sid}", json={"since": "2026-01-01"})
+    assert rt.db.sub_get(sid)["seen_old"] is None                   # změna data zneplatní „starší videa“
     assert c.put(f"/api/subscriptions/{sid}", json={"folder": "x"}).status_code == 400
     assert c.get("/api/subscriptions/999").status_code == 404
     # smazání se zachováním historie

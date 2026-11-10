@@ -8,6 +8,7 @@ let LANG = 'cs';
 const T = (cs, en) => (LANG === 'en' && en !== undefined ? en : cs);
 
 const ICONS = {
+  rss: '<path d="M4 11a9 9 0 0 1 9 9M4 4a16 16 0 0 1 16 16"/><circle cx="5" cy="19" r="1.2"/>',
   play: '<path d="M7 4v16l13-8z"/>', pause: '<path d="M8 5v14M16 5v14"/>', x: '<path d="M6 6l12 12M18 6L6 18"/>',
   grip: '<path d="M9 6h.01M15 6h.01M9 12h.01M15 12h.01M9 18h.01M15 18h.01" stroke-width="3"/>',
   down: '<path d="M6 9l6 6 6-6"/>', right: '<path d="M9 6l6 6-6 6"/>', up: '<path d="M6 15l6-6 6 6"/>',
@@ -36,7 +37,8 @@ const ICONS = {
 const ic = (n, s = 16) => `<svg class="ic" width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${ICONS[n] || ''}</svg>`;
 
 const App = { view: 'queue', session: null, st: null, settings: null, engines: null, hist: { items: [], q: '', status: '', days: 30, offset: 0 },
-  expanded: new Set(), drag: null, es: null, timer: null, wizardShown: false };
+  expanded: new Set(), drag: null, es: null, timer: null, wizardShown: false, args: [], subFilter: null, subReady: false };
+function parseHash() { const h = (location.hash || '#queue').slice(1).split('/'); App.view = h[0] || 'queue'; App.args = h.slice(1); }
 
 /* ------------------------------------------------------------ pomocné */
 async function api(path, opts = {}) {
@@ -65,8 +67,8 @@ function fmtDate(ts) {
   return d.toLocaleDateString(LANG === 'cs' ? 'cs-CZ' : 'en-GB');
 }
 const pct = p => p == null ? '' : Math.floor(p * 100) + ' %';
-const srcIcon = s => ({ telegram: ic('send', 12), cli: ic('terminal', 12) }[s] || ic('download', 12));
-const srcName = s => ({ telegram: 'Telegram', cli: 'CLI' }[s] || 'GUI');
+const srcIcon = s => ({ telegram: ic('send', 12), cli: ic('terminal', 12), subscription: ic('rss', 12) }[s] || ic('download', 12));
+const srcName = s => ({ telegram: 'Telegram', cli: 'CLI', subscription: T('Odběr', 'Subscription') }[s] || 'GUI');
 const methodBadge = m => m ? `<span class="badge ${m === 'sniffer' ? 'b-sn' : 'b-yt'}">${m === 'ytdlp' ? 'yt-dlp' : m}</span>` : '<span class="badge b-n">—</span>';
 function applyTheme(theme) {
   const dark = theme === 'dark' || (theme === 'system' && matchMedia('(prefers-color-scheme: dark)').matches);
@@ -89,7 +91,7 @@ async function boot() {
   start();
 }
 async function start() {
-  App.view = (location.hash || '#queue').slice(1);
+  parseHash();
   $('#app').innerHTML = '<div class="layout"><aside class="side" id="side"></aside><main class="main" id="mainwrap"><div class="main-in" id="main"></div></main></div>';
   try { App.settings = await api('/api/settings'); } catch (e) { return; }
   connectSSE(); render();
@@ -104,16 +106,23 @@ function onState() {
   if (!App.st.onboarded && !App.wizardShown) { App.wizardShown = true; openWizard(); }
   renderSide();
   if (App.view === 'queue' && !App.drag) renderQueueDyn();
+  if (App.view === 'subs' && !App.args.length) renderSubsDyn();
+  if (App.view === 'sub') {
+    if (!App.subReady) renderSub();
+    else { updateSubHead(); if (App.subFilter && !App.drag) renderQueueDyn(); }
+  }
 }
-window.addEventListener('hashchange', () => { const v = location.hash.slice(1); if (v && v !== App.view) { App.view = v; render(); } });
+window.addEventListener('hashchange', () => { parseHash(); render(); });
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => App.settings && applyTheme(App.settings.values.theme));
 function go(v) { location.hash = v; }
 
 function render() {
   clearInterval(App.timer); App.timer = null;
+  App.subFilter = null; App.subReady = false;
   renderSide();
   const freshSettings = async () => { const r = await act(() => api('/api/settings')); if (r) App.settings = r; if (App.view === 'settings') renderSettings(); };
-  const views = { queue: renderQueue, history: renderHistory, settings: freshSettings, engines: renderEngines, help: renderHelp };
+  const views = { queue: renderQueue, history: () => renderHistory(), subs: () => (App.args[0] === 'new' ? renderSubNew() : renderSubs()), sub: renderSub,
+    settings: freshSettings, engines: renderEngines, help: renderHelp };
   (views[App.view] || renderQueue)();
   $('#mainwrap').scrollTop = 0;
 }
@@ -122,15 +131,19 @@ function render() {
 function renderSide() {
   const st = App.st; const side = $('#side'); if (!side) return;
   const n = st ? st.queue.filter(j => j.kind === 'video' && j.status !== 'running' || j.status === 'running').length : 0;
-  const nav = [['queue', 'list', T('Fronta', 'Queue'), n], ['history', 'history', T('Historie', 'History')], ['settings', 'settings', T('Nastavení', 'Settings')],
-    ['engines', 'cpu', T('Enginy', 'Engines')], ['help', 'help', T('Nápověda', 'Help')]];
+  const subs = subList(), subN = subs.reduce((a, x) => a + x.queued + x.running, 0);
+  const nav = [['queue', 'list', T('Fronta', 'Queue'), n], ['history', 'history', T('Historie', 'History')], ['subs', 'rss', T('Odběry', 'Subscriptions'), subN],
+    ['settings', 'settings', T('Nastavení', 'Settings')], ['engines', 'cpu', T('Enginy', 'Engines')], ['help', 'help', T('Nápověda', 'Help')]];
+  const subNav = subs.length ? `<div class="subnav">${subs.map(x => `<button class="nav sub ${App.view === 'sub' && +App.args[0] === x.id ? 'on' : ''}" data-go="sub/${x.id}" title="${esc(x.title || x.url)}">
+    <span class="dot ${x.last_error ? 'r' : x.pending ? 'y' : x.enabled ? 'g' : ''}"></span><span class="ell">${esc(x.title || x.url)}</span>${x.queued + x.running ? `<span class="n">${x.queued + x.running}</span>` : ''}</button>`).join('')}</div>` : '';
+  const keepScroll = $('.subnav', side) ? $('.subnav', side).scrollTop : 0;
   const tg = st ? st.telegram : { state: 'off' };
   const tgTxt = { ok: T('Telegram bot připojen', 'Telegram bot connected'), off: T('Telegram vypnutý', 'Telegram off'),
     error: T('Telegram: chyba spojení', 'Telegram: connection error'), nochat: T('Telegram: chybí chat ID', 'Telegram: chat ID missing') }[tg.state] || tg.state;
   const disk = st ? st.disk : null;
   const dark = document.documentElement.dataset.theme === 'dark';
   side.innerHTML = `<div class="logo"><div class="mk">${ic('download', 16)}</div>VidDown</div>
-  <div class="col gap4 navs">${nav.map(([v, i, l, c]) => `<button class="nav ${App.view === v ? 'on' : ''}" data-go="${v}">${ic(i, 17)}${l}${c ? `<span class="n">${c}</span>` : ''}</button>`).join('')}</div>
+  <div class="col gap4 navs">${nav.map(([v, i, l, c]) => `<button class="nav ${App.view === v ? 'on' : ''}" data-go="${v}">${ic(i, 17)}${l}${c ? `<span class="n">${c}</span>` : ''}</button>${v === 'subs' ? subNav : ''}`).join('')}</div>
   <div class="grow"></div>
   <div class="sfoot col gap8">
    ${disk ? `<div class="card" style="padding:12px;background:var(--surface2)">${disk.same_disk
@@ -144,6 +157,7 @@ function renderSide() {
    <span class="row gap4"><button class="btn ghost sm" style="height:22px;padding:0 6px" data-lang="cs">CS</button><button class="btn ghost sm" style="height:22px;padding:0 6px" data-lang="en">EN</button></span></div>
   </div>`;
   $$('[data-go]', side).forEach(b => b.onclick = () => go(b.dataset.go));
+  if (keepScroll && $('.subnav', side)) $('.subnav', side).scrollTop = keepScroll;
   $('#darkt', side).onclick = () => saveSetting('theme', dark ? 'light' : 'dark');
   $$('[data-lang]', side).forEach(b => { b.style.fontWeight = b.dataset.lang === LANG ? '700' : '400'; b.onclick = () => saveSetting('language', b.dataset.lang); });
 }
@@ -211,7 +225,7 @@ function runHtml(j) {
 
 function renderQueueDyn() {
   const box = $('#qdyn'); const st = App.st; if (!box || !st) return;
-  const q = st.queue, s = st.stats;
+  const q = App.subFilter ? st.queue.filter(j => j.sub_id === App.subFilter) : st.queue, s = st.stats;
   const top = q.filter(j => !j.parent_id);
   const running = q.filter(j => j.status === 'running');
   const confirm = top.filter(j => j.status === 'confirm');
@@ -230,7 +244,7 @@ function renderQueueDyn() {
   } else if (st.schedule.enabled && !st.in_window) {
     html += `<div class="banner info">${ic('clock', 18)}<span class="grow">${T('Stahuje se jen v časovém okně', 'Downloads only run in the time window')} ${st.schedule.start}–${st.schedule.end}. ${T('Fronta čeká.', 'The queue is waiting.')}</span><button class="btn sm" data-go="settings">${T('Upravit', 'Edit')}</button></div>`;
   }
-  html += `<div class="stats">
+  if (!App.subFilter) html += `<div class="stats">
    <div class="card stat"><div class="k">${ic('download', 14)} ${T('Probíhá', 'Running')}</div><div class="v">${s.running} <small>/ ${s.concurrency}</small></div><div class="s">${T('souběžná stahování', 'parallel downloads')}</div></div>
    <div class="card stat"><div class="k">${ic('list', 14)} ${T('Ve frontě', 'Queued')}</div><div class="v">${s.waiting}</div><div class="s">${s.size_est ? '~ ' + fmtBytes(s.size_est) + ' · ' : ''}${s.paused} ${T('pozastaveno', 'paused')}</div></div>
    <div class="card stat"><div class="k">${ic('bolt', 14)} ${T('Rychlost', 'Speed')}</div><div class="v">${s.speed ? fmtBytes(s.speed).replace(/ (\w+)$/, ' <small>$1/s</small>') : '0 <small>B/s</small>'}</div><div class="s">${s.rate_limit ? T('limit', 'limit') + ' ' + s.rate_limit + ' MB/s' : T('bez limitu', 'no limit')}</div></div>
@@ -247,7 +261,9 @@ function renderQueueDyn() {
     : `<div class="card empty" style="padding:22px">${T('Nic se právě nestahuje.', 'Nothing is downloading right now.')}</div>`;
   html += `<div class="sec"><h2>${T('Čeká ve frontě', 'Waiting')}</h2><span class="chip"><b>${waiting.length}</b></span><span class="grow"></span><span class="t2 fs12 row gap6">${ic('grip', 14)} ${T('Přetažením změníte pořadí', 'Drag to reorder')}</span></div>`;
   if (!waiting.length && !running.length && !confirm.length) {
-    html += `<div class="card empty">${ic('download', 32)}<h3>${T('Fronta je prázdná', 'The queue is empty')}</h3><p>${T('Vložte odkaz na video, playlist nebo kanál do pole nahoře, nebo ho pošlete Telegram botovi.', 'Paste a link to a video, playlist or channel above, or send it to the Telegram bot.')}</p></div>`;
+    html += App.subFilter
+      ? `<div class="card empty">${ic('rss', 32)}<h3>${T('Fronta odběru je prázdná', 'This subscription has nothing queued')}</h3><p>${T('Nová videa se zařadí sama při příští kontrole. Můžete ji spustit tlačítkem nahoře.', 'New videos are queued automatically at the next check. You can start one with the button above.')}</p></div>`
+      : `<div class="card empty">${ic('download', 32)}<h3>${T('Fronta je prázdná', 'The queue is empty')}</h3><p>${T('Vložte odkaz na video, playlist nebo kanál do pole nahoře, nebo ho pošlete Telegram botovi.', 'Paste a link to a video, playlist or channel above, or send it to the Telegram bot.')}</p></div>`;
   } else if (waiting.length) {
     let rows = '', n = 0;
     for (const j of waiting) {
@@ -264,7 +280,8 @@ function renderQueueDyn() {
 }
 
 document.addEventListener('click', async e => {
-  const b = e.target.closest('[data-a],[data-q],[data-go]'); if (!b || !$('#main').contains(b)) return;
+  const b = e.target.closest('[data-sa],[data-a],[data-q],[data-go]'); if (!b || !$('#main').contains(b)) return;
+  if (b.dataset.sa) return subAction(b);
   if (b.dataset.go) return go(b.dataset.go);
   if (b.dataset.q) return act(() => api('/api/queue/' + b.dataset.q, { method: 'POST' }));
   const id = +b.dataset.id, a = b.dataset.a;
@@ -286,12 +303,200 @@ document.addEventListener('drop', async e => {
   renderQueueDyn();
 });
 
+/* ------------------------------------------------------------ odběry */
+const subList = () => (App.st && App.st.subs) || [];
+const subById = id => subList().find(s => s.id === id);
+const subKind = s => s.kind === 'playlist' ? 'Playlist' : T('Kanál', 'Channel');
+const sinceTxt = s => s.since ? T('od ', 'since ') + new Date(s.since + 'T00:00:00').toLocaleDateString(LANG === 'cs' ? 'cs-CZ' : 'en-GB') : T('všechna videa', 'all videos');
+function subThumb(s, size = 48) {
+  const img = s.thumb_url ? `<img src="${esc(s.thumb_url)}" referrerpolicy="no-referrer" loading="lazy" alt="" onerror="this.remove()">` : '';
+  return `<div class="sth" style="width:${size}px;height:${size}px">${ic('rss', Math.round(size / 2.4))}${img}</div>`;
+}
+function subStatus(s) {
+  if (s.pending) return `<span class="badge b-warn">${T('Čeká na potvrzení', 'Needs confirmation')}</span>`;
+  if (s.last_error) return `<span class="badge b-err" title="${esc(s.last_error)}">${ic('alert', 11)} ${T('Chyba kontroly', 'Check failed')}</span>`;
+  if (!s.enabled) return `<span class="badge b-n">${ic('pause', 11)} ${T('Pozastaveno', 'Paused')}</span>`;
+  if (!s.last_check) return `<span class="badge b-n"><span class="spin" style="width:10px;height:10px"></span> ${T('Kontroluje se…', 'Checking…')}</span>`;
+  return `<span class="badge b-ok">${ic('check', 11)} ${T('Aktivní', 'Active')}</span>`;
+}
+function subPending(s) {
+  return `<div class="banner">${ic('alert', 18)}<span class="grow">${T(`Při první kontrole bylo nalezeno ${s.pending} videí. Stáhnout všechna?`, `The first check found ${s.pending} videos. Download them all?`)}</span>
+    <button class="btn sm primary" data-sa="confirm" data-id="${s.id}">${ic('download', 12)} ${T('Stáhnout', 'Download')}</button><button class="btn sm" data-sa="reject" data-id="${s.id}">${T('Zahodit', 'Discard')}</button></div>`;
+}
+function subCounts(s) {
+  return `<span><b>${s.queued + s.running}</b> ${T('ve frontě', 'queued')}</span><span><b>${s.done}</b> ${T('staženo', 'downloaded')}</span><span>${fmtBytes(s.bytes)}</span>${s.failed ? `<span class="err">${s.failed} ${T('chyb', 'failed')}</span>` : ''}`;
+}
+function subCard(s) {
+  return `<div class="card scard" data-go="sub/${s.id}">
+   <div class="row gap12">${subThumb(s, 52)}<div class="grow" style="min-width:0"><div class="b6 fs15 ell" title="${esc(s.title || s.url)}">${esc(s.title || s.url)}</div><div class="fs12 t2 ell">${subKind(s)} · ${sinceTxt(s)}</div></div>${subStatus(s)}</div>
+   <div class="fs12 t2 ell row gap6" title="${esc(s.folder)}">${ic('folder', 13)}<span class="ell">${esc(s.folder)}</span></div>
+   <div class="row gap16 fs12 t2 wrap">${subCounts(s)}<span class="grow"></span><span>${T('kontrola', 'checked')}: ${s.last_check ? fmtDate(s.last_check) : '—'}</span></div>
+   ${s.pending ? subPending(s) : ''}${s.last_error ? `<div class="mm err" style="white-space:normal">${ic('alert', 12)} ${esc(s.last_error)}</div>` : ''}</div>`;
+}
+function renderSubs() {
+  $('#main').innerHTML = `<div class="row gap16 wrap"><div><h1>${T('Odběry', 'Subscriptions')}</h1><div class="t2" style="margin-top:3px">${T('Nová videa z kanálů a playlistů se stahují automaticky', 'New videos from channels and playlists are downloaded automatically')}</div></div><div class="grow"></div>
+   <button class="btn primary lg" data-go="subs/new">${ic('plus', 15)} ${T('Přidat odběr', 'Add subscription')}</button></div><div id="subsdyn" class="col gap16"></div>`;
+  renderSubsDyn();
+}
+function renderSubsDyn() {
+  const box = $('#subsdyn'); if (!box) return;
+  if (!App.st) { box.innerHTML = '<div class="empty"><div class="spin" style="margin:auto"></div></div>'; return; }
+  const list = subList();
+  box.innerHTML = list.length ? `<div class="sgrid">${list.map(subCard).join('')}</div>`
+    : `<div class="card empty">${ic('rss', 32)}<h3>${T('Zatím žádné odběry', 'No subscriptions yet')}</h3><p>${T('Odběr sleduje kanál nebo playlist a sám stáhne nová videa do vybrané složky. Můžete zvolit, od kterého data se mají stahovat.', 'A subscription watches a channel or playlist and downloads new videos into a folder you choose, starting from a date you choose.')}</p>
+      <div style="margin-top:14px"><button class="btn primary" data-go="subs/new">${ic('plus', 14)} ${T('Přidat první odběr', 'Add your first subscription')}</button></div></div>`;
+}
+
+function sinceControl(prefix, cur, withPresets) {
+  const opts = withPresets
+    ? [['now', T('Jen nové od teď', 'Only new from now')], ['month', T('Od minulého měsíce', 'Since last month')], ['date', T('Od data…', 'Since date…')], ['all', T('Všechna videa', 'All videos')]]
+    : [['date', T('Od data…', 'Since date…')], ['all', T('Všechna videa', 'All videos')]];
+  return `<div class="col gap6"><span class="seg" id="${prefix}seg">${opts.map(([v, l]) => `<button type="button" data-v="${v}" class="${cur.mode === v ? 'on' : ''}">${l}</button>`).join('')}</span>
+    <input class="input" type="date" id="${prefix}date" value="${esc(cur.date || '')}" style="width:190px;${cur.mode === 'date' ? '' : 'display:none'}"></div>`;
+}
+function bindSince(prefix, cur) {
+  $$(`#${prefix}seg button`).forEach(b => b.onclick = () => { cur.mode = b.dataset.v; $$(`#${prefix}seg button`).forEach(x => x.classList.toggle('on', x === b)); $(`#${prefix}date`).style.display = cur.mode === 'date' ? '' : 'none'; });
+  $(`#${prefix}date`).onchange = e => { cur.date = e.target.value; };
+}
+function sinceValue(cur) {
+  if (cur.mode === 'date') { if (!cur.date) throw new Error(T('Vyberte datum, od kterého se mají videa stahovat.', 'Pick the date to download from.')); return cur.date; }
+  return cur.mode;
+}
+function tabsControl(prefix, tabs) {
+  const all = [['videos', T('Videa', 'Videos')], ['shorts', 'Shorts'], ['streams', T('Živé přenosy', 'Live streams')]];
+  return `<div class="row gap8 wrap" id="${prefix}tabs">${all.map(([v, l]) => `<button type="button" class="chip ${tabs.includes(v) ? 'on' : ''}" data-v="${v}">${l}</button>`).join('')}</div>`;
+}
+function bindTabs(prefix, tabs) { $$(`#${prefix}tabs .chip`).forEach(b => b.onclick = () => { const v = b.dataset.v, i = tabs.indexOf(v); if (i >= 0) tabs.splice(i, 1); else tabs.push(v); b.classList.toggle('on', i < 0); }); }
+function tabsValue(tabs) {
+  const glob = (App.settings.values.channel_tabs || ['videos']).slice().sort().join();
+  return tabs.slice().sort().join() === glob ? null : tabs.slice();
+}
+
+function renderSubNew() {
+  const since = { mode: 'now', date: '' }, tabs = (App.settings.values.channel_tabs || ['videos']).slice();
+  $('#main').innerHTML = `<div class="row gap10"><button class="btn ghost sm" data-go="subs">${ic('right', 12).replace('M9 6l6 6-6 6', 'M15 6l-6 6 6 6')} ${T('Odběry', 'Subscriptions')}</button></div>
+   <div><h1>${T('Přidat odběr', 'Add subscription')}</h1></div>
+   <div class="card col gap16" style="padding:20px;max-width:720px">
+    <label class="col gap6"><span class="fs12 b6">${T('URL kanálu nebo playlistu', 'Channel or playlist URL')}</span><input class="input" id="sau" placeholder="https://www.youtube.com/@kanal" autocomplete="off"></label>
+    <div class="col gap6"><span class="fs12 b6">${T('Složka pro videa tohoto odběru', 'Folder for this subscription')}</span>
+     <div class="row gap8"><input class="input grow mono fs12" id="saf" placeholder="${T('Nevyplněno = cílová složka / název kanálu', 'Empty = download folder / channel name')}"><button class="btn" id="sabr">${ic('folder', 14)} ${T('Vybrat…', 'Browse…')}</button></div>
+     <span class="fs12 muted">${T('Při uložení se ověří, že do složky jde zapisovat.', 'Write access is checked when you save.')}</span></div>
+    <div class="col gap6"><span class="fs12 b6">${T('Stahovat videa', 'Download videos')}</span>${sinceControl('sa', since, true)}
+     <span class="fs12 muted">${T('Starší videa se nestáhnou. Nová videa po tomto datu ano, i v budoucnu.', 'Older videos are not downloaded. New ones after this date are, also in the future.')}</span></div>
+    <div class="col gap6"><span class="fs12 b6">${T('Z kanálu YouTube stahovat', 'From a YouTube channel download')}</span>${tabsControl('sa', tabs)}</div>
+    <div class="banner" id="saerr" style="display:none"></div>
+    <div class="row gap8"><button class="btn primary lg" id="saok">${ic('plus', 14)} ${T('Přidat odběr', 'Add subscription')}</button><button class="btn lg" data-go="subs">${T('Zrušit', 'Cancel')}</button></div></div>`;
+  bindSince('sa', since); bindTabs('sa', tabs);
+  $('#sabr').onclick = () => openDirPicker($('#saf').value || App.settings.values.download_dir, p => { $('#saf').value = p; });
+  const submit = async () => {
+    const err = $('#saerr'); err.style.display = 'none';
+    const btn = $('#saok'); const url = $('#sau').value.trim();
+    try {
+      if (!url) throw new Error(T('Zadejte URL kanálu nebo playlistu.', 'Enter a channel or playlist URL.'));
+      const body = { url, folder: $('#saf').value.trim(), since: sinceValue(since), tabs: tabsValue(tabs) };
+      btn.disabled = true; btn.innerHTML = `<span class="spin" style="width:13px;height:13px"></span> ${T('Kontroluji URL…', 'Checking URL…')}`;
+      const r = await api('/api/subscriptions', { method: 'POST', body });
+      toast(T('Odběr přidán', 'Subscription added')); if (App.st && App.st.subs && !subById(r.id)) App.st.subs.push(r); go(`sub/${r.id}`);
+    } catch (e) {
+      if (e.message === 'auth') return;
+      err.innerHTML = `${ic('alert', 18)}<span class="grow">${esc(e.message)}</span>`; err.style.display = 'flex';
+      btn.disabled = false; btn.innerHTML = `${ic('plus', 14)} ${T('Přidat odběr', 'Add subscription')}`;
+    }
+  };
+  $('#saok').onclick = submit;
+  $('#sau').addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
+  $('#sau').focus();
+}
+
+function renderSub() {
+  const sid = +App.args[0], tab = ['queue', 'history', 'settings'].includes(App.args[1]) ? App.args[1] : 'queue';
+  App.subFilter = tab === 'queue' ? sid : null;
+  $('#main').innerHTML = `<div class="row gap10"><button class="btn ghost sm" data-go="subs">${ic('right', 12).replace('M9 6l6 6-6 6', 'M15 6l-6 6 6 6')} ${T('Odběry', 'Subscriptions')}</button></div>
+   <div id="subhead"></div>
+   <span class="seg" id="subtabs" style="align-self:flex-start">${[['queue', T('Fronta', 'Queue')], ['history', T('Historie', 'History')], ['settings', T('Nastavení', 'Settings')]]
+      .map(([v, l]) => `<button class="${tab === v ? 'on' : ''}" data-go="sub/${sid}/${v}">${l}</button>`).join('')}</span>
+   <div id="subbody" class="col gap16"></div>`;
+  updateSubHead();
+  if (!App.st) { $('#subbody').innerHTML = '<div class="empty"><div class="spin" style="margin:auto"></div></div>'; return; }
+  const s = subById(sid);
+  App.subReady = !!s;   // dokud odběr není ve stavu (právě založený), zkusí se znovu při další aktualizaci
+  if (!s) { $('#subtabs').style.display = 'none'; return; }
+  if (tab === 'queue') { $('#subbody').innerHTML = '<div id="qdyn" class="col gap16"></div>'; renderQueueDyn(); }
+  else if (tab === 'history') renderHistory($('#subbody'), sid);
+  else renderSubSettings(s);
+}
+function updateSubHead() {
+  const el = $('#subhead'); if (!el) return;
+  const sid = +App.args[0];
+  if (!App.st) { el.innerHTML = ''; return; }
+  const s = subById(sid);
+  if (!s) { el.innerHTML = `<div class="card empty"><h3>${T('Odběr neexistuje', 'Subscription not found')}</h3><button class="btn" data-go="subs">${T('Zpět na odběry', 'Back to subscriptions')}</button></div>`; return; }
+  el.innerHTML = `<div class="row gap16 wrap">${subThumb(s, 56)}<div class="grow" style="min-width:0"><div class="row gap10"><h1 class="ell">${esc(s.title || s.url)}</h1>${subStatus(s)}</div>
+    <div class="t2 fs12 row gap12 wrap" style="margin-top:4px"><span>${subKind(s)} · ${sinceTxt(s)}</span><a href="${esc(s.url)}" target="_blank" rel="noopener noreferrer" class="row gap4">${ic('link', 12)} ${T('Otevřít zdroj', 'Open source')}</a>
+     <span class="row gap4" title="${esc(s.folder)}">${ic('folder', 12)} <span class="ell" style="max-width:340px">${esc(s.folder)}</span></span></div>
+    <div class="row gap16 fs12 t2 wrap" style="margin-top:6px">${subCounts(s)}<span>${T('kontrola', 'checked')}: ${s.last_check ? fmtDate(s.last_check) : '—'}</span></div></div>
+    <div class="row gap10"><button class="btn" data-sa="check" data-id="${s.id}">${ic('refresh', 13)} ${T('Zkontrolovat teď', 'Check now')}</button>
+     <label class="row gap8 fs12 t2" title="${T('Zapnout / pozastavit odběr', 'Enable / pause the subscription')}">${s.enabled ? T('Zapnuto', 'On') : T('Pozastaveno', 'Paused')}<button class="toggle ${s.enabled ? 'on' : ''}" data-sa="toggle" data-id="${s.id}" aria-label="enabled"></button></label></div></div>
+   ${s.pending ? subPending(s) : ''}${s.last_error ? `<div class="banner">${ic('alert', 18)}<span class="grow">${T('Poslední kontrola selhala', 'The last check failed')}: ${esc(s.last_error)}</span></div>` : ''}`;
+}
+
+function renderSubSettings(s) {
+  const since = { mode: s.since ? 'date' : 'all', date: s.since || '' };
+  const tabs = (s.tabs || App.settings.values.channel_tabs || ['videos']).slice();
+  $('#subbody').innerHTML = `<div class="card col gap16" style="padding:20px;max-width:720px">
+    <label class="col gap6"><span class="fs12 b6">${T('Název', 'Name')}</span><input class="input" id="ssn" value="${esc(s.title || '')}"></label>
+    <div class="col gap6"><span class="fs12 b6">URL</span><div class="mono fs12 t2" style="word-break:break-all">${esc(s.url)}</div></div>
+    <div class="col gap6"><span class="fs12 b6">${T('Složka pro videa', 'Folder for videos')}</span><div class="row gap8"><input class="input grow mono fs12" id="ssf" value="${esc(s.folder)}"><button class="btn" id="ssbr">${ic('folder', 14)} ${T('Vybrat…', 'Browse…')}</button></div>
+     <span class="fs12 muted">${T('Platí i pro videa, která už čekají ve frontě. Už stažené soubory se nepřesouvají.', 'Also applies to videos already waiting in the queue. Files already downloaded are not moved.')}</span></div>
+    <div class="col gap6"><span class="fs12 b6">${T('Stahovat videa', 'Download videos')}</span>${sinceControl('ss', since, false)}</div>
+    ${s.kind === 'channel' ? `<div class="col gap6"><span class="fs12 b6">${T('Z kanálu YouTube stahovat', 'From a YouTube channel download')}</span>${tabsControl('ss', tabs)}</div>` : ''}
+    <div class="row gap8"><button class="btn primary" id="ssok">${T('Uložit změny', 'Save changes')}</button></div></div>
+   <div class="card col gap10" style="padding:20px;max-width:720px"><h3>${T('Smazat odběr', 'Delete subscription')}</h3>
+    <p class="t2 fs12">${T('Odběr přestane stahovat nová videa a čekající videa se zruší. Stažené soubory na disku zůstanou.', 'The subscription stops downloading and queued videos are cancelled. Downloaded files stay on disk.')}</p>
+    <div><button class="btn danger" id="ssdel">${ic('trash', 13)} ${T('Smazat odběr…', 'Delete subscription…')}</button></div></div>`;
+  bindSince('ss', since); if (s.kind === 'channel') bindTabs('ss', tabs);
+  $('#ssbr').onclick = () => openDirPicker($('#ssf').value, p => { $('#ssf').value = p; });
+  $('#ssok').onclick = async () => {
+    let body;
+    try { body = { title: $('#ssn').value.trim(), folder: $('#ssf').value.trim(), since: sinceValue(since) }; } catch (e) { return toast(e.message, true); }
+    if (s.kind === 'channel') body.tabs = tabsValue(tabs);
+    if (since.mode === 'all') body.since = 'all';
+    const r = await act(() => api(`/api/subscriptions/${s.id}`, { method: 'PUT', body }), T('Uloženo', 'Saved'));
+    if (r) { const cur = subById(s.id); if (cur) Object.assign(cur, r); updateSubHead(); }
+  };
+  $('#ssdel').onclick = () => openDeleteSub(s);
+}
+function openDeleteSub(s) {
+  const m = modal(`<div class="mh">${ic('trash', 18)}<h2>${T('Smazat odběr', 'Delete subscription')} „${esc(s.title || s.url)}“</h2></div><div class="mb col gap10">
+    <label class="row gap8" style="align-items:flex-start"><input type="radio" name="kh" value="1" checked style="margin-top:3px"><span><b>${T('Zachovat záznamy v historii', 'Keep records in history')}</b><br><span class="fs12 t2">${T('Hotová stahování zůstanou v celkové historii, jen bez vazby na odběr.', 'Finished downloads stay in the overall history, just without a link to the subscription.')}</span></span></label>
+    <label class="row gap8" style="align-items:flex-start"><input type="radio" name="kh" value="0" style="margin-top:3px"><span><b>${T('Odstranit i záznamy z historie', 'Also delete the history records')}</b><br><span class="fs12 t2">${T('Soubory na disku zůstanou, smažou se jen záznamy o nich.', 'Files stay on disk, only their records are deleted.')}</span></span></label></div>
+   <div class="mf"><button class="btn" id="sdc">${T('Zrušit', 'Cancel')}</button><button class="btn danger" id="sdok">${T('Smazat odběr', 'Delete subscription')}</button></div>`);
+  $('#sdc').onclick = m.close;
+  $('#sdok').onclick = async () => {
+    const keep = $('input[name=kh]:checked', m.el).value === '1';
+    const r = await act(() => api(`/api/subscriptions/${s.id}?keep_history=${keep}`, { method: 'DELETE' }), T('Odběr smazán', 'Subscription deleted'));
+    if (r) { m.close(); go('subs'); }
+  };
+}
+async function subAction(b) {
+  const id = +b.dataset.id, a = b.dataset.sa;
+  if (a === 'confirm') return act(() => api(`/api/subscriptions/${id}/confirm`, { method: 'POST' }), T('Videa zařazena do fronty', 'Videos added to the queue'));
+  if (a === 'reject') {
+    if (!confirm(T('Zahodit nalezená videa? Už se znovu nenabídnou.', 'Discard the videos found? They will not be offered again.'))) return;
+    return act(() => api(`/api/subscriptions/${id}/reject`, { method: 'POST' }), T('Videa zahozena', 'Videos discarded'));
+  }
+  if (a === 'check') return act(() => api(`/api/subscriptions/${id}/check`, { method: 'POST' }), T('Kontrola spuštěna', 'Check started'));
+  if (a === 'toggle') { const s = subById(id); if (s) { s.enabled = s.enabled ? 0 : 1; updateSubHead(); } return act(() => api(`/api/subscriptions/${id}`, { method: 'PUT', body: { enabled: s ? !!s.enabled : true } })); }
+}
+
 /* ------------------------------------------------------------ historie */
 const PAGE_SIZES = [25, 50, 100, 200];
 function histLimit() { try { const v = +localStorage.getItem('vd_hist_limit'); return PAGE_SIZES.includes(v) ? v : 50; } catch (e) { return 50; } }
-async function renderHistory() {
+async function renderHistory(host, sub = null) {
   const H = App.hist; H.limit = histLimit(); H.offset = 0;
-  $('#main').innerHTML = `<div class="row gap10 wrap"><h1>${T('Historie', 'History')}</h1><span class="t2" id="htot" style="margin-left:6px"></span><span class="grow"></span>
+  if ((H.sub || null) !== sub) { H.q = ''; H.status = ''; resetSel(); }
+  H.sub = sub;
+  (host || $('#main')).innerHTML = `<div class="row gap10 wrap">${sub ? '' : `<h1>${T('Historie', 'History')}</h1>`}<span class="t2" id="htot" style="margin-left:6px"></span><span class="grow"></span>
    <div class="inwrap" style="height:32px;width:260px">${ic('search', 15)}<input id="hq" placeholder="${T('Hledat v historii…', 'Search history…')}" value="${esc(H.q)}"></div>
    <span class="seg" id="hst">${[['', T('Vše', 'All')], ['done', T('Hotovo', 'Done')], ['failed', T('Chyby', 'Failed')], ['cancelled', T('Zrušeno', 'Cancelled')], ['skipped', T('Přeskočeno', 'Skipped')]].map(([v, l]) => `<button class="${H.status === v ? 'on' : ''}" data-v="${v}">${l}</button>`).join('')}</span>
    <select class="input sm" id="hdays" style="width:170px">${[[1, T('Posledních 24 h', 'Last 24 h')], [7, T('Posledních 7 dní', 'Last 7 days')], [30, T('Posledních 30 dní', 'Last 30 days')], [0, T('Vše', 'All time')]].map(([v, l]) => `<option value="${v}" ${H.days === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
@@ -302,7 +507,7 @@ async function renderHistory() {
   let tmr; $('#hq').oninput = e => { clearTimeout(tmr); tmr = setTimeout(() => { H.q = e.target.value; H.offset = 0; resetSel(); loadHistory(); }, 300); };
   $$('#hst button').forEach(b => b.onclick = () => { H.status = b.dataset.v; H.offset = 0; resetSel(); $$('#hst button').forEach(x => x.classList.toggle('on', x === b)); loadHistory(); });
   $('#hdays').onchange = e => { H.days = +e.target.value; H.offset = 0; resetSel(); loadHistory(); };
-  $('#hclear').onclick = async () => { if (confirm(T('Smazat celou historii? Stažené soubory zůstanou na disku.', 'Delete all history? Downloaded files stay on disk.'))) { await act(() => api('/api/history', { method: 'DELETE', body: {} }), T('Historie smazána', 'History cleared')); H.offset = 0; loadHistory(); } };
+  $('#hclear').onclick = async () => { if (confirm(T('Smazat celou historii' + (H.sub ? ' tohoto odběru' : '') + '? Stažené soubory zůstanou na disku.', 'Delete all history' + (H.sub ? ' of this subscription' : '') + '? Downloaded files stay on disk.'))) { await act(() => api('/api/history', { method: 'DELETE', body: H.sub ? { filter: { sub: H.sub } } : {} }), T('Historie smazána', 'History cleared')); H.offset = 0; loadHistory(); } };
   loadHistory();
 }
 function pagerHtml(matched, offset, limit) {
@@ -338,14 +543,14 @@ function bulkBar(matched) {
     const f = !!H.forget;
     if (!confirm(T(`Odstranit ${n} záznamů z historie${f ? ' a hotová videa i z archivu stažených (půjdou stáhnout znovu)' : ''}? Stažené soubory zůstanou na disku.`,
       `Delete ${n} records from history${f ? ' and remove done videos from the download archive (they can be downloaded again)' : ''}? Downloaded files stay on disk.`))) return;
-    const body = H.all ? { filter: { q: H.q, status: H.status, days: H.days }, forget_archive: f } : { ids: [...H.sel], forget_archive: f };
+    const body = H.all ? { filter: { q: H.q, status: H.status, days: H.days, sub: H.sub || 0 }, forget_archive: f } : { ids: [...H.sel], forget_archive: f };
     const ok = await act(() => api('/api/history', { method: 'DELETE', body }), T('Záznamy odstraněny', 'Records deleted'));
     if (ok) { resetSel(); H.offset = 0; loadHistory(); }
   };
 }
 async function loadHistory() {
   const H = App.hist; if (!H.sel) resetSel();
-  const r = await act(() => api(`/api/history?q=${encodeURIComponent(H.q)}&status=${H.status}&days=${H.days}&offset=${H.offset}&limit=${H.limit}`)); if (!r) return;
+  const r = await act(() => api(`/api/history?q=${encodeURIComponent(H.q)}&status=${H.status}&days=${H.days}&offset=${H.offset}&limit=${H.limit}&sub=${H.sub || 0}`)); if (!r) return;
   if (!r.items.length && r.matched && H.offset >= r.matched) { H.offset = Math.max(0, Math.floor((r.matched - 1) / H.limit) * H.limit); return loadHistory(); }
   H.items = r.items;
   $('#htot').textContent = `${r.total_done} ${T('stažených videí', 'downloaded videos')} · ${fmtBytes(r.total_bytes)}`;
@@ -426,6 +631,7 @@ const SECTIONS = () => [
     { k: 'audio_format', type: 'seg', opts: [['mp3', 'MP3'], ['m4a', 'M4A']], label: ['Formát zvuku', 'Audio format'] },
     { k: 'channel_tabs', type: 'chips', opts: [['videos', ['Videa', 'Videos']], ['shorts', 'Shorts'], ['streams', ['Živé přenosy', 'Live streams']]], label: ['Z kanálu stahovat', 'From channels download'] },
     { k: 'playlist_confirm_threshold', type: 'number', min: 1, suffix: ['videí', 'videos'], label: ['Potvrdit playlist nad', 'Confirm playlists over'], hint: ['Větší playlist nebo kanál se nejdřív potvrdí', 'Larger playlists ask first'] },
+    { k: 'subscription_check_hours', type: 'number', min: 0, suffix: 'h', label: ['Kontrola odběrů po', 'Check subscriptions every'], hint: ['Jak často se hledají nová videa v odběrech; 0 = vypnuto', 'How often subscriptions look for new videos; 0 = off'] },
     { k: 'live_from_start', type: 'toggle', label: ['Nahrávat živé přenosy od začátku', 'Record live streams from start'], hint: ['Jinak se probíhající přenos přeskočí', 'Otherwise live streams are skipped'] },
     { k: 'subtitles', type: 'toggle', label: ['Titulky', 'Subtitles'], hint: ['Vloží se do souboru videa', 'Embedded into the video file'] },
     { k: 'subtitle_langs', type: 'text', w: 120, label: ['Jazyky titulků', 'Subtitle languages'] },
@@ -783,6 +989,19 @@ function renderHelp() {
       <li><b>Bulk delete of records:</b> tick the boxes (or the header box for the whole page). With the “Failed” filter or a title search, <b>Select all … matching the filter</b> also covers other pages. Only records are removed; files on disk stay.</li>
       <li>If you delete a file on the storage, history marks it <b>File deleted</b>. <b>Download again</b> removes it from the download archive and queues it.</li>
       <li>Playlist/channel videos go to a <b>separate folder</b> named after it (can be turned off).</li></ul>`)],
+    ['subs', T('Odběry', 'Subscriptions'), T(`
+      <ul><li><b>Odběr</b> sleduje kanál nebo playlist a sám stáhne nová videa. Založíte ho v menu <b>Odběry › Přidat odběr</b> (jen v tomto rozhraní).</li>
+      <li>U odběru nastavíte <b>vlastní složku</b> pro videa a <b>datum, od kterého</b> se stahuje: jen nové od teď, od minulého měsíce, od zvoleného data, nebo všechno. Starší videa se nestáhnou, nová i budoucí ano.</li>
+      <li>Kontrola probíhá sama (výchozí každých 6 hodin, jde změnit v Nastavení › Stahování) a ručně tlačítkem <b>Zkontrolovat teď</b>. Nová videa jdou do běžné fronty. Když je fronta pozastavená, odběry se nekontrolují.</li>
+      <li>Pokud první kontrola najde víc videí než práh potvrzení (výchozí 50), počká na vaše potvrzení.</li>
+      <li>Každý odběr má v bočním panelu vlastní stránku s <b>frontou</b>, <b>historií</b> a <b>nastavením</b>. Stahování z odběru je vidět i v celkové frontě a historii.</li>
+      <li>Živá vysílání a premiéry se přeskočí a zkusí se při další kontrole. Videa, která už jsou v archivu stažených, se nestahují znovu.</li></ul>`, `
+      <ul><li>A <b>subscription</b> watches a channel or playlist and downloads new videos on its own. Create one under <b>Subscriptions › Add subscription</b> (this interface only).</li>
+      <li>Each subscription has its <b>own folder</b> and a <b>start date</b>: only new from now, since last month, since a date, or everything. Older videos are not downloaded, new and future ones are.</li>
+      <li>Checks run automatically (every 6 hours by default, change it in Settings › Downloading) and manually with <b>Check now</b>. New videos go to the normal queue. While the queue is paused, subscriptions are not checked.</li>
+      <li>If the first check finds more videos than the confirmation threshold (default 50), it waits for your confirmation.</li>
+      <li>Each subscription has its own page in the sidebar with its <b>queue</b>, <b>history</b> and <b>settings</b>. Its downloads also show in the overall queue and history.</li>
+      <li>Live streams and premieres are skipped and retried at the next check. Videos already in the download archive are not downloaded again.</li></ul>`)],
     ['naming', T('Pojmenování souborů', 'File naming'), T(`
       <p>Šablonu nastavíte v Nastavení › Pojmenování a složky. U kanálů se použije zvláštní šablona (výchozí <code>{kanál}_{název}</code>).</p>
       <table><tr><th>Token</th><th>Význam</th></tr><tr><td><code>{název}</code></td><td>název videa</td></tr><tr><td><code>{kanál}</code></td><td>kanál / autor</td></tr>

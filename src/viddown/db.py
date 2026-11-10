@@ -251,9 +251,12 @@ class DB:
             "and c.status in ('new','probing','confirm','queued','running'))) order by pos")
 
     @staticmethod
-    def _history_where(q: str, status: str, days: int) -> tuple[str, list]:
+    def _history_where(q: str, status: str, days: int, sub: int = 0) -> tuple[str, list]:
         sql = " where status in ('done','failed','cancelled','skipped')"
         args: list = []
+        if sub:
+            sql += " and sub_id=?"
+            args.append(sub)
         if status:
             sql += " and status=?"
             args.append(status)
@@ -265,13 +268,13 @@ class DB:
             args.append(time.time() - days * 86400)
         return sql, args
 
-    def history(self, q: str = "", status: str = "", days: int = 0, limit: int = 300, offset: int = 0) -> list[dict]:
-        where, args = self._history_where(q, status, days)
+    def history(self, q: str = "", status: str = "", days: int = 0, limit: int = 300, offset: int = 0, sub: int = 0) -> list[dict]:
+        where, args = self._history_where(q, status, days, sub)
         return self.query(f"select * from jobs{where} order by coalesce(finished_at, updated_at) desc, id desc limit ? offset ?",
                           args + [limit, offset])
 
-    def history_count(self, q: str = "", status: str = "", days: int = 0) -> int:
-        where, args = self._history_where(q, status, days)
+    def history_count(self, q: str = "", status: str = "", days: int = 0, sub: int = 0) -> int:
+        where, args = self._history_where(q, status, days, sub)
         return self.query(f"select count(*) n from jobs{where}", args)[0]["n"]
 
     def find_active_url(self, url: str) -> dict | None:
@@ -314,9 +317,9 @@ class DB:
             c.execute("delete from jobs where status='expanded' and not exists(select 1 from jobs c where c.parent_id=jobs.id)")
             return n
 
-    def delete_history_matching(self, q: str = "", status: str = "", days: int = 0) -> int:
-        """Smaže všechny záznamy historie odpovídající filtru (hledání, stav, období)."""
-        where, args = self._history_where(q, status, days)
+    def delete_history_matching(self, q: str = "", status: str = "", days: int = 0, sub: int = 0) -> int:
+        """Smaže všechny záznamy historie odpovídající filtru (hledání, stav, období, odběr)."""
+        where, args = self._history_where(q, status, days, sub)
         with self.conn() as c:
             n = c.execute(f"delete from jobs{where}", args).rowcount
             c.execute("delete from jobs where status='expanded' and not exists(select 1 from jobs c where c.parent_id=jobs.id)")

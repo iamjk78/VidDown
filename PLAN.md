@@ -1,6 +1,6 @@
 # VidDown – plán
 
-Stav: **etapy 1–4 implementovány** (listopad 2026), odběry a statistiky (kap. 17) rozpracovány – hotová etapa 1. Tento dokument shrnuje potvrzené požadavky, pravidla chování a návrh. Odchylky a doplňky z vývoje jsou v kapitole 17.
+Stav: **etapy 1–4 implementovány** (listopad 2026), odběry a statistiky (kap. 17) rozpracovány – hotové etapy 1 a 2. Tento dokument shrnuje potvrzené požadavky, pravidla chování a návrh. Odchylky a doplňky z vývoje jsou v kapitole 17.
 
 ## 1. Cíl
 
@@ -316,7 +316,7 @@ Nové menu **Statistiky** s přepínačem období: 24 h, 7 dní, 30 dní, 12 mě
    - První kontrola nad prahem potvrzení (50) nic nezařadí; videa čekají v `subscriptions.pending` a řeší se `POST …/confirm` nebo `…/reject`.
    - Úloha z odběru má `target_dir` (absolutní složka odběru; mění se i u čekajících úloh po úpravě odběru) a pro kanál se použije šablona názvu kanálu.
    - API: `GET/POST /api/subscriptions`, `GET/PUT/DELETE /api/subscriptions/{id}` (`?keep_history=false` smaže i záznamy), `POST …/check|confirm|reject`. Nastavení `subscription_check_hours` (výchozí 6, 0 = vypnuto) zatím jen v `settings.json` / `viddown config set`.
-2. GUI Odběry (přehled, přidání, podmenu s frontou, historií a nastavením).
+2. ✅ **Hotovo (11. 2026):** GUI Odběry – menu **Odběry** s kartami (stav, složka, od data, počty, poslední kontrola), stránka **Přidat odběr** (URL, složka s výběrem, „od data“, záložky kanálu), podmenu v bočním panelu a stránka odběru se záložkami **Fronta** / **Historie** / **Nastavení** (úprava, smazání s volbou zachovat / odstranit záznamy). Potvrzení první dávky nad prahem je přímo na kartě a v záhlaví odběru. Fronta a historie odběru jsou pohledy na stejné záznamy filtrované podle `sub_id` (`/api/history?sub=ID`, `sub` je i ve stavu `/api/state`). Odstranění z historie odběru zatím maže záznam úplně i z celkové historie – volba „z jedné / z obou“ je etapa 3. Interval kontroly je i v Nastavení › Stahování. Změna data „od“ zneplatní zapamatovaná starší videa (`seen_old`).
 3. Dvojí historie (příznaky skrytí, volba „z jedné / z obou“).
 4. Tabulka `downloads` + API + GUI Statistiky.
 

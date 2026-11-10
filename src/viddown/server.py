@@ -101,6 +101,7 @@ def create_app(app_state) -> FastAPI:
         running = [j for j in q if j["status"] == "running"]
         waiting = [j for j in q if j["status"] in ("queued", "new", "probing") and j["kind"] == "video"]
         playlists_pending = sum((j.get("count") or 0) for j in q if j["status"] == "confirm" and j["kind"] != "video")
+        counts = S.db.sub_counts()
         return {
             "queue": q,
             "stats": {
@@ -123,6 +124,7 @@ def create_app(app_state) -> FastAPI:
             "telegram": S.bot.status() if S.bot else {"state": "off"},
             "engines": {e["name"]: (e["current"] or (f"{e['system']} (systém)" if e["system"] else None))
                         for e in S.engines_cache()},
+            "subs": [sub_out(x, counts) for x in S.db.sub_list()],
             "onboarded": bool(S.db.kv_get("onboarded", False)),
             "docker": in_docker(),
             "version": __version__,
@@ -345,6 +347,7 @@ def create_app(app_state) -> FastAPI:
                 ch["since"] = subscriptions.parse_since(body["since"])
             except ValueError as e:
                 raise HTTPException(400, str(e))
+            ch["seen_old"] = None   # závěry „starší než datum“ platily pro původní datum
         if "enabled" in body:
             ch["enabled"] = 1 if body["enabled"] else 0
         if "tabs" in body:
@@ -382,12 +385,13 @@ def create_app(app_state) -> FastAPI:
         return {"rejected": subscriptions.reject_pending(S.db, sid)}
 
     @app.get("/api/history")
-    async def history(q: str = "", status: str = "", days: int = 0, offset: int = 0, limit: int = 50):
+    async def history(q: str = "", status: str = "", days: int = 0, offset: int = 0, limit: int = 50, sub: int = 0):
         limit = max(1, min(int(limit), 500))
         offset = max(0, int(offset))
-        rows = S.db.history(q=q, status=status, days=days, offset=offset, limit=limit)
-        matched = S.db.history_count(q=q, status=status, days=days)
-        total = S.db.query("select count(*) n, coalesce(sum(filesize),0) b from jobs where status='done'")[0]
+        rows = S.db.history(q=q, status=status, days=days, offset=offset, limit=limit, sub=sub)
+        matched = S.db.history_count(q=q, status=status, days=days, sub=sub)
+        total = S.db.query("select count(*) n, coalesce(sum(filesize),0) b from jobs where status='done'" + (" and sub_id=?" if sub else ""),
+                           (sub,) if sub else ())[0]
 
         def out():
             items = []
@@ -412,14 +416,14 @@ def create_app(app_state) -> FastAPI:
             # vyřadit z archivu stažených jen hotová a přeskočená videa (jen u nich archiv záznam má);
             # musí proběhnout dřív, než záznamy zmizí z databáze
             if isinstance(f, dict):
-                jobs = S.db.history(q=str(f.get("q") or ""), status=str(f.get("status") or ""), days=int(f.get("days") or 0), limit=10 ** 9)
+                jobs = S.db.history(q=str(f.get("q") or ""), status=str(f.get("status") or ""), days=int(f.get("days") or 0), limit=10 ** 9, sub=int(f.get("sub") or 0))
             elif body.get("ids"):
                 jobs = [j for j in (S.db.get(int(i)) for i in body["ids"]) if j]
             else:
                 jobs = S.db.history(limit=10 ** 9)
             forgot = S.runner.archive_forget_many([j for j in jobs if j["status"] in ("done", "skipped")])
         if isinstance(f, dict):  # hromadně podle aktuálního filtru (hledání, stav, období)
-            n = S.db.delete_history_matching(str(f.get("q") or ""), str(f.get("status") or ""), int(f.get("days") or 0))
+            n = S.db.delete_history_matching(str(f.get("q") or ""), str(f.get("status") or ""), int(f.get("days") or 0), int(f.get("sub") or 0))
         else:
             n = S.db.delete_history(body.get("ids"))
         return {"deleted": n, "archive_removed": forgot}
