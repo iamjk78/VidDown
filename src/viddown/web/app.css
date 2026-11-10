@@ -110,7 +110,7 @@ button.chip{cursor:pointer}
 .empty h3{color:var(--text);margin:12px 0 6px;font-size:16px}
 .confirm{display:flex;gap:16px;align-items:center;padding:14px 16px;border:1px solid var(--accent);background:var(--accent-soft)}
 /* historie */
-.hr{display:grid;grid-template-columns:104px minmax(0,1fr) 96px 80px 80px 120px 110px;gap:16px;align-items:center;padding:10px 16px;border-top:1px solid var(--border)}
+.hr{display:grid;grid-template-columns:104px minmax(0,1fr) 96px 80px 80px 120px 150px;gap:16px;align-items:center;padding:10px 16px;border-top:1px solid var(--border)}
 .hr.h{border-top:none;background:var(--surface2);padding-top:9px;padding-bottom:9px;font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
 /* nastavení */
 .sgrid{display:grid;grid-template-columns:1fr 1fr;gap:14px;align-items:start}
