@@ -146,7 +146,7 @@ function renderSide() {
     error: T('Telegram: chyba spojení', 'Telegram: connection error'), nochat: T('Telegram: chybí chat ID', 'Telegram: chat ID missing') }[tg.state] || tg.state;
   const disk = st ? st.disk : null;
   const dark = document.documentElement.dataset.theme === 'dark';
-  side.innerHTML = `<div class="logo"><div class="mk">${ic('download', 16)}</div>VidDown</div>
+  const sideHtml = `<div class="logo"><div class="mk">${ic('download', 16)}</div>VidDown</div>
   <div class="col gap4 navs">${nav.map(([v, i, l, c]) => `<button class="nav ${App.view === v ? 'on' : ''}" data-go="${v}">${ic(i, 17)}${l}${c ? `<span class="n">${c}</span>` : ''}</button>${v === 'subs' && (App.view === 'subs' || App.view === 'sub') ? subNav : ''}`).join('')}</div>
   <div class="grow"></div>
   <div class="sfoot col gap8">
@@ -163,6 +163,7 @@ function renderSide() {
    <div class="row fs11 muted" style="padding:2px 6px;justify-content:space-between"><span>VidDown ${esc(st ? st.version : '')}</span>
    <span class="row gap4"><button class="btn ghost sm" style="height:22px;padding:0 6px" data-lang="cs">CS</button><button class="btn ghost sm" style="height:22px;padding:0 6px" data-lang="en">EN</button><button class="btn ghost sm" style="height:22px;padding:0 6px" id="srestart" title="${T('Restartovat aplikaci', 'Restart app')}">${ic('refresh', 12)}</button></span></div>
   </div>`;
+  morphHtml(side, sideHtml);
   $$('[data-go]', side).forEach(b => b.onclick = () => go(b.dataset.go));
   if (keepScroll && $('.subnav', side)) $('.subnav', side).scrollTop = keepScroll;
   $$('[data-perf]', side).forEach(b => b.onclick = async () => { await saveSetting('perf_mode', b.dataset.perf, () => {}); if (App.st && App.st.cpu) App.st.cpu.mode = b.dataset.perf; renderSide(); });
@@ -232,6 +233,38 @@ function runHtml(j) {
    <span>${fmtBytes(j.downloaded)}${j.total ? ' ' + T('z', 'of') + ' ' + fmtBytes(j.total) : ''}</span>
    <span class="row gap4">${ic('bolt', 13)} ${fmtSpeed(j.speed)}</span><span class="row gap4">${ic('clock', 13)} ${T('zbývá', 'left')} ${j.eta != null ? fmtDur(j.eta) : '—'}</span></div></div>
   <div class="row gap6" style="align-self:flex-start"><button class="ibtn b" title="${T('Pozastavit', 'Pause')}" data-a="pause" data-id="${j.id}">${ic('pause', 15)}</button><button class="ibtn b" title="${T('Zrušit', 'Cancel')}" data-a="cancel" data-id="${j.id}">${ic('x', 15)}</button></div></div>`;
+}
+
+/* Překreslení bez blikání: nové HTML se „vlije“ do stávajícího DOM, takže se mění jen to, co se opravdu změnilo
+   (text, atributy, nové řádky). Obrázky a prvky, které zůstávají, se nevytvářejí znovu. Řádky se párují podle data-row / id. */
+function morphHtml(host, html) {
+  const tmp = document.createElement('div'); tmp.innerHTML = html;
+  morphKids(host, tmp);
+}
+function morphKids(a, b) {
+  const keyOf = n => n.nodeType === 1 ? (n.dataset.row || n.id || '') : '';
+  const keyed = new Map(), loose = [];
+  for (const n of a.childNodes) { const k = keyOf(n); if (k) keyed.set(k, n); else loose.push(n); }
+  let li = 0; const out = [];
+  for (const nb of [...b.childNodes]) {
+    const k = keyOf(nb); let na = null;
+    if (k) { na = keyed.get(k) || null; if (na) keyed.delete(k); }
+    else if (li < loose.length) { const c = loose[li]; if (c.nodeType === nb.nodeType && (c.nodeType !== 1 || c.tagName === nb.tagName)) { na = c; li++; } }
+    if (na && !(na.nodeType === 1 && na.tagName !== nb.tagName)) { morphNode(na, nb); out.push(na); } else out.push(nb);
+  }
+  out.forEach((n, i) => { if (a.childNodes[i] !== n) a.insertBefore(n, a.childNodes[i] || null); });
+  while (a.childNodes.length > out.length) a.removeChild(a.lastChild);
+}
+function morphNode(a, b) {
+  if (a.nodeType !== 1) { if (a.data !== b.data) a.data = b.data; return; }
+  for (const at of [...a.attributes]) if (!b.hasAttribute(at.name)) a.removeAttribute(at.name);
+  for (const at of b.attributes) if (a.getAttribute(at.name) !== at.value) a.setAttribute(at.name, at.value);
+  if (a.tagName === 'INPUT') {
+    if (a.type === 'checkbox' || a.type === 'radio') a.checked = b.hasAttribute('checked');
+    else if (a !== document.activeElement) a.value = b.getAttribute('value') || '';
+    return;
+  }
+  morphKids(a, b);
 }
 
 /* hromadný výběr ve frontě: výběr se drží po videích; playlist je vybraný, jen když jsou vybraná všechna jeho videa */
@@ -348,7 +381,7 @@ function renderQueueDyn() {
     html += `<div class="card qlist" id="qlist">${bulk}${rows}</div>`;
   }
   const wasFocused = document.activeElement && document.activeElement.id === 'qf', caret = wasFocused ? document.activeElement.selectionStart : 0;
-  box.innerHTML = html;
+  morphHtml(box, html);
   box.classList.toggle('nothumb', !thumbsOn());
   $$('.qsel', box).forEach(cb => {   // playlist s částí vybraných videí = „neurčitý“ stav
     const j = q.find(x => x.id === +cb.dataset.id);
