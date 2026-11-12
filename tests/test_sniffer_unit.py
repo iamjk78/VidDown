@@ -72,3 +72,21 @@ def test_story_media_helpers():
     assert "bytestart" not in u and "byteend" not in u and "oh=abc" in u and "_nc_cat=1" in u
     assert pages.story_author("Počet nepřečtených upozornění\n18\nRadio Kiss\n15 h\nPošlete zprávu") == "Radio Kiss"
     assert pages.story_author("nic") is None
+
+
+def test_junk_direct_placeholder_and_ads():
+    from viddown.resolvers.sniffer import is_junk_direct
+    assert is_junk_direct("https://cdn.player.example/img/black2.mp4", 2238)
+    assert is_junk_direct("https://cdn.player.example/img/black2.mp4", 0)
+    assert is_junk_direct("https://cdn.flashtalking.com/1/ad.mp4", 1_800_000)
+    assert is_junk_direct("https://example.com/tiny.mp4", 3000)
+    assert not is_junk_direct("https://example.com/video.mp4", 0)
+    assert not is_junk_direct("https://example.com/video.mp4", 80_000_000)
+
+
+def test_implausible_size():
+    from viddown.resolvers.sniffer import implausible_size
+    assert implausible_size(2246, 2000)
+    assert implausible_size(2_000_000, 1800)       # 2 MB na 30 minut
+    assert implausible_size(500_000, None) is None  # bez znalosti délky stačí minimum
+    assert implausible_size(300_000_000, 1800) is None

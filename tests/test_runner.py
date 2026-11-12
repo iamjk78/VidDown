@@ -301,3 +301,10 @@ def test_retry_of_deleted_file_forgets_archive(rt):
     k = rt.db.add("https://youtu.be/abcdefghijk", status="skipped")
     rt.retry(k)
     assert (rt.data / "archive.txt").read_text() == ""
+
+
+def test_retry_keeps_subscription_folder(rt):
+    j = rt.db.add("https://x/ep", status="done", source="subscription", sub_id=5, target_dir="/nas/Odběr")
+    new = rt.retry(j)
+    job = rt.db.get(new)
+    assert job["sub_id"] == 5 and job["target_dir"] == "/nas/Odběr" and job["source"] == "subscription"

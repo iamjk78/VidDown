@@ -730,7 +730,8 @@ class Runner:
             return None
         if job["status"] in ("done", "skipped"):
             self.archive_forget(job)
-        new_id, _ = self.add(job["url"], source=job["source"], auto_confirm=True)
+        keep = {k: job[k] for k in ("sub_id", "target_dir", "subdir") if job.get(k)}  # složka odběru zůstane
+        new_id, _ = self.add(job["url"], source=job["source"], auto_confirm=True, **keep)
         return new_id
 
     @staticmethod

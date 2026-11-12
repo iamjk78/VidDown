@@ -48,6 +48,63 @@ PLAY_JS = """() => {
 DIRECT_EXT = re.compile(r"\.(mp4|webm|mov|m4v|mkv)$", re.I)
 SEGMENT_EXT = re.compile(r"\.(ts|m4s|aac|m4a|vtt|key)$", re.I)
 
+# Zástupné soubory přehrávačů (černé video při startu) a reklamní servery – nejsou to hledaná videa.
+JUNK_BYTES = 50_000
+PLACEHOLDER_RE = re.compile(r"(^|/)(black\d*|blank|empty|placeholder|dummy)\.(mp4|webm|m4v)$", re.I)
+AD_HOST_RE = re.compile(r"(flashtalking|doubleclick|googlesyndication|2mdn\.net|adform|adnxs|innovid|"
+                        r"imasdk|moatads|teads|smartadserver|adition)", re.I)
+
+# Okno souhlasu s cookies blokuje přehrávač. Volíme nejstřídmější variantu: odmítnout nepovinné.
+CONSENT_JS = """() => {
+  try { if (window.Didomi && Didomi.setUserDisagreeToAll) { Didomi.setUserDisagreeToAll(); return 'didomi'; } } catch (e) {}
+  const sel = ['#onetrust-reject-all-handler', '#CybotCookiebotDialogBodyButtonDecline', '.fc-cta-do-not-consent',
+               '#didomi-notice-disagree-button', 'button[aria-label*="zamítnout" i]', 'button[aria-label*="reject" i]'];
+  for (const s of sel) { const e = document.querySelector(s); if (e) { e.click(); return s; } }
+  const re = /^(zamítnout vše|odmítnout vše|odmítnout|pokračovat bez souhlasu|reject all|decline all|only necessary)$/i;
+  for (const e of document.querySelectorAll('button, a, [role=button]')) {
+    if (re.test((e.innerText || '').trim())) { e.click(); return 'text'; }
+  }
+  return null;
+}"""
+
+SKIP_AD_JS = """() => {
+  const re = /^(přeskočit( reklamu)?|pomiń reklamę|preskočiť( reklamu)?|skip ads?)$/i;
+  for (const e of document.querySelectorAll('#skipAction, button, [role=button]')) {
+    const t = (e.innerText || '').trim();
+    if (e.id === 'skipAction' || re.test(t)) { try { e.click(); return true; } catch (x) {} }
+  }
+  return false;
+}"""
+
+
+def implausible_size(size: int, duration: float | None) -> str | None:
+    """Vrátí text chyby, když je stažený soubor zjevně prázdný/zástupný (např. 2 kB místo videa)."""
+    if size < JUNK_BYTES:
+        return f"stažený soubor je příliš malý ({size} B) – nejde o skutečné video"
+    if duration and duration > 60 and size < duration * 5_000:
+        return f"stažený soubor ({size // 1024} kB) je na {int(duration)} s videa příliš malý"
+    return None
+
+
+def is_junk_direct(url: str, length: int) -> bool:
+    """Zástupný/reklamní „přímý“ soubor, který nemá být kandidátem ke stažení."""
+    u = urlparse(url)
+    if PLACEHOLDER_RE.search(u.path) or AD_HOST_RE.search(u.netloc):
+        return True
+    return 0 < length < JUNK_BYTES
+
+
+async def _in_frames(page, js: str):
+    """Spustí JS ve všech rámcích stránky, vrátí první pravdivý výsledek."""
+    for fr in page.frames:
+        try:
+            r = await fr.evaluate(js)
+        except Exception:  # noqa: BLE001
+            continue
+        if r:
+            return r
+    return None
+
 
 def parse_netscape_cookies(path: Path) -> list[dict]:
     out = []
@@ -170,7 +227,8 @@ async def sniff(url: str, ctx: Ctx) -> dict:
                                 ln = int(rng.rsplit("/", 1)[1])
                             except ValueError:
                                 pass
-                        found.setdefault(u, {"kind": "direct", "len": ln, "t": time.monotonic()})
+                        if not is_junk_direct(u, ln):
+                            found.setdefault(u, {"kind": "direct", "len": ln, "t": time.monotonic()})
                 except Exception:  # noqa: BLE001
                     pass
 
@@ -183,27 +241,41 @@ async def sniff(url: str, ctx: Ctx) -> dict:
             except Exception as e:  # noqa: BLE001
                 msg = str(e).splitlines()[0]
                 raise ResolveError(f"stránku nelze načíst: {msg}", classify_error(msg))
-            clicked = False
+            consent_done, clicks, last_click = False, 0, 0.0
             while time.monotonic() - start < timeout:
                 await page.wait_for_timeout(1000)
+                now = time.monotonic()
                 streams = [c for c in found.values() if c["kind"] in ("hls", "dash")]
-                if streams and time.monotonic() - min(c["t"] for c in streams) > 2.5:
+                if streams and now - min(c["t"] for c in streams) > 2.5:
                     break
                 directs = [c for c in found.values() if c["kind"] == "direct"]
-                if directs and not streams and time.monotonic() - min(c["t"] for c in directs) > 5:
+                if directs and not streams and now - min(c["t"] for c in directs) > 5:
                     break
-                if not clicked and time.monotonic() - start > 3:
-                    clicked = True
+                if not consent_done and now - start < 15:
+                    how = await _in_frames(page, CONSENT_JS)
+                    if how:
+                        consent_done = True
+                        log.info("sniffer: okno souhlasu odmítnuto (%s)", how)
+                        await page.wait_for_timeout(1500)
+                if clicks:
+                    await _in_frames(page, SKIP_AD_JS)  # předřazená reklama se přeskočí, jakmile to jde
+                # klik na přehrávač: nejdřív po vyřešení souhlasu (nebo po 3 s), případně znovu po 12 s
+                if clicks < 3 and (consent_done or now - start > 3) and now - last_click > 12 and not streams:
+                    clicks += 1
+                    last_click = now
                     try:
                         n = await page.evaluate(PLAY_JS)
                         if not n:
-                            # klik doprostřed největšího přehrávače / iframu
+                            # klik doprostřed největšího přehrávače / iframu (po odrolování do zorného pole)
                             box = await page.evaluate("""() => {
                               const els = Array.from(document.querySelectorAll('video, iframe, [class*=player], [id*=player]'));
                               let best = null, area = 0;
                               for (const e of els) { const r = e.getBoundingClientRect(); const a = r.width * r.height;
-                                if (a > area && r.width > 100 && r.height > 60) { area = a; best = {x: r.x + r.width/2, y: r.y + r.height/2}; } }
-                              return best; }""")
+                                if (a > area && r.width > 100 && r.height > 60) { area = a; best = e; } }
+                              if (!best) return null;
+                              best.scrollIntoView({block: 'center'});
+                              const r = best.getBoundingClientRect();
+                              return {x: r.x + r.width/2, y: r.y + r.height/2}; }""")
                             if box:
                                 await page.mouse.click(box["x"], box["y"])
                     except Exception:  # noqa: BLE001
@@ -213,6 +285,8 @@ async def sniff(url: str, ctx: Ctx) -> dict:
             except Exception:  # noqa: BLE001
                 meta = {"title": "", "image": None, "poster": None, "drm": None, "srcs": []}
             for src in meta.get("srcs") or []:
+                if is_junk_direct(src, 0):
+                    continue
                 found.setdefault(src, {"kind": "direct", "len": 0, "t": time.monotonic()})
 
             candidates = []
@@ -338,8 +412,13 @@ async def download(sn: dict, ctx: Ctx, staging: Path, name: str, on_progress, ho
             holder.proc = None
             if holder.stopped:
                 raise Cancelled()
-            if code == 0 and out.exists() and out.stat().st_size > 0:
-                return {"file": out, "thumb": None, "log": err}
+            if code == 0 and out.exists():
+                bad = implausible_size(out.stat().st_size, duration)
+                if not bad:
+                    return {"file": out, "thumb": None, "log": err}
+                last_err = bad
+                out.unlink(missing_ok=True)
+                break  # stejný zdroj v jiném kontejneru by dopadl stejně
             last_err = err.splitlines()[-1] if err else f"ffmpeg skončil s kódem {code}"
             out.unlink(missing_ok=True)
     raise ResolveError(last_err, classify_error(last_err) if classify_error(last_err) != "unsupported" else "other")
