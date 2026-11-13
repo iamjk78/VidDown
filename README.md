@@ -96,6 +96,26 @@ Data (`/data`) leží mimo obraz, takže se zachovají; databáze se při startu
 automaticky a před tím se uloží záloha `viddown.db.v<stará verze>.bak` vedle databáze. Databázi z novější verze VidDown
 starší verze odmítne otevřít (chrání před poškozením při downgradu). Stav ukáže `viddown db info` a `viddown doctor`.
 
+### Katalog
+
+Menu **Katalog** slouží k třídění videí před stahováním: přidáte zdroje (kanály, playlisty, jednotlivá videa), aplikace je **jen prozkoumá**
+(nic nestahuje) a videa si pak projdete jako mřížku karet s miniaturou, rozlišením, velikostí a délkou.
+
+- **Přidání zdrojů:** „Přidat zdroje“ – adresy po jedné na řádek, vložené najednou, nebo ze souboru `.txt` (řádky začínající `#` se
+  přeskočí). Adresa, která už v katalogu je, se načte znovu celá. Zdroje se zjišťují ve vlastní frontě, kterou vidíte nahoře
+  (stav, počet videí, průběh podrobností); stahování to neblokuje.
+- **Podrobnosti** (rozlišení, velikost, délka, větší miniatura) se doplňují postupně, po jednom videu na web s nastavitelnou pauzou
+  (Nastavení › Katalog), a až po dokončení seznamů všech zdrojů. U každého zdroje jde zdroj **Obnovit** (najde jen nová videa),
+  **Načíst znovu vše** (nabídne znovu i odmítnutá a stažená) a **Odebrat** (smaže i paměť o jeho videích).
+- **Procházení:** hledání v názvu videa, kanálu i zdroje (bez ohledu na diakritiku, tlačítko × a klávesa Esc), filtr podle zdroje,
+  rozlišení (2160p až ≤360p, neznámé) a stavu (nové, ve frontě, staženo dříve, dříve odmítnuté, nedostupné); řazení podle pořadí
+  ve zdroji, zdroje, rozlišení, velikosti, délky nebo data přidání; 25 až 500 videí na stránku; velikost miniatur S, M, L (pamatuje
+  se v prohlížeči).
+- **Výběr:** zaškrtnutím karet, **Vybrat zobrazené** (stránka) nebo **Vybrat všech vyhovujících** (i na dalších stránkách; jednotlivé
+  karty jde z výběru vyřadit). **Odstranit** (u karty i hromadně) video z katalogu skryje; zdroj si ho pamatuje a nabídne ho znovu až
+  po „Načíst znovu vše“ s odznakem „Dříve odmítnuté“. Videa ve frontě stahování se odstranit nedají. Stahování z katalogu přibude
+  v další etapě.
+
 ### Časový rozvrh
 
 Nastavení › Časový rozvrh určuje, kdy smí aplikace **automaticky** pracovat. Zapnete ho přepínačem a zadáte pravidla: každé pravidlo má

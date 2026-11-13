@@ -625,6 +625,22 @@ def create_app(app_state) -> FastAPI:
         res = await asyncio.to_thread(catalogdetails.retry_failed, S.db, src)
         return {**res, "overview": await asyncio.to_thread(_overview)}
 
+    @app.post("/api/catalog/items/action")
+    async def catalog_items_action(req: Request):
+        """Hromadná akce nad položkami: {action: "remove", ids: [...]} nebo {action, filter: {...}, exclude: [...]}."""
+        try:
+            body = await req.json()
+        except ValueError:
+            raise HTTPException(400, "Neplatný požadavek.")
+        if not isinstance(body, dict) or body.get("action") not in ("remove",):
+            raise HTTPException(400, "Neznámá akce.")
+        try:
+            ids = await asyncio.to_thread(catalog.select_ids, S.db, body)
+        except ValueError as e:
+            raise HTTPException(400, f"Neplatný výběr: {e}")
+        res = await asyncio.to_thread(catalog.remove_items, S.db, ids, catalog.thumbs_dir(S.data, S.settings))
+        return {**res, "overview": await asyncio.to_thread(_overview)}
+
     @app.get("/api/catalog/thumb/{item_id}")
     async def catalog_thumb(item_id: int):
         rows = await asyncio.to_thread(S.db.query, "select thumb_file from catalog_items where id=?", (item_id,)) if item_id < 2 ** 62 else []

@@ -31,6 +31,7 @@ MAX_URLS = 2000
 MAX_QUERY_TOKENS = 10
 MAX_QUERY_CHARS = 200
 MAX_OFFSET = 10_000_000
+MAX_SELECT = 200_000
 THUMB_ALTS_MAX = 9
 UNAVAILABLE_TITLES = ("[private video]", "[deleted video]")
 
@@ -341,10 +342,9 @@ def _like(tok: str) -> str:
     return "%" + tok.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
 
 
-def query_items(db, source: int | None = None, q: str = "", res: list[str] | None = None, state: list[str] | None = None,
-                sort: str = "pos", direction: str = "asc", limit: int = 100, offset: int = 0) -> dict:
-    """Položky katalogu s filtry, řazením a stránkováním. `state` (sjednocení): new, queued, downloaded, rejected, gone
-    (výchozí jsou viditelné new a queued)."""
+def _where(source: int | None, q: str, res: list[str] | None, state: list[str] | None) -> tuple[str, list]:
+    """Společná část dotazů (FROM … WHERE …) pro zobrazení i výběr položek. `state` (sjednocení): new, queued, downloaded,
+    rejected, gone (výchozí jsou viditelné new a queued)."""
     where, args = [], []
     states = [x for x in (state or []) if x in ("new", "queued", "downloaded", "rejected", "gone")]
     plain = [x for x in states if x in ("new", "queued", "gone")]
@@ -369,6 +369,13 @@ def query_items(db, source: int | None = None, q: str = "", res: list[str] | Non
     buckets = [RES_BUCKETS[r] for r in (res or []) if r in RES_BUCKETS]
     if buckets:
         where.append("(" + " or ".join(f"({b})" for b in buckets) + ")")
+    return "from catalog_items i join catalog_sources s on s.id=i.source_id where " + " and ".join(where), args
+
+
+def query_items(db, source: int | None = None, q: str = "", res: list[str] | None = None, state: list[str] | None = None,
+                sort: str = "pos", direction: str = "asc", limit: int = 100, offset: int = 0) -> dict:
+    """Položky katalogu s filtry, řazením a stránkováním."""
+    sql_from, args = _where(source, q, res, state)
     d = "desc" if str(direction).lower() == "desc" else "asc"
     col = SORT_COLUMNS.get(sort)
     if col:       # čísla: neznámé hodnoty vždy nakonec
@@ -377,12 +384,65 @@ def query_items(db, source: int | None = None, q: str = "", res: list[str] | Non
         order = f"s.title_search {d}, i.source_id {d}, i.pos, i.id"
     else:
         order = f"s.title_search, i.source_id, i.pos {d}, i.id"
-    sql_from = "from catalog_items i join catalog_sources s on s.id=i.source_id where " + " and ".join(where)
     limit, offset = max(1, min(int(limit), 500)), max(0, min(int(offset), MAX_OFFSET))
     total = db.query(f"select count(*) n {sql_from}", args)[0]["n"]
     rows = db.query(f"select i.*, s.title as source_title, s.folder as source_folder, s.kind as source_kind {sql_from} "
                     f"order by {order} limit ? offset ?", [*args, limit, offset])
     return {"total": total, "items": [item_out(r) for r in rows]}
+
+
+def _id_list(v, what: str) -> list[int]:
+    if not isinstance(v, list) or any(isinstance(i, bool) or not isinstance(i, int) or not 0 < i < 2 ** 62 for i in v):
+        raise ValueError(f"{what} must be a list of ids")
+    return list(dict.fromkeys(v))
+
+
+def select_ids(db, spec) -> list[int]:
+    """Položky vybrané buď výčtem čísel (`ids`), nebo popisem filtru (`filter`: source, q, res, state) s výjimkami
+    (`exclude`). Hromadné akce se tak posílají jako filtr, ne jako tisíce čísel."""
+    if not isinstance(spec, dict):
+        raise ValueError("selection must be an object")
+    if "ids" in spec:
+        ids = _id_list(spec["ids"], "ids")
+        if len(ids) > MAX_SELECT:
+            raise ValueError("too many items")
+        return ids
+    f = spec.get("filter")
+    if not isinstance(f, dict):
+        raise ValueError("selection needs ids or filter")
+    src, q = f.get("source"), f.get("q", "")
+    res, state = f.get("res") or [], f.get("state") or []
+    if (src is not None and (isinstance(src, bool) or not isinstance(src, int))) or not isinstance(q, str) \
+            or not isinstance(res, list) or not isinstance(state, list) or not all(isinstance(x, str) for x in res + state):
+        raise ValueError("invalid filter")
+    sql_from, args = _where(src, q, res, state)
+    rows = db.query(f"select i.id {sql_from} order by i.id limit ?", [*args, MAX_SELECT + 1])
+    if len(rows) > MAX_SELECT:
+        raise ValueError("too many items")
+    skip = set(_id_list(spec.get("exclude") or [], "exclude"))
+    return [r["id"] for r in rows if r["id"] not in skip]
+
+
+def remove_items(db, ids: list[int], folder: Path | None = None) -> dict:
+    """Odstraní položky z katalogu (stav `removed`, zdroj si je pamatuje) a smaže jejich miniatury. Položky ve frontě
+    stahování (`queued`) se neodstraňují."""
+    removed, names = 0, []
+    for k in range(0, len(ids), 500):
+        chunk = ids[k:k + 500]
+        mark = ",".join("?" * len(chunk))
+        with db.conn() as c:
+            c.execute("begin immediate")
+            rows = c.execute(f"select id, thumb_file from catalog_items where id in ({mark}) and state in ('new','gone')", chunk).fetchall()
+            got = [r["id"] for r in rows]
+            if got:
+                c.execute(f"update catalog_items set state='removed', thumb_file=null, job_id=null, updated_at=? where id in ({','.join('?' * len(got))})",
+                          [time.time(), *got])
+            c.execute("commit")
+        names += [r["thumb_file"] for r in rows if r["thumb_file"]]
+        removed += len(got)
+    for n in names:
+        remove_thumb(folder, n)
+    return {"removed": removed, "skipped": len(ids) - removed}
 
 
 def item_out(r: dict) -> dict:
