@@ -528,13 +528,13 @@ def create_app(app_state) -> FastAPI:
 
     # --- záloha a obnova (export a import) ------------------------------------------------------
     @app.get("/api/backup")
-    async def backup_download(thumbs: int = 0):
+    async def backup_download(thumbs: int = 0, plain: int = 0):
         try:
-            p = await asyncio.to_thread(backup.create, S.data, None, bool(thumbs))
+            p = await asyncio.to_thread(backup.create, S.data, None, bool(thumbs), not plain)
         except backup.BackupError as e:
             raise HTTPException(400, str(e))
-        name = f"viddown-backup-{time.strftime('%Y%m%d-%H%M')}.zip"
-        return FileResponse(p, media_type="application/zip", filename=name, background=BackgroundTask(p.unlink, missing_ok=True))
+        return FileResponse(p, media_type="application/zip" if plain else "application/octet-stream",
+                            filename=backup.default_name(not plain), background=BackgroundTask(p.unlink, missing_ok=True))
 
     def _restore_status():
         pend = backup.pending(S.data)

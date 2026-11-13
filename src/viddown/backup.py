@@ -1,6 +1,7 @@
 """Záloha a obnova dat aplikace (export a import).
 
-Záloha je ZIP: `backup.json` (popis), `viddown.db` (konzistentní snapshot i za běhu), `settings.json`,
+Záloha je soubor `VidDown_<datum>_<čas>.dtb` (ZIP zašifrovaný klíčem zabudovaným v aplikaci, viz `dtb.py`),
+nebo na požádání obyčejný ZIP. Import přijímá oba formáty. Vnitřní ZIP obsahuje: `backup.json` (popis), `viddown.db` (konzistentní snapshot i za běhu), `settings.json`,
 `secrets.json`, `cookies.txt`, `archive.txt` a volitelně `thumbs/`. Enginy, logy a dočasné soubory se nezálohují.
 
 Obnova za běhu aplikace se jen připraví (`stage`) a provede se při dalším startu (`apply_pending`), než se
@@ -9,6 +10,7 @@ otevře databáze. Dosavadní data se předtím uloží do `<data>/restore/befor
 from __future__ import annotations
 
 import collections
+import contextlib
 import json
 import os
 import shutil
@@ -17,6 +19,8 @@ import tempfile
 import time
 import zipfile
 from pathlib import Path
+
+from . import dtb
 
 FORMAT = 1
 FILES = ("settings.json", "secrets.json", "cookies.txt", "archive.txt")
@@ -71,8 +75,12 @@ def _info(db: Path) -> dict:
         c.close()
 
 
-def create(data: Path, out: Path | None = None, include_thumbs: bool = False) -> Path:
-    """Vytvoří zálohu. Bez `out` ji uloží do dočasného souboru (volající ho smaže)."""
+def default_name(encrypt: bool = True) -> str:
+    return f"VidDown_{time.strftime('%Y-%m-%d_%H-%M')}{dtb.EXT if encrypt else '.zip'}"
+
+
+def create(data: Path, out: Path | None = None, include_thumbs: bool = False, encrypt: bool = True) -> Path:
+    """Vytvoří zálohu (výchozí je šifrovaný `.dtb`). Bez `out` ji uloží do dočasného souboru (volající ho smaže)."""
     import platform
 
     from . import __version__
@@ -81,7 +89,7 @@ def create(data: Path, out: Path | None = None, include_thumbs: bool = False) ->
     if not db.exists():
         raise BackupError("databáze neexistuje, není co zálohovat")
     if out is None:
-        fd, name = tempfile.mkstemp(suffix=".zip", prefix="viddown-backup-")
+        fd, name = tempfile.mkstemp(suffix=dtb.EXT if encrypt else ".zip", prefix="viddown-backup-")
         os.close(fd)
         out = Path(name)
     out = Path(out)
@@ -108,15 +116,47 @@ def create(data: Path, out: Path | None = None, include_thumbs: bool = False) ->
                 for p in sorted((data / "thumbs").iterdir()):
                     if p.is_file():
                         zf.write(p, f"thumbs/{p.name}")
-        os.replace(part, out)
+        if encrypt:
+            enc = out.with_name(out.name + ".enc")
+            dtb.encrypt_file(part, enc)
+            os.replace(enc, out)
+            part.unlink(missing_ok=True)
+        else:
+            os.replace(part, out)
         return out
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
         part.unlink(missing_ok=True)
+        out.with_name(out.name + ".enc").unlink(missing_ok=True)
 
 
-def validate(zip_path: Path) -> dict:
-    """Ověří zálohu (struktura, bezpečné názvy, velikost, integrita databáze, verze schématu). Vrací popis."""
+@contextlib.contextmanager
+def _plain_zip(path: Path):
+    """Obyčejný ZIP ze zálohy: `.dtb` se dešifruje do dočasného souboru, ZIP se použije přímo."""
+    path = Path(path)
+    if not dtb.is_dtb(path):
+        yield path
+        return
+    fd, name = tempfile.mkstemp(suffix=".zip", prefix="vdbk-")
+    os.close(fd)
+    tmp = Path(name)
+    try:
+        try:
+            dtb.decrypt_file(path, tmp)
+        except dtb.DtbError as e:
+            raise BackupError(str(e)) from e
+        yield tmp
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def validate(path: Path) -> dict:
+    """Ověří zálohu (`.dtb` i ZIP): struktura, bezpečné názvy, velikost, integrita databáze, verze schématu."""
+    with _plain_zip(path) as zp:
+        return _validate_zip(zp)
+
+
+def _validate_zip(zip_path: Path) -> dict:
     from .db import MIGRATIONS
     try:
         zf = zipfile.ZipFile(zip_path)
@@ -217,7 +257,7 @@ def apply(data: Path, zip_path: Path, remap: tuple[str, str] | None = None) -> d
     for name in FILES:
         if (data / name).is_file():
             shutil.copy2(data / name, before / name)
-    with zipfile.ZipFile(zip_path) as zf:
+    with _plain_zip(zip_path) as zp, zipfile.ZipFile(zp) as zf:
         for suf in ("", "-wal", "-shm"):
             Path(str(db) + suf).unlink(missing_ok=True)
         for name in zf.namelist():

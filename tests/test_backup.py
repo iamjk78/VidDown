@@ -2,6 +2,7 @@
 import asyncio
 import json
 import os
+import re
 import sqlite3
 import zipfile
 from pathlib import Path
@@ -10,7 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.test_subscriptions import State, rt  # noqa: F401  (fixture rt)
-from viddown import backup
+from viddown import backup, dtb
 from viddown.db import DB, MIGRATIONS
 from viddown.server import create_app
 
@@ -41,9 +42,9 @@ def names(p):
 
 def test_backup_contains_only_what_is_needed(tmp_path):
     src = make_data(tmp_path / "a")
-    z = backup.create(src, tmp_path / "b.zip")
+    z = backup.create(src, tmp_path / "b.zip", encrypt=False)
     assert names(z) == {"backup.json", "viddown.db", "settings.json", "secrets.json", "cookies.txt", "archive.txt"}
-    z2 = backup.create(src, tmp_path / "c.zip", include_thumbs=True)
+    z2 = backup.create(src, tmp_path / "c.zip", include_thumbs=True, encrypt=False)
     assert "thumbs/t.jpg" in names(z2) and not any(n.startswith(("engines", "logs")) for n in names(z2))
     man = backup.validate(z)
     assert man["jobs"] == 1 and man["done"] == 1 and man["subscriptions"] == 1
@@ -80,7 +81,7 @@ def test_backup_is_consistent_while_database_is_open_and_in_wal(tmp_path):
 
 def test_validate_rejects_bad_backups(tmp_path):
     src = make_data(tmp_path / "a")
-    good = backup.create(src, tmp_path / "good.zip")
+    good = backup.create(src, tmp_path / "good.zip", encrypt=False)
     notzip = tmp_path / "x.zip"
     notzip.write_text("nic")
     with pytest.raises(backup.BackupError, match="není platná"):
@@ -222,14 +223,18 @@ def test_api_backup_download_and_restore_flow(rt, data, monkeypatch):
     DB(data / "viddown.db").add("https://x/a", status="done", filepath="/nas/Videa/a.mp4")   # skutečná databáze aplikace
     c, st = make_client(rt, data)
     r = c.get("/api/backup")
-    assert r.status_code == 200 and r.headers["content-type"] == "application/zip"
-    assert "viddown-backup-" in r.headers["content-disposition"]
-    z = Path(data) / "dl.zip"
+    assert r.status_code == 200 and r.content.startswith(dtb.MAGIC)          # výchozí: šifrovaný .dtb
+    assert re.search(r'filename="VidDown_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}\.dtb"', r.headers["content-disposition"])
+    z = Path(data) / "dl.dtb"
     z.write_bytes(r.content)
-    assert "viddown.db" in names(z)
+    plain = c.get("/api/backup?plain=1")
+    assert plain.status_code == 200 and plain.headers["content-type"] == "application/zip" and ".zip" in plain.headers["content-disposition"]
+    zp = Path(data) / "dl.zip"
+    zp.write_bytes(plain.content)
+    assert "viddown.db" in names(zp)
     assert c.get("/api/restore").json() == {"pending": None, "last": None}
     # import: nahrání → ověření → čeká na potvrzení
-    up = c.post("/api/restore", files={"file": ("b.zip", z.read_bytes(), "application/zip")})
+    up = c.post("/api/restore", files={"file": ("VidDown.dtb", z.read_bytes(), "application/octet-stream")})
     assert up.status_code == 200 and up.json()["manifest"]["done"] == 1
     assert c.get("/api/restore").json()["pending"]["manifest"]["done"] == 1
     ap = c.post("/api/restore/apply", json={"remap_old": "/nas/Videa", "remap_new": "/downloads"})

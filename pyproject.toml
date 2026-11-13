@@ -16,6 +16,7 @@ dependencies = [
     "python-multipart>=0.0.9",
     "playwright>=1.49",
     "psutil>=5.9",
+    "cryptography>=42",
 ]
 
 [project.optional-dependencies]

@@ -10,7 +10,7 @@ import os
 import sys
 
 # Co umí obraz. Zvyšuje se při změně závislostí (pyproject.toml) nebo Dockerfile; vydání může vyžadovat vyšší hodnotu.
-IMAGE_API = 1
+IMAGE_API = 2   # 2: závislost cryptography (šifrované zálohy .dtb)
 
 
 def _choose(argv: list[str]):

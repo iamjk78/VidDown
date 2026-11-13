@@ -98,14 +98,17 @@ starší verze odmítne otevřít (chrání před poškozením při downgradu). 
 
 **Záloha a obnova (export a import):**
 
-- V GUI: Nastavení › Záloha a obnova. „Stáhnout zálohu“ uloží ZIP, „Vybrat zálohu…“ nahraje zálohu k obnovení.
+- V GUI: Nastavení › Záloha a obnova. „Stáhnout zálohu“ uloží šifrovaný soubor `VidDown_<datum>_<čas>.dtb`, „Vybrat zálohu…“ nahraje zálohu k obnovení (`.dtb` i ZIP).
   Obnova se provede při restartu aplikace; před ní se dosavadní stav uloží do `restore/before-<čas>/` v datové složce (poslední 3).
   Při přesunu na jiný stroj lze zadat „staré → nové“ cesty, které se přepíšou v historii, odběrech i nastavení.
-- V terminálu: `viddown backup [soubor.zip] [--thumbs]` a `viddown restore soubor.zip [--remap STARÁ NOVÁ]`.
+- V terminálu: `viddown backup [soubor.dtb] [--thumbs] [--plain]` a `viddown restore soubor.dtb [--remap STARÁ NOVÁ]`.
   V Dockeru: `docker exec viddown viddown backup /data/zaloha.zip` (soubor je pak v datové složce na hostiteli).
   Když aplikace běží, `restore` obnovu jen připraví a provede se při jejím dalším startu.
 - Záloha obsahuje databázi (konzistentní snapshot i za běhu), `settings.json`, `secrets.json` (heslo, token bota), `cookies.txt`
   a `archive.txt`; volitelně náhledy. **Neobsahuje** enginy, logy a dočasné soubory. Obsahuje tajné údaje – ukládejte ji bezpečně.
+  Soubor `.dtb` je šifrovaný AES-256-GCM **klíčem zabudovaným v aplikaci**: otevře ho jen VidDown a na jakémkoli stroji, bez hesla.
+  Je to ochrana před náhodným nahlédnutím, ne před někým, kdo má kopii aplikace (klíč je v jejím kódu), proto kód ani obraz nezveřejňujte.
+  `--plain` (v GUI „bez šifrování“) uloží obyčejný ZIP.
 - Záloha z novější verze, než kterou používáte, se odmítne (nejdřív aktualizujte aplikaci).
 
 ### Ze zdrojového kódu

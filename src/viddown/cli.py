@@ -258,14 +258,15 @@ def cmd_app(a) -> int:
 def cmd_backup(a) -> int:
     """Záloha dat (databáze, nastavení, token bota, cookies, archiv) do jednoho ZIP souboru."""
     from . import backup
-    out = Path(a.out) if a.out else Path.cwd() / f"viddown-backup-{time.strftime('%Y%m%d-%H%M')}.zip"
+    out = Path(a.out) if a.out else Path.cwd() / backup.default_name(not a.plain)
     try:
-        p = backup.create(data_dir(), out, include_thumbs=a.thumbs)
+        p = backup.create(data_dir(), out, include_thumbs=a.thumbs, encrypt=not a.plain)
     except backup.BackupError as e:
         print(f"Chyba: {e}", file=sys.stderr)
         return 1
     print(f"Záloha: {p} ({fmt_bytes(p.stat().st_size)})")
-    print("Pozor: obsahuje token Telegram bota, heslo a cookies. Ukládejte ji bezpečně a nesdílejte.")
+    print("Pozor: obsahuje token Telegram bota, heslo a cookies. Ukládejte ji bezpečně a nesdílejte."
+          + ("" if a.plain else " Soubor je šifrovaný klíčem aplikace, otevře ho jen VidDown."))
     return 0
 
 
@@ -392,9 +393,10 @@ def main(argv=None) -> int:
     sp.add_argument("--dry-run", action="store_true", help="jen vypíše, kolik záznamů by se změnilo")
     sp = sub.add_parser("autostart", help="spouštění po přihlášení")
     sp.add_argument("action", choices=["on", "off", "status"])
-    sp = sub.add_parser("backup", help="záloha dat do ZIP (databáze, nastavení, token, cookies, archiv)")
-    sp.add_argument("out", nargs="?", help="cílový soubor (výchozí viddown-backup-<datum>.zip)")
+    sp = sub.add_parser("backup", help="záloha dat do šifrovaného souboru .dtb (databáze, nastavení, token, cookies, archiv)")
+    sp.add_argument("out", nargs="?", help="cílový soubor (výchozí VidDown_<datum>_<čas>.dtb)")
     sp.add_argument("--thumbs", action="store_true", help="přibalit i náhledy")
+    sp.add_argument("--plain", action="store_true", help="bez šifrování (obyčejný ZIP)")
     sp = sub.add_parser("restore", help="obnova dat ze zálohy")
     sp.add_argument("file")
     sp.add_argument("--remap", nargs=2, metavar=("STARÁ", "NOVÁ"), help="přepíše začátek cest po přesunu na jiný stroj")
