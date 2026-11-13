@@ -187,3 +187,9 @@ button.chip{cursor:pointer}
 @media (max-width:1100px){.nothumb .qr,.nothumb .qr.child{grid-template-columns:24px 18px 22px minmax(0,1fr) 96px}}
 .qck{display:flex;align-items:center;justify-content:center}.qck input{width:16px;height:16px;cursor:pointer}
 .qr.qon{background:var(--accent-soft)}
+
+/* časový rozvrh */
+.schrule{background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin:6px 0}
+.schwin{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--border2);border-radius:8px;padding:2px 6px;background:var(--surface)}
+.schwin .input{width:96px}
+.schwin .x{border:0;background:none;color:var(--muted);cursor:pointer;font-weight:700;padding:0 4px}.schwin .x:hover{color:var(--err)}.schwin .x:disabled{opacity:.35;cursor:default}

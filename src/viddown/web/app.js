@@ -110,6 +110,7 @@ function onState() {
   if (!App.st.onboarded && !App.wizardShown) { App.wizardShown = true; openWizard(); }
   renderSide();
   renderAppBanner();
+  if ($('#schstat')) renderSchedStatus();
   if (App.view === 'queue' && !App.drag) renderQueueDyn();
   if (App.view === 'subs' && !App.args.length) renderSubsDyn();
   if (App.view === 'sub') {
@@ -336,8 +337,8 @@ function renderQueueDyn() {
       : target ? T('Fronta je pozastavená: cílová složka není dostupná', 'Queue paused: download folder is not available') + ` – ${esc(st.target_error || st.disk.dir)}`
       : st.pause_hard ? T('Vše je pozastaveno: rozpracovaná stahování byla přerušena', 'Everything is paused: downloads in progress were interrupted') : running.length ? T('Fronta je pozastavená: rozpracovaná stahování se dokončí, nová nezačnou', 'The queue is paused: downloads in progress will finish, new ones will not start') : T('Fronta je pozastavená', 'The queue is paused')}</span>${target ? `<button class="btn sm" data-go="settings">${T('Nastavení', 'Settings')}</button>` : ''}
     <button class="btn sm" data-q="resume">${ic('play', 12)} ${T('Pokračovat', 'Resume')}</button></div>`;
-  } else if (st.schedule.enabled && !st.in_window) {
-    html += `<div class="banner info">${ic('clock', 18)}<span class="grow">${T('Stahuje se jen v časovém okně', 'Downloads only run in the time window')} ${st.schedule.start}–${st.schedule.end}. ${T('Fronta čeká.', 'The queue is waiting.')}</span><button class="btn sm" data-go="settings">${T('Upravit', 'Edit')}</button></div>`;
+  } else {
+    html += scheduleBanner(st, 'queue', T('Stahování čeká na časové okno.', 'Downloads are waiting for the time window.'));
   }
   if (!App.subFilter) html += `<div class="stats">
    <div class="card stat"><div class="k">${ic('download', 14)} ${T('Probíhá', 'Running')}</div><div class="v">${s.running} <small>/ ${s.concurrency}</small></div><div class="s">${T('souběžná stahování', 'parallel downloads')}</div></div>
@@ -404,7 +405,8 @@ function renderQueueDyn() {
 }
 
 document.addEventListener('click', async e => {
-  const b = e.target.closest('[data-sa],[data-a],[data-q],[data-go]'); if (!b || !$('#main').contains(b)) return;
+  const b = e.target.closest('[data-sa],[data-a],[data-q],[data-go],[data-sov]'); if (!b || !$('#main').contains(b)) return;
+  if (b.dataset.sov) return schOverride(b.dataset.sov);
   if (b.dataset.sa) return subAction(b);
   if (b.dataset.go) return go(b.dataset.go);
   if (b.dataset.q) return act(() => api('/api/queue/' + b.dataset.q, { method: 'POST' }));
@@ -466,9 +468,10 @@ function renderSubsDyn() {
   const box = $('#subsdyn'); if (!box) return;
   if (!App.st) { box.innerHTML = '<div class="empty"><div class="spin" style="margin:auto"></div></div>'; return; }
   const list = subList();
-  box.innerHTML = list.length ? `<div class="subgrid">${list.map(subCard).join('')}</div>`
+  const sbn = scheduleBanner(App.st, 'subscriptions', T('Kontroly odběrů čekají na časové okno.', 'Subscription checks are waiting for the time window.'));
+  box.innerHTML = sbn + (list.length ? `<div class="subgrid">${list.map(subCard).join('')}</div>`
     : `<div class="card empty">${ic('rss', 32)}<h3>${T('Zatím žádné odběry', 'No subscriptions yet')}</h3><p>${T('Odběr sleduje kanál nebo playlist a sám stáhne nová videa do vybrané složky. Můžete zvolit, od kterého data se mají stahovat.', 'A subscription watches a channel or playlist and downloads new videos into a folder you choose, starting from a date you choose.')}</p>
-      <div style="margin-top:14px"><button class="btn primary" data-go="subs/new">${ic('plus', 14)} ${T('Přidat první odběr', 'Add your first subscription')}</button></div></div>`;
+      <div style="margin-top:14px"><button class="btn primary" data-go="subs/new">${ic('plus', 14)} ${T('Přidat první odběr', 'Add your first subscription')}</button></div></div>`);
 }
 
 function sinceControl(prefix, cur, withPresets) {
@@ -918,15 +921,18 @@ const SECTIONS = () => [
     { k: 'auto_subtitles', type: 'toggle', label: ['Včetně automatických titulků', 'Include auto-generated'] },
     { k: 'embed_metadata', type: 'toggle', label: ['Vložit metadata a kapitoly', 'Embed metadata and chapters'] },
   ] },
-  { icon: 'clock', title: ['Rychlost a plánování', 'Speed and schedule'], col: 0, fields: [
+  { icon: 'clock', title: ['Rychlost', 'Speed'], col: 0, fields: [
     { k: 'rate_limit_enabled', type: 'toggle', label: ['Omezit rychlost', 'Limit speed'], hint: ['Celkem pro všechna stahování', 'Total for all downloads'] },
     { k: 'rate_limit_mbps', type: 'number', step: 0.5, min: 0.1, suffix: 'MB/s', label: ['Limit', 'Limit'] },
-    { k: 'schedule_enabled', type: 'toggle', label: ['Stahovat jen v časovém okně', 'Download only in a time window'] },
-    { k: 'schedule_start', type: 'time', label: ['Začátek okna', 'Window start'] },
-    { k: 'schedule_end', type: 'time', label: ['Konec okna', 'Window end'] },
-    { k: 'schedule_days', type: 'chips', opts: [[0, ['Po', 'Mo']], [1, ['Út', 'Tu']], [2, ['St', 'We']], [3, ['Čt', 'Th']], [4, ['Pá', 'Fr']], [5, ['So', 'Sa']], [6, ['Ne', 'Su']]], label: ['Dny', 'Days'] },
     { k: 'sleep_min', type: 'number', min: 0, suffix: 's', label: ['Pauza mezi videi playlistu od', 'Pause between playlist videos from'] },
     { k: 'sleep_max', type: 'number', min: 0, suffix: 's', label: ['do', 'to'] },
+  ] },
+  { icon: 'clock', title: ['Časový rozvrh', 'Schedule'], col: 0, fields: [
+    { k: 'schedule_enabled', type: 'toggle', label: ['Pracovat jen v časových oknech', 'Work only in time windows'], hint: ['Mimo okna aplikace nezačne novou automatickou práci', 'Outside the windows the app starts no new automatic work'] },
+    { k: 'schedule_scope', type: 'chips', opts: [['queue', ['Stahování fronty', 'Queue downloads']], ['subscriptions', ['Kontroly odběrů', 'Subscription checks']], ['catalog', ['Zjišťování katalogu', 'Catalog scanning']]], label: ['Co se rozvrhem řídí', 'What it controls'], hint: ['Ruční akce (Zkontrolovat teď, Obnovit zdroj) se rozvrhem neřídí', 'Manual actions (Check now, Refresh source) ignore the schedule'] },
+    { type: 'schedule' },
+    { k: 'schedule_finish_running', type: 'seg', opts: [['false', ['Přerušit', 'Interrupt']], ['true', ['Nechat doběhnout', 'Let finish']]], label: ['Po skončení okna', 'At the end of a window'], hint: ['Týká se rozpracovaných stahování', 'Applies to downloads in progress'] },
+    { type: 'schstatus' },
   ] },
   { icon: 'tag', title: ['Pojmenování a složky', 'Naming and folders'], col: 1, fields: [
     { k: 'name_template', type: 'template', label: ['Šablona názvu souboru', 'File name template'] },
@@ -1021,6 +1027,8 @@ function fieldHtml(f, S) {
       <div class="row gap8" style="justify-content:flex-end"><label class="btn sm">${T('Vybrat zálohu…', 'Choose backup…')}<input type="file" id="rsf" accept=".dtb,.zip" hidden></label></div></div>
       <div id="rsbox"></div>`;
     case 'abstatus': return `<div id="abbox"></div>`;
+    case 'schedule': return schedHtml();
+    case 'schstatus': return `<div class="fld"><div class="lab"><div class="b5">${T('Stav', 'Status')}</div><div class="hint">${T('Místní čas serveru', 'Server local time')}</div></div><div id="schstat" class="col gap8" style="align-items:flex-end;text-align:right"></div></div>`;
     case 'appstatus': return `<div id="apbox"></div>`;
     case 'password': return `<div class="fld"><div class="lab"><div class="b5">${T('Heslo do GUI', 'GUI password')}</div><div class="hint">${S.has_password ? T('Nastaveno – GUI vyžaduje přihlášení', 'Set – the GUI requires sign-in') : T('Nenastaveno – GUI je přístupné bez hesla', 'Not set – the GUI opens without a password')}</div></div>
       <div class="row gap8">${S.has_password ? '<span class="mono t2">••••••••</span>' : ''}<button class="btn sm" id="pwbtn">${S.has_password ? T('Změnit', 'Change') : T('Nastavit', 'Set')}</button></div></div>`;
@@ -1057,7 +1065,7 @@ function bindSettings(root, after) {
     if (t === 'toggle') el.onclick = () => saveSetting(k, !S.values[k], rer);
     if (t === 'seg') el.onclick = () => saveSetting(k, k === 'methods' ? el.dataset.v.split(',') : el.dataset.v, rer);
     if (t === 'chip') el.onclick = () => { const cur = S.values[k].slice(); const v = typeof cur[0] === 'number' || k === 'schedule_days' ? +el.dataset.v : el.dataset.v;
-      const i = cur.indexOf(v); i >= 0 ? cur.splice(i, 1) : cur.push(v); if (k === 'channel_tabs' && !cur.length) return toast(T('Vyberte aspoň jednu možnost', 'Pick at least one'), true); saveSetting(k, cur, rer); };
+      const i = cur.indexOf(v); i >= 0 ? cur.splice(i, 1) : cur.push(v); if ((k === 'channel_tabs' || k === 'schedule_scope') && !cur.length) return toast(T('Vyberte aspoň jednu možnost', 'Pick at least one'), true); saveSetting(k, cur, rer); };
     if (t === 'step') el.onclick = () => saveSetting(k, Math.max(1, Math.min(16, S.values[k] + +el.dataset.d)), rer);
     if (t === 'num' || t === 'text') el.onchange = () => saveSetting(k, el.value, rer);
   });
@@ -1073,6 +1081,7 @@ function bindSettings(root, after) {
   const rb = $('#rsbox', root); if (rb) loadRestore(rb);
   const ab = $('#abbox', root); if (ab) loadAutoBackup(ab);
   const ap = $('#apbox', root); if (ap) loadAppStatus(ap);
+  if ($('#schrules', root)) { bindSchedule(root); renderSchedStatus(); }
   const pw = $('#pwbtn', root); if (pw) pw.onclick = () => openPassword(rer);
   const tg = $('#tgbtn', root); if (tg) tg.onclick = () => openToken(rer);
   const tt = $('#tgtest', root); if (tt) tt.onclick = () => act(() => api('/api/telegram/test', { method: 'POST' }), T('Testovací zpráva odeslána', 'Test message sent'));
@@ -1090,6 +1099,83 @@ async function waitForRestart() {
     for (let i = 0; i < 90; i++) { try { const r = await fetch('/api/state', { cache: 'no-store' }); if (r.ok || r.status === 401) break; } catch (e) { /* server ještě neběží */ } await new Promise(r => setTimeout(r, 1000)); }
     location.reload();
   }
+/* ------------------------------------------------------------ časový rozvrh */
+const DAY_NAMES = () => (LANG === 'cs' ? ['Po', 'Út', 'St', 'Čt', 'Pá', 'So', 'Ne'] : ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su']);
+function fmtWhen(ts) {
+  const d = new Date(ts * 1000), now = new Date(), loc = LANG === 'cs' ? 'cs-CZ' : 'en-GB';
+  const days = Math.round((new Date(d.getFullYear(), d.getMonth(), d.getDate()) - new Date(now.getFullYear(), now.getMonth(), now.getDate())) / 86400000);
+  const hm = d.toLocaleTimeString(loc, { hour: '2-digit', minute: '2-digit' });
+  if (days === 0) return `${T('dnes', 'today')} ${hm}`;
+  if (days === 1) return `${T('zítra', 'tomorrow')} ${hm}`;
+  return `${d.toLocaleDateString(loc, { weekday: 'short', day: 'numeric', month: 'numeric' })} ${hm}`;
+}
+/* Banner „čeká na časové okno“ s tlačítky dočasné výjimky; `scope`: queue | subscriptions | catalog */
+function scheduleBanner(st, scope, what) {
+  const sc = st && st.schedule;
+  if (!sc || !sc.enabled || !(sc.scope || []).includes(scope)) return '';
+  if (sc.override_until) return `<div class="banner info">${ic('clock', 18)}<span class="grow">${T('Časový rozvrh je dočasně obejit do', 'The schedule is bypassed until')} ${fmtWhen(sc.override_until)}.</span><button class="btn sm" data-sov="clear">${T('Zrušit výjimku', 'Cancel exception')}</button></div>`;
+  if (sc.allowed && sc.allowed[scope]) return '';
+  return `<div class="banner info">${ic('clock', 18)}<span class="grow">${what} ${sc.next_open ? `${T('Další okno:', 'Next window:')} ${fmtWhen(sc.next_open)}.` : T('Žádné okno není nastavené.', 'No window is set.')}</span>
+    <span class="row gap4"><button class="btn sm" data-sov="1">${T('Povolit na 1 h', 'Allow for 1 h')}</button><button class="btn sm" data-sov="3">3 h</button><button class="btn sm" data-sov="6">6 h</button></span><button class="btn sm" data-go="settings">${T('Upravit', 'Edit')}</button></div>`;
+}
+async function schOverride(v) {
+  if (v === 'clear') await act(() => api('/api/schedule/override', { method: 'DELETE' }), T('Výjimka zrušena', 'Exception cancelled'));
+  else await act(() => api('/api/schedule/override', { method: 'POST', body: { hours: +v } }), T('Rozvrh je dočasně obejit', 'Schedule bypassed'));
+}
+function schedRules() {
+  const V = App.settings.values;
+  if (V.schedule_rules && V.schedule_rules.length) return JSON.parse(JSON.stringify(V.schedule_rules));
+  // dřívější nastavení jednoho okna (dokud nevzniknou pravidla) – stejně jako na serveru
+  return V.schedule_start && V.schedule_end ? [{ days: (V.schedule_days || []).slice(), windows: [[V.schedule_start, V.schedule_end]] }] : [];
+}
+function schedHtml() {
+  const rules = schedRules(), D = DAY_NAMES();
+  const rule = (r, i) => `<div class="schrule">
+    <div class="row gap4 wrap">${D.map((n, d) => `<button class="chip ${r.days.includes(d) ? 'on' : ''}" data-rd="${i}:${d}">${n}</button>`).join('')}<button class="btn sm" data-rall="${i}">${T('Každý den', 'Every day')}</button></div>
+    <div class="row gap8 wrap" style="margin-top:8px">${r.windows.map((w, k) => `<span class="schwin"><input class="input sm mono" type="time" value="${w[0]}" data-rw="${i}:${k}:0"> – <input class="input sm mono" type="time" value="${w[1]}" data-rw="${i}:${k}:1"><button class="x" data-rwdel="${i}:${k}" ${r.windows.length < 2 ? 'disabled' : ''} title="${T('Odebrat okno', 'Remove window')}">✕</button></span>`).join('')}
+      <button class="btn sm" data-rwadd="${i}" ${r.windows.length >= 8 ? 'disabled' : ''}>+ ${T('okno', 'window')}</button>
+      <button class="btn sm ghost" data-rdel="${i}" ${rules.length < 2 ? 'disabled' : ''}>${T('Odebrat pravidlo', 'Remove rule')} ✕</button></div></div>`;
+  return `<div class="fld block" id="schrules"><div class="lab"><div class="b5">${T('Pravidla', 'Rules')}</div><div class="hint">${T('Každé pravidlo má dny a jedno či více oken; pravidla se sčítají. Okno přes půlnoc (22:00–06:00) platí podle dne začátku, stejný začátek a konec znamená celý den.', 'Each rule has days and one or more windows; rules add up. A window across midnight (22:00–06:00) counts by the day it starts; equal start and end means the whole day.')}</div></div>
+    ${rules.length ? rules.map(rule).join('') : `<div class="hint" style="color:var(--warn)">${T('Žádné pravidlo: při zapnutém rozvrhu by aplikace nikdy nezačala práci.', 'No rule: with the schedule on, the app would never start work.')}</div>`}
+    <div style="margin-top:6px"><button class="btn sm" data-radd ${rules.length >= 20 ? 'disabled' : ''}>+ ${T('Přidat pravidlo', 'Add rule')}</button></div></div>`;
+}
+async function schSave(rules) {
+  const r = await act(() => api('/api/settings', { method: 'PUT', body: { schedule_rules: rules } }));
+  if (r) { App.settings = r; toast(T('Uloženo', 'Saved')); }
+  if (App.view === 'settings') renderSettings();
+}
+function bindSchedule(root) {
+  const edit = (sel, fn) => $$(sel, root).forEach(el => { el[el.tagName === 'INPUT' ? 'onchange' : 'onclick'] = () => { const r = schedRules(); if (fn(r, el) !== false) schSave(r); }; });
+  edit('[data-rd]', (r, el) => {
+    const [i, d] = el.dataset.rd.split(':').map(Number), days = r[i].days, k = days.indexOf(d);
+    if (k >= 0) { if (days.length === 1) { toast(T('Vyberte aspoň jeden den', 'Pick at least one day'), true); return false; } days.splice(k, 1); } else { days.push(d); days.sort(); }
+  });
+  edit('[data-rall]', (r, el) => { r[+el.dataset.rall].days = [0, 1, 2, 3, 4, 5, 6]; });
+  edit('[data-rw]', (r, el) => {
+    const [i, k, w] = el.dataset.rw.split(':').map(Number);
+    if (!/^\d\d:\d\d$/.test(el.value)) { toast(T('Zadejte čas', 'Enter a time'), true); renderSettings(); return false; }
+    r[i].windows[k][w] = el.value;
+  });
+  edit('[data-rwadd]', (r, el) => { r[+el.dataset.rwadd].windows.push(['08:00', '17:00']); });
+  edit('[data-rwdel]', (r, el) => { const [i, k] = el.dataset.rwdel.split(':').map(Number); r[i].windows.splice(k, 1); });
+  edit('[data-radd]', r => { r.push({ days: [0, 1, 2, 3, 4], windows: [['19:00', '23:00']] }); });
+  edit('[data-rdel]', (r, el) => { r.splice(+el.dataset.rdel, 1); });
+}
+function renderSchedStatus() {
+  const box = $('#schstat'), sc = App.st && App.st.schedule; if (!box || !sc) return;
+  const sov = `<span class="row gap4"><button class="btn sm" data-ssov="1">${T('Povolit na 1 h', 'Allow for 1 h')}</button><button class="btn sm" data-ssov="3">3 h</button><button class="btn sm" data-ssov="6">6 h</button></span>`;
+  let h;
+  if (!sc.enabled) h = `<span class="t2">${T('Rozvrh je vypnutý: aplikace pracuje kdykoli.', 'The schedule is off: the app works at any time.')}</span>`;
+  else {
+    h = sc.open ? `<span>${T('Teď: <b>v okně</b>', 'Now: <b>inside a window</b>')} · ${T('zavře se', 'closes')} <b>${fmtWhen(sc.closes)}</b></span>`
+      : `<span>${T('Teď: <b>mimo okno</b>', 'Now: <b>outside a window</b>')} · ${sc.next_open ? `${T('další okno', 'next window')} <b>${fmtWhen(sc.next_open)}</b>` : T('žádné okno není nastavené', 'no window is set')}</span>`;
+    if (sc.override_until) h += `<span>${T('Dočasná výjimka do', 'Temporary exception until')} <b>${fmtWhen(sc.override_until)}</b> <button class="btn sm" data-ssov="clear">${T('Zrušit', 'Cancel')}</button></span>`;
+    else if (!sc.open) h += sov;
+  }
+  box.innerHTML = h;
+  $$('[data-ssov]', box).forEach(b => b.onclick = () => schOverride(b.dataset.ssov));
+}
+
 function renderAppBanner() {
   const box = $('#appbn'); if (!box) return;
   const b = App.st && App.st.app, key = JSON.stringify(b || null);

@@ -10,7 +10,7 @@ Běží na **macOS, Windows i v Dockeru**. Ovládá se **webovým GUI**, **Teleg
 - **Playlisty a kanály** se stáhnou celé (u kanálu jen záložka Videa, Shorts a živé přenosy volitelně), do vlastní složky.
 - **Telegram:** pošlete botovi odkaz, odpoví počtem nalezených videí a rozlišením prvního. Pak hlásí jen chyby.
 - **Enginy** (yt-dlp, Deno, ffmpeg) se aktualizují s testem. Když nová verze nefunguje, zůstane předchozí.
-- Nastavení: souběžná stahování, limit rychlosti, časové okno, šablona názvů, cookies, proxy, heslo do GUI, čeština i angličtina, světlý i tmavý režim.
+- Nastavení: souběžná stahování, limit rychlosti, časový rozvrh, šablona názvů, cookies, proxy, heslo do GUI, čeština i angličtina, světlý i tmavý režim.
 - V GUI je **nápověda** a **průvodce prvním spuštěním**.
 
 > Používejte jen pro obsah, ke kterému máte práva. DRM (Netflix, Disney+ apod.) se neobchází.
@@ -95,6 +95,21 @@ Data (`/data`) leží mimo obraz, takže se zachovají; databáze se při startu
 **Migrace databáze:** verze schématu je v databázi (`pragma user_version`). Při startu se chybějící migrace provedou
 automaticky a před tím se uloží záloha `viddown.db.v<stará verze>.bak` vedle databáze. Databázi z novější verze VidDown
 starší verze odmítne otevřít (chrání před poškozením při downgradu). Stav ukáže `viddown db info` a `viddown doctor`.
+
+### Časový rozvrh
+
+Nastavení › Časový rozvrh určuje, kdy smí aplikace **automaticky** pracovat. Zapnete ho přepínačem a zadáte pravidla: každé pravidlo má
+dny v týdnu (nebo „Každý den“) a jedno či více časových oken, např. úterý a čtvrtek 2:00–5:00 a 19:00–21:00. Pravidla se sčítají,
+okno přes půlnoc (22:00–06:00) platí podle dne začátku a stejný začátek a konec znamená celý den. Čas je místní čas serveru
+(v Dockeru nastavte `TZ`); přechod letního času se řeší sám.
+
+- **Co se řídí** (zaškrtávání): stahování fronty, kontroly odběrů, zjišťování katalogu. Mimo okno nezačne nová automatická práce,
+  probíhající kontrola nebo dotaz doběhne. Aktualizace a zálohy se rozvrhem neřídí.
+- **Po skončení okna** se rozpracovaná stahování buď přeruší a vrátí do fronty, nebo se nechají doběhnout.
+- **Ruční akce** (Zkontrolovat teď u odběru, přidání nebo obnovení zdroje katalogu) se rozvrhem neřídí. Stahování zařazená ručně
+  začnou až v okně.
+- **Dočasná výjimka:** v banneru „čeká na časové okno“ (ve frontě, v odběrech) i v Nastavení jde rozvrh na 1, 3 nebo 6 hodin obejít.
+- Dřívější nastavení jednoho okna se zobrazí jako první pravidlo a po první úpravě se uloží do nového tvaru.
 
 ### Aktualizace aplikace bez nového obrazu
 
