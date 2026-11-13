@@ -96,18 +96,67 @@ Data (`/data`) leží mimo obraz, takže se zachovají; databáze se při startu
 automaticky a před tím se uloží záloha `viddown.db.v<stará verze>.bak` vedle databáze. Databázi z novější verze VidDown
 starší verze odmítne otevřít (chrání před poškozením při downgradu). Stav ukáže `viddown db info` a `viddown doctor`.
 
-**Aktualizace kódu bez nového obrazu** (v GUI: Nastavení › Aktualizace aplikace; Telegram `/aplikace`; nebo z terminálu):
+### Aktualizace aplikace bez nového obrazu
 
-- Vydání: zvyšte verzi v `src/viddown/__init__.py`, commitněte, pushněte a spusťte `scripts/release.sh`. Vedle obrazu vytvoří
-  na GitHubu vydání `v<verze>` s archivem kódu a manifestem (`scripts/release.sh --app-only` jen sestaví archiv).
-  Při změně závislostí nebo Dockerfile zvyšte `IMAGE_API` v `src/viddown/bootstrap.py`.
-- Na straně aplikace: `docker exec viddown viddown app check` ukáže, zda je novější verze; `viddown app update` ji stáhne,
-  ověří, otestuje a připraví; po restartu aplikace (nebo kontejneru) poběží. Nová verze má zkušební dobu a při potížích se sama
-  vrátí na předchozí a vadná se přeskočí. Stav ukáže `viddown app status`.
-- Režim: „Jen oznámit“ (výchozí: banner v GUI a zpráva v Telegramu s tlačítkem Aktualizovat), „Automaticky“ (stáhne, otestuje
-  a po doběhnutí stahování restartuje; fronta se mezitím měkce pozastaví a po restartu obnoví) nebo „Vypnuto“.
-- Soukromý repozitář vyžaduje GitHub token jen pro čtení (Contents: read): `docker exec -it viddown viddown app token`
-  (nebo proměnná `VIDDOWN_APP_UPDATE_TOKEN`). Repozitář je v nastavení `app_update_repo`.
+Aplikace se skládá ze tří vrstev: **obraz** (Python, ffmpeg, Chromium, závislosti; mění se zřídka, příkazem `pull`),
+**kód aplikace** (mění se často a aktualizuje se zevnitř) a **enginy** (yt-dlp, ffmpeg, Deno; mají vlastní aktualizace).
+Aktualizovaný kód leží v datové složce (`/data/app/<verze>/`), takže přežije restart i `pull` obrazu.
+
+**Jednorázové nastavení** (Nastavení › Aktualizace aplikace)
+
+1. Na GitHubu vytvořte token jen pro čtení: Settings › Developer settings › Personal access tokens › Fine-grained tokens,
+   *Repository access*: jen repozitář VidDown, *Permissions*: Contents – Read-only. Vložte ho do karty (nebo
+   `docker exec -it viddown viddown app token`, případně proměnná `VIDDOWN_APP_UPDATE_TOKEN`). Token se uloží do `secrets.json`
+   a nikdy se nezobrazuje; na GitHub se posílá jen v dotazech na API.
+2. Zkontrolujte repozitář (`app_update_repo`, výchozí je ten ve vydání) a zvolte režim:
+   **Jen oznámit** (výchozí: banner v GUI a zpráva v Telegramu s tlačítkem Aktualizovat), **Automaticky** (stáhne, otestuje
+   a po doběhnutí stahování restartuje; fronta se mezitím měkce pozastaví a po restartu obnoví) nebo **Vypnuto**.
+   Interval kontroly je 6 h až 1 týden (výchozí 1 den).
+
+**Vydání nové verze** (na vývojovém počítači)
+
+1. Zvyšte verzi v `src/viddown/__init__.py`, commitněte a pushněte.
+2. Spusťte `scripts/release.sh`. Sestaví archiv kódu a manifest (kontrolní součet, schéma databáze, požadované `IMAGE_API`),
+   obraz pro Synology (amd64 i arm64), nahraje obraz do GitHub Container Registry a vytvoří GitHub Release `v<verze>`
+   (potřebuje přihlášené `docker login ghcr.io` a `gh auth login`). Před dlouhým sestavováním ověří, že commit je na GitHubu
+   a vydání ještě neexistuje. `--dry-run` nic nenahraje, `--app-only` jen sestaví archiv do `dist/release/`.
+3. Při změně závislostí (`pyproject.toml`) nebo Dockerfile zvyšte `IMAGE_API` v `src/viddown/bootstrap.py`; skript na to upozorní.
+   Takové vydání se do běžícího obrazu nenainstaluje: aplikace jen oznámí, že je potřeba `pull` nového obrazu.
+
+**Co se děje při aktualizaci**
+
+- Aplikace stáhne manifest a archiv, ověří kontrolní součet a velikost, rozbalí ho a spustí **samotest** v odděleném procesu
+  nad kopií databáze (verze, načtení všech modulů, migrace a integrita databáze, odpověď API, ffmpeg a yt-dlp). Selže-li,
+  verze se odstraní a označí jako přeskočená; běžící verze se nedotkne.
+- Před přepnutím se uloží záloha databáze. Nová verze po restartu běží **120 s ve zkušební době**. Pokud dvakrát za sebou
+  nenaběhne zdravě (pád, zacyklení), **vrátí se sama předchozí verze**, vadná se přeskočí a (když nová verze databázi migrovala
+  dál, než zná stará) se obnoví záloha databáze; poškozená databáze zůstane vedle jako `viddown.db.failed-<verze>`.
+  Ruční restart ve zkušební době se do počtu nezapočítává. O návratu se dozvíte bannerem v GUI a zprávou v Telegramu.
+- Starší nainstalovaná verze se po `pull` novějšího obrazu zahodí sama (obraz je stejně nový nebo novější).
+- Migrace databáze jsou jen přidávací (nové sloupce a tabulky), jinak by návrat na starší verzi nešel.
+
+**Ruční ovládání** (`docker exec viddown viddown app …`)
+
+| Příkaz | Význam |
+|---|---|
+| `status` | verze, stav zkušební doby, přeskočené verze, poslední události |
+| `check` / `update [--force]` | zjistí novější vydání / stáhne, otestuje a připraví (po restartu poběží); `--force` zkusí i přeskočenou verzi |
+| `rollback [--restore-db]` | ruční návrat na předchozí verzi (`--restore-db` jen když je databáze novější a smíte přijít o data od přepnutí) |
+| `unskip VERZE` / `remove VERZE` | zruší přeskočení / odstraní nainstalovanou verzi |
+| `token` | uloží nebo smaže GitHub token |
+
+**Řešení potíží**
+
+| Hlášení | Příčina a řešení |
+|---|---|
+| „vydání … nenalezeno (soukromý repozitář vyžaduje token)“ | chybí token, nebo repozitář (`app_update_repo`) nemá žádné vydání |
+| „GitHub odmítl přístup“ | token je neplatný, vypršel nebo nemá právo Contents: Read |
+| „vyžaduje novější obraz“ | vydání potřebuje vyšší `IMAGE_API`: `docker compose pull && docker compose up -d` |
+| „verze X byla přeskočena (důvod)“ | samotest nebo zdravý start selhal; opravené vydání má novou verzi, jinak „Zkusit znovu“ / `update --force` |
+| ruční `rollback` odmítl | databáze má novější schéma; návrat je možný jen s `--restore-db` (ztráta dat od přepnutí) |
+
+**Zkouška** (po větších změnách): `scripts/e2e_update.py` v jednorázovém kontejneru a proti falešnému GitHubu projde úspěšnou
+aktualizaci, vadnou verzi s pádem při startu a vadnou verzi s migrací databáze (asi 6 minut, na běžící VidDown nesahá).
 
 **Záloha a obnova (export a import):**
 

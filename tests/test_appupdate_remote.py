@@ -17,7 +17,8 @@ REPO = "vlastnik/projekt"
 
 class Fake:
     """Falešné GitHub API (/repos/.../releases/latest a stažení souboru přesměrováním na jiný server)."""
-    def __init__(self):
+    def __init__(self, bind="127.0.0.1", public="127.0.0.1"):
+        self.bind, self.public = bind, public     # pro zkoušku v Dockeru: bind 0.0.0.0, public host.docker.internal
         self.assets = {}            # id -> (název, bajty)
         self.release = None         # {"tag_name", "body", "assets": [...]}
         self.api_auth, self.cdn_auth, self.calls = [], [], []
@@ -39,7 +40,7 @@ class Fake:
                 m = re.fullmatch(rf"/repos/{REPO}/releases/assets/(\d+)", self.path)
                 if m and int(m.group(1)) in fake.assets:
                     self.send_response(302)
-                    self.send_header("Location", f"http://127.0.0.1:{fake.cdn.server_address[1]}/blob/{m.group(1)}")
+                    self.send_header("Location", f"http://{fake.public}:{fake.cdn.server_address[1]}/blob/{m.group(1)}")
                     self.end_headers()
                     return
                 self._send(404, b"{}")
@@ -64,11 +65,11 @@ class Fake:
                 self.end_headers()
                 self.wfile.write(body)
 
-        self.api = ThreadingHTTPServer(("127.0.0.1", 0), Api)
-        self.cdn = ThreadingHTTPServer(("127.0.0.1", 0), Cdn)
+        self.api = ThreadingHTTPServer((bind, 0), Api)
+        self.cdn = ThreadingHTTPServer((bind, 0), Cdn)
         for srv in (self.api, self.cdn):
             threading.Thread(target=srv.serve_forever, daemon=True).start()
-        self.url = f"http://127.0.0.1:{self.api.server_address[1]}"
+        self.url = f"http://{public}:{self.api.server_address[1]}"
 
     def close(self):
         for srv in (self.api, self.cdn):
