@@ -386,3 +386,19 @@ Nastavení (GUI, 14. 11. 2026): karty jsou ve skupinách **Stahování** (Stahov
 ## 22. Inspirace
 
 Myšlenky z projektu [puemos/hls-downloader](https://github.com/puemos/hls-downloader) (MIT): detekce HLS playlistů, parsování m3u8, fragmenty, AES-128, spojování.
+
+## 23. Animované náhledy v katalogu (návrh, čeká na schválení)
+
+Cíl: u karet katalogu ukázat krátkou animaci (co je ve videu) místo statické miniatury, kde ji web nabízí. Rozhodnutí uživatele (14. 11. 2026): podporovat **všechny tři zdroje animací** (A, B, C níže); zobrazení **při najetí myší** (na dotykovém displeji po klepnutí), jinak statická miniatura; ve výchozím stavu **vypnuto**, zapíná se v Nastavení › Katalog; u webů bez podpory yt-dlp **obecná heuristika** z HTML stránky videa. Zjištění: současné zdroje vracejí přes yt-dlp jen statické JPEG, takže přínos dá až etapa 3 (nebo jiné zdroje).
+
+Technické zásady: animace je volitelná příloha položky (statická miniatura zůstává vždy); stahuje se až po podrobnostech a miniaturách, stejnou smyčkou, pauzou mezi dotazy na web a rozvrhem (rozsah „katalog“); limit velikosti jedné animace (výchozí 3 MB, nastavitelné 1–20); soubor se ukládá vedle miniatur (`<id>.webp|gif|mp4`), maže se s miniaturou při odstranění nebo stažení; služba `/api/catalog/anim/<id>` (podpora Range pro MP4); v mřížce se `<video muted loop playsinline>` nebo `<img>` načte až při najetí (`preload=none`), nikdy ne všechny najednou. **Schéma:** migrace 9 (`catalog_items.anim_url`, `anim_file` – prázdný řetězec = nepodařilo se, jako u miniatury, a dílčí index na čekající), schéma 8 se nemění.
+
+Etapy:
+1. **Jádro a zdroj A** (animace, které už yt-dlp vrací): migrace 9, nastavení `catalog_anim` (výchozí vypnuto) a `catalog_anim_max_mb`; rozpoznání animovaných miniatur v seznamu (přípona gif/mp4/webm, u WebP až podle obsahu – blok ANIM), uložení `anim_url`, stahování s limitem a kontrolou obsahu, služba souboru, mazání s položkou; testy.
+2. **Obrazovka:** přehrání při najetí / klepnutí na kartě (video nebo obrázek), přepínač v Nastavení › Katalog (vypnuto / při najetí), tlačítko „Doplnit animace“ (znovu zjistí podrobnosti u položek bez animace, protože u starších položek se `anim_url` neukládal), odznak „animace“ na kartě, dokumentace.
+3. **Zdroj B – storyboardy:** z `formats` yt-dlp (mhtml `storyboard`) stáhnout sprite sheety a ffmpegem složit krátký smyčkový MP4 (nejvýš ~6 s, šířka ≤ 320 px, bez zvuku); jen když A animaci nenašel; respektovat limit; test s falešným storyboardem a živá zkouška ffmpegu.
+4. **Zdroj C – náhled ze stránky videa:** nový modul (`catalogpreview.py`): jeden GET stránky videa (limit velikosti jako `pagelist.fetch`, pauza podle webu) a obecná heuristika: `og:video`, `<video poster/src>`, `data-preview`/`data-webm`/`data-mp4` a podobné značky, jen odkazy na stejného hostitele nebo CDN a jen soubory do limitu; neúspěch = zůstane statická miniatura, web se nezkouší znovu. Pozor: dotaz navíc na každé video (proto až po A a B a jen při zapnutém nastavení).
+5. **Dolaďování a ostrá zkouška:** zahrnutí do zálohy jen s volbou „s náhledy“, místo na disku v Nastavení (součet velikostí), živá zkouška proti lokálnímu falešnému webu (A, B, C) a v Dockeru, deep review.
+
+Otevřené detaily (výchozí předpoklady, upřesnit lze kdykoli): formát složené animace MP4 (H.264, bez zvuku); limit 3 MB; heuristika C jen pro položky, kterým A a B animaci nenašly; animace se nepřehrávají na pozadí ani v „vždy“ režimu; po vypnutí nastavení soubory zůstanou (jdou smazat tlačítkem „Smazat animace“, součást etapy 5).
+
