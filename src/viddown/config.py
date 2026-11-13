@@ -115,7 +115,7 @@ DEFAULTS: dict = {
     "catalog_auto": False,                  # automaticky hledat nová videa ve zdrojích (jen nenabídnutá; v rozvrhu, je-li zapnutý)
     "catalog_auto_hours": 24,               # jak často (hodiny): 6 | 12 | 24 | 72 | 168
     "catalog_anim": False,                  # stahovat animované náhledy (gif, webp, mp4), které web nabízí (přehrají se po najetí myší)
-    "catalog_anim_max_mb": 3,               # největší povolená velikost jedné animace (MB, 1–20)
+    "catalog_anim_max_mb": 5,               # největší povolená velikost jedné animace (MB, 1–20)
     "catalog_slow_browser": True,           # u webů bez podpory yt-dlp zjišťovat podrobnosti i prohlížečem (až nakonec)
     # aktualizace aplikace zevnitř (PLAN.md kap. 18)
     "app_update_repo": "iamjk78/VidDown",    # GitHub repozitář s vydáními (vlastník/název)

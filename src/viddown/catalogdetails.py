@@ -356,7 +356,7 @@ class DetailWorker:
                       (name if name else "", time.time(), row["id"]))
 
     async def _anim_one(self, row: dict) -> None:
-        max_bytes = int(float(self.st.settings.get("catalog_anim_max_mb") or 3) * 1024 * 1024)
+        max_bytes = int(float(self.st.settings.get("catalog_anim_max_mb") or 5) * 1024 * 1024)
         name = await asyncio.to_thread(download_anim, self.folder(), row["id"], row["anim_url"], max_bytes, thumbs.referer_of(row.get("url")))
         with self.db.conn() as c:
             n = c.execute("update catalog_items set anim_file=?, updated_at=? where id=? and anim_file is null and state in ('new','queued')",

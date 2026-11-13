@@ -243,7 +243,7 @@ def test_api_serves_animation_and_reports_it_on_the_card(client):
 
 # ------------------------------------------------------------ nastavení a migrace 9
 def test_anim_settings_defaults_and_validation(data):
-    assert DEFAULTS["catalog_anim"] is False and DEFAULTS["catalog_anim_max_mb"] == 3
+    assert DEFAULTS["catalog_anim"] is False and DEFAULTS["catalog_anim_max_mb"] == 5
     s = Settings()
     s.update({"catalog_anim": True, "catalog_anim_max_mb": 10})
     assert s.get("catalog_anim") is True and s.get("catalog_anim_max_mb") == 10
