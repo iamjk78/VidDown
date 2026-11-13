@@ -96,7 +96,7 @@ async function boot() {
 }
 async function start() {
   parseHash();
-  $('#app').innerHTML = '<div class="layout"><aside class="side" id="side"></aside><main class="main" id="mainwrap"><div class="main-in" id="main"></div></main></div>';
+  $('#app').innerHTML = '<div class="layout"><aside class="side" id="side"></aside><main class="main" id="mainwrap"><div class="main-in" id="appbn" style="display:none;margin-bottom:18px"></div><div class="main-in" id="main"></div></main></div>';
   try { App.settings = await api('/api/settings'); } catch (e) { return; }
   connectSSE(); render();
 }
@@ -109,6 +109,7 @@ function connectSSE() {
 function onState() {
   if (!App.st.onboarded && !App.wizardShown) { App.wizardShown = true; openWizard(); }
   renderSide();
+  renderAppBanner();
   if (App.view === 'queue' && !App.drag) renderQueueDyn();
   if (App.view === 'subs' && !App.args.length) renderSubsDyn();
   if (App.view === 'sub') {
@@ -951,6 +952,12 @@ const SECTIONS = () => [
     { k: 'language', type: 'seg', opts: [['cs', 'Čeština'], ['en', 'English']], label: ['Jazyk', 'Language'] },
     { k: 'theme', type: 'seg', opts: [['light', ['Světlý', 'Light']], ['dark', ['Tmavý', 'Dark']], ['system', ['Podle systému', 'System']]], label: ['Motiv', 'Theme'] },
   ] },
+  { icon: 'refresh', title: ['Aktualizace aplikace', 'App updates'], col: 0, fields: [
+    { type: 'appstatus' },
+    { k: 'app_update_mode', type: 'seg', opts: [['off', ['Vypnuto', 'Off']], ['notify', ['Jen oznámit', 'Notify only']], ['auto', ['Automaticky', 'Automatic']]], label: ['Režim', 'Mode'], hint: ['Automaticky = stáhne, otestuje a po doběhnutí stahování restartuje. Při potížích se nová verze sama vrátí.', 'Automatic = downloads, tests and restarts once downloads finish. A bad version rolls back by itself.'] },
+    { k: 'app_update_hours', type: 'seg', opts: [[6, '6 h'], [12, '12 h'], [24, ['1 den', '1 day']], [72, ['3 dny', '3 days']], [168, ['1 týden', '1 week']]], label: ['Jak často kontrolovat', 'How often to check'] },
+    { k: 'app_update_repo', type: 'text', w: 220, label: ['GitHub repozitář', 'GitHub repository'], hint: ['Ve tvaru vlastník/název', 'Format owner/name'] },
+  ] },
   { icon: 'cpu', title: ['Enginy', 'Engines'], col: 0, fields: [
     { k: 'engine_auto_update', type: 'toggle', label: ['Automatické aktualizace', 'Automatic updates'] },
     { k: 'engine_update_hours', type: 'number', min: 1, suffix: 'h', label: ['Interval kontroly', 'Check interval'] },
@@ -1014,6 +1021,7 @@ function fieldHtml(f, S) {
       <div class="row gap8" style="justify-content:flex-end"><label class="btn sm">${T('Vybrat zálohu…', 'Choose backup…')}<input type="file" id="rsf" accept=".dtb,.zip" hidden></label></div></div>
       <div id="rsbox"></div>`;
     case 'abstatus': return `<div id="abbox"></div>`;
+    case 'appstatus': return `<div id="apbox"></div>`;
     case 'password': return `<div class="fld"><div class="lab"><div class="b5">${T('Heslo do GUI', 'GUI password')}</div><div class="hint">${S.has_password ? T('Nastaveno – GUI vyžaduje přihlášení', 'Set – the GUI requires sign-in') : T('Nenastaveno – GUI je přístupné bez hesla', 'Not set – the GUI opens without a password')}</div></div>
       <div class="row gap8">${S.has_password ? '<span class="mono t2">••••••••</span>' : ''}<button class="btn sm" id="pwbtn">${S.has_password ? T('Změnit', 'Change') : T('Nastavit', 'Set')}</button></div></div>`;
     case 'tgtoken': { const st = App.st ? App.st.telegram : {};
@@ -1064,6 +1072,7 @@ function bindSettings(root, after) {
     const r = await act(() => api('/api/restore', { method: 'POST', body: fd }), T('Záloha ověřena', 'Backup verified')); e.target.value = ''; if (r) loadRestore($('#rsbox', root)); };
   const rb = $('#rsbox', root); if (rb) loadRestore(rb);
   const ab = $('#abbox', root); if (ab) loadAutoBackup(ab);
+  const ap = $('#apbox', root); if (ap) loadAppStatus(ap);
   const pw = $('#pwbtn', root); if (pw) pw.onclick = () => openPassword(rer);
   const tg = $('#tgbtn', root); if (tg) tg.onclick = () => openToken(rer);
   const tt = $('#tgtest', root); if (tt) tt.onclick = () => act(() => api('/api/telegram/test', { method: 'POST' }), T('Testovací zpráva odeslána', 'Test message sent'));
@@ -1081,6 +1090,69 @@ async function waitForRestart() {
     for (let i = 0; i < 90; i++) { try { const r = await fetch('/api/state', { cache: 'no-store' }); if (r.ok || r.status === 401) break; } catch (e) { /* server ještě neběží */ } await new Promise(r => setTimeout(r, 1000)); }
     location.reload();
   }
+function renderAppBanner() {
+  const box = $('#appbn'); if (!box) return;
+  const b = App.st && App.st.app, key = JSON.stringify(b || null);
+  if (box.dataset.k === key) return;
+  box.dataset.k = key;
+  if (!b) { box.style.display = 'none'; box.innerHTML = ''; return; }
+  const v = esc(b.version || '');
+  let h;
+  if (b.kind === 'available') h = `<div class="banner info">${ic('download', 18)}<span class="grow">${T(`Je k dispozici nová verze aplikace ${v}.`, `A new app version ${v} is available.`)}</span><button class="btn sm" data-ap="update">${T('Aktualizovat', 'Update')}</button><button class="btn sm" data-go="settings">${T('Podrobnosti', 'Details')}</button></div>`;
+  else if (b.kind === 'prepared') h = `<div class="banner info">${ic('refresh', 18)}<span class="grow">${T(`Verze ${v} je nainstalovaná a otestovaná. Projeví se po restartu aplikace.`, `Version ${v} is installed and tested. It takes effect after the app restarts.`)}</span><button class="btn sm" data-ap="apply">${T('Restartovat po doběhnutí stahování', 'Restart when downloads finish')}</button><button class="btn sm" data-ap="restart">${T('Restartovat hned', 'Restart now')}</button></div>`;
+  else if (b.kind === 'applying') h = `<div class="banner info">${ic('clock', 18)}<span class="grow">${T(`Čekám na doběhnutí stahování, pak se aplikace restartuje a přepne na verzi ${v}. Nová stahování se nezačínají.`, `Waiting for downloads to finish, then the app restarts and switches to version ${v}. No new downloads start.`)}</span></div>`;
+  else h = `<div class="banner">${ic('alert', 18)}<span class="grow">${T(`Verze ${v} nenaběhla zdravě a aplikace se vrátila na předchozí.`, `Version ${v} did not start healthy, so the app went back to the previous one.`)} ${esc(b.msg || '')}</span><button class="btn sm" data-ap="dismiss" data-t="${b.t}">${T('Zavřít', 'Dismiss')}</button></div>`;
+  box.innerHTML = h; box.style.display = '';
+  $$('[data-ap]', box).forEach(el => el.onclick = () => appAction(el));
+  $$('[data-go]', box).forEach(el => el.onclick = () => go(el.dataset.go));
+}
+async function appAction(el, done) {
+  const what = el.dataset.ap;
+  if (what === 'restart') return restartApp();
+  if (what === 'rollback' && !confirm(T('Vrátit se na předchozí verzi aplikace? Změna se projeví po restartu.', 'Go back to the previous app version? The change takes effect after a restart.'))) return;
+  const calls = {
+    update: () => [api('/api/app/update', { method: 'POST', body: {} }), T('Nová verze je připravená', 'The new version is ready')],
+    check: () => [api('/api/app/check', { method: 'POST' }), T('Zkontrolováno', 'Checked')],
+    apply: () => [api('/api/app/apply', { method: 'POST' }), T('Po doběhnutí stahování se aplikace restartuje', 'The app restarts once downloads finish')],
+    rollback: () => [api('/api/app/rollback', { method: 'POST', body: {} }), T('Vráceno, projeví se po restartu', 'Rolled back, takes effect after a restart')],
+    dismiss: () => [api('/api/app/dismiss', { method: 'POST', body: { t: +el.dataset.t } }), null],
+    unskip: () => [api('/api/app/unskip', { method: 'POST', body: { version: el.dataset.v } }), T('Přeskočení zrušeno', 'Skip cleared')],
+  };
+  const [p, msg] = calls[what]();
+  const label = el.textContent; el.disabled = true;
+  if (what === 'update' || what === 'check') el.textContent = what === 'update' ? T('Aktualizuji…', 'Updating…') : T('Kontroluji…', 'Checking…');
+  const r = await act(() => p, msg);
+  el.disabled = false; el.textContent = label;
+  if (done) done(r);
+}
+async function loadAppStatus(box) {
+  let s; try { s = await api('/api/app'); } catch (e) { return; }
+  if (!box.isConnected) return;
+  const chk = s.check || {};
+  const label = { available: T('k dispozici nová verze', 'new version available'), up_to_date: T('máte nejnovější verzi', 'up to date'), skipped: T('nová verze byla přeskočena', 'new version was skipped'),
+    needs_image: T('vyžaduje novější obraz (pull)', 'needs a newer image (pull)'), error: T('kontrola selhala', 'check failed') }[chk.status] || '';
+  const rows = [[T('Verze v obraze', 'Image version'), esc(s.baseline)], [T('Běží', 'Running'), esc(s.running) + (s.running !== s.baseline ? T(' (aktualizace)', ' (update)') : '')]];
+  if (s.prepared) rows.push([T('Připravená po restartu', 'Ready after restart'), esc(s.current)]);
+  rows.push([T('Poslední kontrola', 'Last check'), chk.at ? `${fmtDT(chk.at)} – ${label}${chk.version && chk.status !== 'error' ? ' ' + esc(chk.version) : ''}` : T('zatím neproběhla', 'not yet')]);
+  const skipped = Object.entries(s.skipped || {}).map(([v, d]) => `<div class="row gap8" style="padding:5px 0;border-top:1px solid var(--border)"><span class="grow t2" style="font-size:13px;min-width:0">${esc(v)} – ${esc(d.reason)}</span><button class="btn sm" data-ap="unskip" data-v="${esc(v)}">${T('Zkusit znovu', 'Try again')}</button></div>`).join('');
+  const events = (s.events || []).slice().reverse().slice(0, 5).map(e => `<div class="t2" style="font-size:12px">${fmtDT(e.t)} · ${esc(e.kind)} ${esc(e.version || '')} ${esc(e.msg || '')}</div>`).join('');
+  box.innerHTML = `<div style="margin:6px 0 4px">${rows.map(([k, v]) => `<div class="row gap8" style="font-size:13px;padding:2px 0"><span class="t2" style="width:170px;flex:none">${k}</span><span class="mono">${v}</span></div>`).join('')}
+    ${chk.error ? `<div class="hint" style="margin-top:4px"><span class="badge b-err">${T('Chyba', 'Error')}</span> ${esc(chk.error)}</div>` : ''}
+    <div class="row gap8 wrap" style="margin:10px 0">
+      <button class="btn sm" data-ap="check">${ic('refresh', 13)} ${T('Zkontrolovat teď', 'Check now')}</button>
+      ${chk.status === 'available' && !s.prepared ? `<button class="btn sm primary" data-ap="update">${T('Aktualizovat na', 'Update to')} ${esc(chk.version)}</button>` : ''}
+      ${s.prepared && !s.applying ? `<button class="btn sm primary" data-ap="apply">${T('Restartovat po doběhnutí stahování', 'Restart when downloads finish')}</button><button class="btn sm" data-ap="restart">${T('Restartovat hned', 'Restart now')}</button>` : ''}
+      ${s.current ? `<button class="btn sm" data-ap="rollback">${T('Vrátit na předchozí verzi', 'Back to the previous version')}</button>` : ''}</div>
+    ${skipped ? `<div class="hint" style="margin-bottom:4px">${T('Přeskočené verze (nezkouší se znovu)', 'Skipped versions (not retried)')}</div>${skipped}` : ''}
+    ${events ? `<details style="margin-top:6px"><summary class="t2" style="font-size:12px;cursor:pointer">${T('Poslední události', 'Recent events')}</summary>${events}</details>` : ''}
+    <div style="margin-top:12px;border-top:1px solid var(--border);padding-top:10px"><div class="b5">${T('GitHub token pro čtení vydání', 'GitHub token for reading releases')} <span class="badge ${s.token_set ? 'b-ok' : 'b-warn'}">${s.token_set ? T('uložen', 'saved') : T('nenastaven', 'not set')}</span></div>
+      <div class="hint">${T('Soukromý repozitář vyžaduje token jen pro čtení (Contents: read). Ukládá se do secrets.json a nikdy se nezobrazuje.', 'A private repository needs a read-only token (Contents: read). It is stored in secrets.json and never shown.')}</div>
+      <div class="row gap8" style="margin-top:6px"><input class="input sm mono" id="aptok" type="password" autocomplete="off" placeholder="github_pat_…" style="flex:1;min-width:0"><button class="btn sm" id="aptoksave">${T('Uložit', 'Save')}</button>${s.token_set ? `<button class="btn sm" id="aptokdel">${T('Smazat', 'Delete')}</button>` : ''}</div></div></div>`;
+  $$('[data-ap]', box).forEach(el => el.onclick = () => appAction(el, () => loadAppStatus(box)));
+  const sv = $('#aptoksave', box); if (sv) sv.onclick = async () => { const t = $('#aptok', box).value.trim(); if (!t) return;
+    if (await act(() => api('/api/app/token', { method: 'POST', body: { token: t } }), T('Token uložen', 'Token saved'))) loadAppStatus(box); };
+  const dl = $('#aptokdel', box); if (dl) dl.onclick = async () => { if (await act(() => api('/api/app/token', { method: 'POST', body: { token: '' } }), T('Token smazán', 'Token deleted'))) loadAppStatus(box); };
+}
 async function loadAutoBackup(box) {
   let d; try { d = await api('/api/autobackup'); } catch (e) { return; }
   if (!box.isConnected) return;

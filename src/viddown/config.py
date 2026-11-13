@@ -43,7 +43,8 @@ def valid_repo(repo: str) -> bool:
     return len(parts) == 2 and all(re.fullmatch(r"[A-Za-z0-9_.-]+", x) and set(x) != {"."} for x in parts)
 
 
-AUTO_BACKUP_HOURS = (6, 12, 24, 72, 168)     # nabídka intervalu automatických záloh
+AUTO_BACKUP_HOURS = (6, 12, 24, 72, 168)
+APP_UPDATE_HOURS = (6, 12, 24, 72, 168)      # nabídka intervalu kontroly nových verzí aplikace     # nabídka intervalu automatických záloh
 
 DEFAULTS: dict = {
     # stahování
@@ -105,6 +106,8 @@ DEFAULTS: dict = {
     "auto_backup_keep": 5,          # kolik záloh uchovat; po úspěšné záloze se starší smažou
     # aktualizace aplikace zevnitř (PLAN.md kap. 18)
     "app_update_repo": "iamjk78/VidDown",    # GitHub repozitář s vydáními (vlastník/název)
+    "app_update_mode": "notify",             # off | notify (jen oznámit) | auto (stáhnout, otestovat a po doběhnutí stahování restartovat)
+    "app_update_hours": 24,                  # jak často se kontroluje nová verze
     # vzhled, logy, historie
     "language": "cs",               # cs | en
     "theme": "system",              # light | dark | system
@@ -119,6 +122,7 @@ CHOICES = {
     "cookies_mode": ["none", "file", "browser"],
     "telegram_after_probe": ["download", "ask"],
     "telegram_notify": ["errors", "all"],
+    "app_update_mode": ["off", "notify", "auto"],
     "language": ["cs", "en"],
     "theme": ["light", "dark", "system"],
     "log_level": ["DEBUG", "INFO", "WARNING", "ERROR"],
@@ -226,6 +230,8 @@ class Settings:
                     val = f"{int(h):02d}:{int(m):02d}"
                 if k == "app_update_repo" and val and not valid_repo(val):
                     raise ValueError("app_update_repo must look like owner/name")
+                if k == "app_update_hours" and val not in APP_UPDATE_HOURS:
+                    raise ValueError(f"app_update_hours must be one of {APP_UPDATE_HOURS}")
                 if k == "auto_backup_hours" and val not in AUTO_BACKUP_HOURS:
                     raise ValueError(f"auto_backup_hours must be one of {AUTO_BACKUP_HOURS}")
                 if k == "auto_backup_keep" and not 1 <= val <= 100:

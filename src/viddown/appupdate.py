@@ -338,6 +338,12 @@ class AppStore:
             pr["attempts"] -= 1
             self.save(st)
 
+    def update_state(self, **changes) -> None:
+        """Zapíše drobné příznaky stavu (zavřený banner, už oznámené verze a události)."""
+        st = self.state()
+        st.update(changes)
+        self.save(st)
+
     # --- správa verzí -------------------------------------------------------------------------
     def skip(self, ver: str, reason: str) -> None:
         st = self.state()
@@ -377,7 +383,7 @@ class AppStore:
         return {"baseline": baseline_version(), "running": os.environ.get("VIDDOWN_APP_ACTIVE") or baseline_version(),
                 "current": st["current"], "previous": st["previous"], "installed": self.installed(),
                 "skipped": st["skipped"], "probation": st["probation"], "events": st["events"][-8:],
-                "image_api": image_api(), "check": st.get("check")}
+                "image_api": image_api(), "check": st.get("check"), "dismissed": st.get("dismissed", 0)}
 
 
 def pack(out: Path, version: str | None = None, requires_image_api: int | None = None,

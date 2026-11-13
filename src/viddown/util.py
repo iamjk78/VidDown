@@ -177,6 +177,20 @@ def fmt_duration(sec: float | None) -> str:
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 
+_LIST_PATH = re.compile(r"^/(?:(model|pornstar|channels?|users?|user|creators?|c|profiles?|a|artist|artists)/)([^/?#]+)", re.I)
+
+
+def url_list_name(url: str) -> tuple[str | None, bool]:
+    """Název seznamu odvozený z adresy, když ho web nevrátí: (název, je to kanál/autor). Např. /model/nejaky-autor/videos."""
+    try:
+        m = _LIST_PATH.match(urlparse(url).path)
+    except ValueError:
+        return None, False
+    if not m:
+        return None, False
+    return unquote(m.group(2)).replace("-", " ").replace("_", " ").strip() or None, True
+
+
 def domain(url: str) -> str:
     try:
         return urlparse(url).netloc.lower().removeprefix("www.")

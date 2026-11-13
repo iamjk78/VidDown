@@ -18,7 +18,7 @@ from starlette.background import BackgroundTask
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import __version__, autobackup, backup, pagelist, subscriptions, thumbs
+from . import __version__, appupdate, autobackup, backup, pagelist, subscriptions, thumbs, updater
 from .config import DEFAULTS, CHOICES, cookies_path
 from .probe import probe_url
 from .util import check_dir_writable, extract_urls, in_docker, in_schedule, sanitize_filename
@@ -121,6 +121,7 @@ def create_app(app_state) -> FastAPI:
                 "today": S.db.stats_today(),
             },
             "cpu": S.runner.cpu.out(),
+            "app": updater.banner_cached(S),
             "queue_paused": bool(S.db.kv_get("queue_paused", False)),
             "pause_reason": S.db.kv_get("queue_pause_reason"),
             "pause_hard": S.runner.pause_is_hard(),
@@ -572,6 +573,62 @@ def create_app(app_state) -> FastAPI:
             raise HTTPException(400, str(e))
         _schedule_restart()
         return {"ok": True, "docker": in_docker()}
+
+    # --- aktualizace aplikace zevnitř -----------------------------------------------------------
+    async def _app_call(fn, *a, **kw):
+        try:
+            return await asyncio.to_thread(fn, *a, **kw)
+        except appupdate.UpdateError as e:
+            raise HTTPException(400, str(e))
+
+    @app.get("/api/app")
+    async def app_status():
+        return await asyncio.to_thread(updater.status, S)
+
+    @app.post("/api/app/check")
+    async def app_check():
+        return await _app_call(updater.do_check, S)
+
+    @app.post("/api/app/update")
+    async def app_update(req: Request):
+        body = await req.json() if (await req.body()) else {}
+        return await _app_call(updater.do_update, S, bool(body.get("force")))
+
+    @app.post("/api/app/apply")
+    async def app_apply():
+        """Restart po doběhnutí běžících stahování (fronta se měkce pozastaví a po restartu obnoví)."""
+        st = await asyncio.to_thread(updater.status, S)
+        if not st["prepared"]:
+            raise HTTPException(409, "Žádná nová verze není připravená k restartu.")
+        if st["applying"]:
+            return st
+        asyncio.get_running_loop().create_task(updater.apply_when_idle(S))
+        await asyncio.sleep(0.05)
+        return await asyncio.to_thread(updater.status, S)
+
+    @app.post("/api/app/rollback")
+    async def app_rollback(req: Request):
+        body = await req.json() if (await req.body()) else {}
+        return await _app_call(updater.do_rollback, S, bool(body.get("restore_db")))
+
+    @app.post("/api/app/unskip")
+    async def app_unskip(req: Request):
+        ver = str((await req.json()).get("version") or "")
+        await asyncio.to_thread(updater.store(S).unskip, ver)
+        return await asyncio.to_thread(updater.status, S)
+
+    @app.post("/api/app/dismiss")
+    async def app_dismiss(req: Request):
+        t = float((await req.json()).get("t") or 0)
+        await asyncio.to_thread(updater.store(S).update_state, dismissed=t)
+        updater._BANNER_CACHE["t"] = 0.0
+        return await asyncio.to_thread(updater.status, S)
+
+    @app.post("/api/app/token")
+    async def app_token(req: Request):
+        """Uloží (nebo smaže, když je prázdný) token pro čtení vydání z GitHubu. Zpět se nikdy nevrací."""
+        S.secrets.set_app_update_token(str((await req.json()).get("token") or ""))
+        return await asyncio.to_thread(updater.status, S)
 
     # --- automatické zálohy ---------------------------------------------------------------------
     async def _ab_status():

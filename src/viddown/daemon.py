@@ -14,7 +14,7 @@ import time
 import webbrowser
 from pathlib import Path
 
-from . import __version__, appupdate, autobackup, backup
+from . import __version__, appupdate, autobackup, backup, updater
 from .config import Secrets, Settings, data_dir
 from .db import DB
 from .engines import EngineManager
@@ -191,7 +191,9 @@ async def _main(st: AppState, host: str, port: int, open_browser: bool) -> None:
         except (NotImplementedError, RuntimeError):
             signal.signal(sig, lambda *_: loop.call_soon_threadsafe(stop.set))
 
+    updater.startup(st)           # po restartu kvůli aktualizaci obnoví frontu, kterou jsme před restartem pozastavili
     st.bot = TelegramBot(st.runner, st.db, st.settings, st.secrets, st.engines)
+    st.bot.app = st               # příkaz /aplikace
     st.runner.listeners.append(st.bot)
     app = create_app(st)
     config = uvicorn.Config(app, host=host, port=port, log_level="warning", access_log=False, lifespan="off",
@@ -206,7 +208,8 @@ async def _main(st: AppState, host: str, port: int, open_browser: bool) -> None:
              asyncio.create_task(st.bot.run(stop), name="telegram"),
              asyncio.create_task(server.serve(), name="http"),
              asyncio.create_task(appupdate.health_task(st.data, stop), name="app-health"),
-             asyncio.create_task(autobackup.task(st, stop), name="auto-backup")]
+             asyncio.create_task(autobackup.task(st, stop), name="auto-backup"),
+             asyncio.create_task(updater.task(st, stop), name="app-updater")]
     if open_browser:
         async def _open():
             for _ in range(50):

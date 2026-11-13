@@ -108,6 +108,7 @@ class TelegramBot:
                         {"command": "historie", "description": "Historie / history"},
                         {"command": "engine", "description": "Verze enginů / engine versions"},
                         {"command": "aktualizovat", "description": "Aktualizovat enginy / update engines"},
+                        {"command": "aplikace", "description": "Verze aplikace a její aktualizace / app version and updates"},
                         {"command": "pomoc", "description": "Nápověda / help"}])
                     offset = None
                     while not stop.is_set() and not self._reload.is_set():
@@ -151,6 +152,10 @@ class TelegramBot:
             if chat != self.chat():
                 return
             action, _, jid = (cq.get("data") or "").partition(":")
+            if action == "app":
+                await self.call("answerCallbackQuery", callback_query_id=cq["id"])
+                await self._app_action(jid)
+                return
             jid = int(jid or 0)
             if action == "ok":
                 ok = self.runner.confirm(jid)
@@ -185,6 +190,9 @@ class TelegramBot:
         if cmd == "/engine":
             await self.send(self._engine_text())
             return
+        if cmd in ("/aplikace", "/app"):
+            await self._app_status()
+            return
         if cmd in ("/aktualizovat", "/update"):
             await self.send(t(L, "updating"))
             res = await asyncio.to_thread(self.engines.update_all)
@@ -203,6 +211,48 @@ class TelegramBot:
             jid, new = self.runner.add(url, source="telegram", tg_chat=chat, tg_msg=str(m["message_id"]))
             if not new:
                 await self.edit(chat, m["message_id"], f"{url}\n{t(L, 'already')}")
+
+    # ------------------------------------------------------------ aktualizace aplikace
+    async def _app_status(self, check: bool = True) -> None:
+        from . import updater
+        L, st = self.lang(), getattr(self, "app", None)
+        if st is None:
+            return
+        try:
+            if check:
+                await asyncio.to_thread(updater.do_check, st)
+        except Exception as e:  # noqa: BLE001
+            await self.send(f"⚠️ {e}")
+        s = await asyncio.to_thread(updater.status, st)
+        chk = s.get("check") or {}
+        label = {"available": f"🆕 {chk.get('version')}", "up_to_date": "✅", "skipped": "⏭", "needs_image": "🐳", "error": f"⚠️ {chk.get('error', '')}"}.get(chk.get("status"), "—")
+        kb = []
+        if s["prepared"] and not s["applying"]:
+            kb = [[{"text": t(L, "app_btn_apply"), "callback_data": "app:apply"}], [{"text": t(L, "app_btn_restart"), "callback_data": "app:restart"}]]
+        elif chk.get("status") == "available":
+            kb = [[{"text": t(L, "app_btn_update"), "callback_data": "app:update"}]]
+        await self.send(t(L, "app_status", running=s["running"], baseline=s["baseline"], current=s["current"] or t(L, "app_none"), check=label),
+                        **({"reply_markup": {"inline_keyboard": kb}} if kb else {}))
+
+    async def _app_action(self, what: str) -> None:
+        from . import appupdate, updater
+        L, st = self.lang(), getattr(self, "app", None)
+        if st is None:
+            return
+        try:
+            if what == "update":
+                await self.send(t(L, "app_updating"))
+                r = await asyncio.to_thread(updater.do_update, st)
+                await self.send(f"✅ {r['result'].get('version', '')}")
+                await self._app_status(check=False)
+            elif what == "apply":
+                await self.send(t(L, "app_apply_started"))
+                asyncio.get_running_loop().create_task(updater.apply_when_idle(st))
+            elif what == "restart":
+                await self.send(t(L, "app_restarting"))
+                updater.request_restart(st)
+        except appupdate.UpdateError as e:
+            await self.send(f"⚠️ {e}")
 
     def _queue_text(self) -> str:
         L = self.lang()

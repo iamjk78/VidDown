@@ -9,7 +9,7 @@ import time
 
 from .resolvers import Ctx, ResolveError
 from .resolvers import pages, sniffer, ytdlp
-from .util import domain, fallback_allowed, youtube_channel_base
+from .util import url_list_name, domain, fallback_allowed, youtube_channel_base
 
 log = logging.getLogger("viddown.probe")
 
@@ -65,6 +65,12 @@ def _flatten(entries) -> list[dict]:
     return out
 
 
+def _entries_channel(entries: list[dict]) -> str | None:
+    """Autor, který je u všech položek stejný (stránky bez vlastního názvu seznamu)."""
+    names = {e.get("channel") for e in entries if e.get("channel")}
+    return names.pop() if len(names) == 1 else None
+
+
 async def _probe_ytdlp(url: str, ctx: Ctx) -> dict:
     base = youtube_channel_base(url)
     s = ctx.settings
@@ -89,7 +95,10 @@ async def _probe_ytdlp(url: str, ctx: Ctx) -> dict:
     if info.get("_type") in ("playlist", "multi_video") or "entries" in info:
         entries = _flatten(info.get("entries"))
         is_channel = bool(info.get("channel_id") and info.get("id") == info.get("channel_id"))
-        title = info.get("title") or info.get("channel") or domain(url)
+        slug, slug_channel = url_list_name(url)
+        is_channel = is_channel or slug_channel
+        title = (info.get("title") or info.get("channel") or info.get("uploader") or _entries_channel(entries)
+                 or slug or domain(url))
         return await _list_result("channel" if is_channel else "playlist", title, _thumb(info), entries, ctx)
 
     if s.get("quality") == "compat" or s.get("audio_only"):
