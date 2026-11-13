@@ -112,6 +112,8 @@ DEFAULTS: dict = {
     # katalog (PLAN.md kap. 20)
     "catalog_thumbs_dir": "",               # složka miniatur katalogu; prázdné = <data>/catalog/thumbs
     "catalog_gap": 3,                       # pauza mezi dotazy na stejný web při zjišťování podrobností (s, 0–60)
+    "catalog_auto": False,                  # automaticky hledat nová videa ve zdrojích (jen nenabídnutá; v rozvrhu, je-li zapnutý)
+    "catalog_auto_hours": 24,               # jak často (hodiny): 6 | 12 | 24 | 72 | 168
     "catalog_slow_browser": True,           # u webů bez podpory yt-dlp zjišťovat podrobnosti i prohlížečem (až nakonec)
     # aktualizace aplikace zevnitř (PLAN.md kap. 18)
     "app_update_repo": "iamjk78/VidDown",    # GitHub repozitář s vydáními (vlastník/název)
@@ -252,6 +254,8 @@ class Settings:
                     raise ValueError(f"app_update_hours must be one of {APP_UPDATE_HOURS}")
                 if k == "auto_backup_hours" and val not in AUTO_BACKUP_HOURS:
                     raise ValueError(f"auto_backup_hours must be one of {AUTO_BACKUP_HOURS}")
+                if k == "catalog_auto_hours" and val not in AUTO_BACKUP_HOURS:
+                    raise ValueError(f"catalog_auto_hours must be one of {AUTO_BACKUP_HOURS}")
                 if k == "auto_backup_keep" and not 1 <= val <= 100:
                     raise ValueError("auto_backup_keep must be 1-100")
                 if k == "methods":

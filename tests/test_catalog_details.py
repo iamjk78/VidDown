@@ -250,6 +250,7 @@ def test_gap_depends_on_setting_and_performance_mode(st):
     ("unsupported", "Unsupported URL", "new"),
 ])
 def test_item_level_errors_fail_only_that_video(st, fake, info, kind, msg, item_state):
+    st.settings.update({"catalog_slow_browser": False})                    # s prohlížečem by „unsupported“ čekalo na pomalou vrstvu
     make(st, fake, [e("a"), e("b")])
     info.answers["https://example.com/watch/a"] = ResolveError(msg, kind)
     asyncio.run(run_until(st, lambda: states(st)["youtube b"][0] == "done" and states(st)["youtube a"][0] == "failed"))

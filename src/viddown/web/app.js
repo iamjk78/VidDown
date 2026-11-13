@@ -967,6 +967,7 @@ const SECTIONS = () => [
   ] },
   { icon: 'film', title: ['Katalog', 'Catalog'], col: 0, fields: [
     { k: 'catalog_thumbs_dir', type: 'path', label: ['Složka miniatur', 'Thumbnails folder'], hint: ['Prázdné = složka catalog/thumbs v datové složce. V Dockeru musí být připojená jako svazek. Odhad: 150 až 300 kB na video.', 'Empty = the catalog/thumbs folder in the data folder. In Docker it must be a mounted volume. About 150–300 kB per video.'] },
+    { k: 'catalog_slow_browser', type: 'toggle', label: ['Pomalé weby zjišťovat prohlížečem', 'Check unsupported sites with the browser'], hint: ['U webů, které yt-dlp nezná: seznam videí se v případě potřeby vykreslí v Chromiu a podrobnosti videí se zjišťují až nakonec, po jednom. Je to pomalejší a náročnější.', 'For sites yt-dlp does not know: the video list is rendered in Chromium when needed and video details are checked last, one at a time. Slower and heavier.'] },
     { k: 'catalog_gap', type: 'number', min: 0, max: 60, suffix: 's', label: ['Pauza mezi dotazy na stejný web', 'Pause between requests to the same site'], hint: ['Při zjišťování podrobností videí; režim výkonu ji prodlužuje (Vyvážený 2×, Šetrný 4×)', 'While checking video details; the performance mode lengthens it (Balanced 2×, Eco 4×)'] },
   ] },
   { icon: 'cpu', title: ['Enginy', 'Engines'], col: 0, fields: [
@@ -1133,7 +1134,7 @@ function catClearSel() { CAT.sel.clear(); CAT.exclude.clear(); CAT.selAll = null
 
 function renderCatalog() {
   $('#main').innerHTML = `<div class="row gap16 wrap"><div><h1>${T('Katalog', 'Catalog')}</h1><div class="t2" style="margin-top:3px">${T('Videa ze zdrojů k výběru: nic se nestahuje, dokud se nerozhodnete', 'Videos from your sources to pick from: nothing downloads until you decide')}</div></div>
-    <div class="grow"></div><button class="btn" id="catpause"></button><button class="btn primary lg" id="catadd">${ic('plus', 15)} ${T('Přidat zdroje', 'Add sources')}</button></div>
+    <div class="grow"></div><span class="row gap6 fs13" id="catauto"></span><button class="btn" id="catpause"></button><button class="btn primary lg" id="catadd">${ic('plus', 15)} ${T('Přidat zdroje', 'Add sources')}</button></div>
     <div id="catbanner" class="col gap8"></div><div id="catinfo"></div><div id="catsrc" class="catsrcs"></div>
     <div class="card cattools"><div class="row gap8 wrap">
       <div class="inwrap" style="height:32px;width:280px">${ic('search', 14)}<input id="catq" placeholder="${T('Hledat v názvu videa a kanálu…', 'Search video and channel names…')}" value="${esc(CAT.q)}" autocomplete="off"><button class="ibtn" id="catqx" type="button" title="${T('Smazat (Esc)', 'Clear (Esc)')}" ${CAT.q ? '' : 'hidden'}>${ic('x', 12)}</button></div>
@@ -1158,6 +1159,7 @@ function renderCatalog() {
   $('#catres').onclick = e => { const b = e.target.closest('[data-res]'); if (b) reload(() => { const v = b.dataset.res, i = CAT.res.indexOf(v); i >= 0 ? CAT.res.splice(i, 1) : CAT.res.push(v); }); };
   $('#catstate').onclick = e => { const b = e.target.closest('[data-st]'); if (b) reload(() => { const v = b.dataset.st, i = CAT.state.indexOf(v); i >= 0 ? CAT.state.splice(i, 1) : CAT.state.push(v); }); };
   $('#catadd').onclick = openCatAdd;
+  catPaintAuto();
   $('#catpause').onclick = async () => { const paused = CAT.ov && CAT.ov.details.paused; const r = await act(() => api('/api/catalog/pause', { method: 'POST', body: { paused: !paused } })); if (r) { CAT.ov = r; catPaintSources(); } };
   $('#catsrc').onclick = catSrcClick;
   $('#catgrid').onclick = catGridClick;
@@ -1167,6 +1169,16 @@ function renderCatalog() {
   catPaintTools(); catPaintBanner();
   catLoad();
   App.timer = setInterval(catPoll, 3000);
+}
+const CAT_AUTO_HOURS = [6, 12, 24, 72, 168];
+function catPaintAuto() {
+  const box = $('#catauto'); if (!box) return;
+  const v = App.settings.values || {}, on = !!v.catalog_auto, h = v.catalog_auto_hours || 24;
+  box.innerHTML = `<label class="row gap6" title="${T('Zdroje se samy po zvolené době znovu prohlédnou a nabídnou jen dosud nenabídnutá videa. Řídí se časovým rozvrhem.', 'Sources are re-checked on their own after the chosen time and offer only videos not offered yet. Follows the schedule.')}"><input type="checkbox" id="catautoon" ${on ? 'checked' : ''}> ${T('Hledat nová videa automaticky', 'Look for new videos automatically')}</label>
+    <select class="input sm" id="catautoh" style="width:auto" ${on ? '' : 'disabled'}>${CAT_AUTO_HOURS.map(x => `<option value="${x}" ${x === h ? 'selected' : ''}>${x < 72 ? T(`každých ${x} h`, `every ${x} h`) : x === 72 ? T('každé 3 dny', 'every 3 days') : T('každý týden', 'every week')}</option>`).join('')}</select>`;
+  const save = async body => { const r = await act(() => api('/api/settings', { method: 'PUT', body })); if (r) { App.settings = r; catPaintAuto(); } else catPaintAuto(); };
+  $('#catautoon').onchange = e => save({ catalog_auto: e.target.checked });
+  $('#catautoh').onchange = e => save({ catalog_auto_hours: +e.target.value });
 }
 async function catLoad() {
   const seq = ++CAT.seq;
@@ -1221,6 +1233,7 @@ function catPaintSources() {
   const bits = [];
   if (d.paused) bits.push(`<span class="badge b-warn">${T('pozastaveno', 'paused')}</span>`);
   else if (d.waiting_for_lists) bits.push(`<span class="t2">${T('Nejdřív se dokončí seznamy všech zdrojů…', 'Finishing the lists of all sources first…')}</span>`);
+  if (d.slow) bits.push(`<span class="t2" title="${T('Weby, které yt-dlp nezná: podrobnosti se zjišťují prohlížečem až po rychlé práci, po jednom videu.', 'Sites yt-dlp does not know: details are checked with the browser after the fast work, one video at a time.')}">${T('Pomalé (prohlížečem)', 'Slow (browser)')}: ${T('čeká', 'waiting')} ${d.slow}</span>`);
   if (d.pending || d.done || d.failed) bits.push(`<span class="t2">${T('Podrobnosti', 'Details')}: ${T('hotovo', 'done')} ${d.done} · ${T('čeká', 'waiting')} ${d.pending}${d.failed ? ` · ${T('chyb', 'failed')} ${d.failed}` : ''}</span>`);
   if (d.thumbs_pending) bits.push(`<span class="t2">${T('Miniatury', 'Thumbnails')}: ${T('čeká', 'waiting')} ${d.thumbs_pending}</span>`);
   (d.backoff || []).forEach(b => bits.push(`<span class="badge b-warn" title="${esc(b.reason)}">${esc(b.host)}: ${T('odloženo o', 'delayed by')} ${Math.max(1, Math.round(b.seconds / 60))} min</span>`));

@@ -19,7 +19,7 @@ import uuid
 from pathlib import Path
 
 from . import catalog, schedule, thumbs
-from .resolvers import ResolveError, ytdlp
+from .resolvers import ResolveError, sniffer, ytdlp
 
 log = logging.getLogger("viddown.catalogdetails")
 
@@ -87,6 +87,7 @@ class DetailWorker:
         self.next_at: dict[str, float] = {}          # web -> čas (monotonic), kdy smí další dotaz
         self.backoff: dict[str, dict] = {}           # web -> {until, delay, reason}
         self.active: dict[str, asyncio.Task] = {}
+        self.slow_task: asyncio.Task | None = None   # pomalá vrstva (prohlížeč): nejvýš jedno video najednou
 
     # --- nastavení a stav -------------------------------------------------------------------------
     @property
@@ -146,7 +147,7 @@ class DetailWorker:
         finally:
             self.next_at[host] = time.monotonic() + self.gap()
 
-    async def _store(self, item: dict, info: dict) -> None:
+    async def _store(self, item: dict, info: dict, expect: str = "pending") -> None:
         urls = best_thumbnails(info)
         title = info.get("title")
         channel = info.get("channel") or info.get("uploader")
@@ -155,10 +156,10 @@ class DetailWorker:
                 "update catalog_items set height=coalesce(?, height), size=coalesce(?, size), duration=coalesce(?, duration), "
                 "title=coalesce(?, title), channel=coalesce(?, channel), thumb_url=coalesce(?, thumb_url), thumb_alts=coalesce(?, thumb_alts), "
                 "search=?, detail_state='done', detail_error=null, updated_at=? "
-                "where id=? and detail_state='pending' and state in ('new','queued')",
+                "where id=? and detail_state=? and state in ('new','queued')",
                 (ytdlp.best_height(info), ytdlp.size_estimate(info), info.get("duration"), title, channel, urls[0] if urls else None,
                  json.dumps(urls[1:1 + catalog.THUMB_ALTS_MAX]) if len(urls) > 1 else None,
-                 catalog.norm(f"{title or item['title'] or ''} {channel or item['channel'] or ''}"), time.time(), item["id"])).rowcount
+                 catalog.norm(f"{title or item['title'] or ''} {channel or item['channel'] or ''}"), time.time(), item["id"], expect)).rowcount
         if n and urls and urls[0] != item.get("thumb_url"):      # jiná (obvykle lepší) miniatura než ze seznamu: nahradit
             name = await asyncio.to_thread(download_thumb, self.folder(), item["id"], urls)
             if name:
@@ -177,6 +178,8 @@ class DetailWorker:
             self._back_off(host, BACKOFF_FIRST, "omezení nebo výpadek webu: " + msg[:120])
         elif kind == "cookies" or "not a bot" in low or "confirm you" in low:
             self._back_off(host, BACKOFF_LOGIN, "web vyžaduje ověření nebo cookies: " + msg[:120])
+        elif kind == "unsupported" and self.st.settings.get("catalog_slow_browser"):
+            self._finish(item, "slow", None)                        # yt-dlp web nezná: podrobnosti později prohlížečem
         elif kind == "removed" or "private video" in low:
             self._finish(item, "failed", msg[:300], item_state="gone" if item.get("state") == "new" else None)
         else:                                                       # geo, drm, přihlášení k videu, přímý přenos, neznámé: jen u videa
@@ -187,6 +190,55 @@ class DetailWorker:
         delay = min(BACKOFF_MAX, max(first, (prev["delay"] * 2) if prev else first))
         self.backoff[host] = {"until": time.monotonic() + delay, "delay": delay, "reason": reason}
         log.warning("katalog: %s odloženo o %d s (%s)", host, delay, reason)
+
+    # --- pomalá vrstva: prohlížeč --------------------------------------------------------------------
+    def fast_work_left(self) -> bool:
+        """Čeká ještě rychlá práce (podrobnosti přes yt-dlp) na webu, který není odložený? Pak pomalá vrstva počká."""
+        now = time.monotonic()
+        away = sorted(h for h, b in self.backoff.items() if b["until"] > now)
+        sql = "select 1 from catalog_items where detail_state='pending' and state in ('new','queued')"
+        if away:
+            sql += " and coalesce(host,'') not in (%s)" % ",".join("?" * len(away))
+        return bool(self.db.query(sql + " limit 1", away))
+
+    def pick_slow(self) -> dict | None:
+        rows = self.db.query("select * from catalog_items where detail_state='slow' and state in ('new','queued') order by source_id, pos limit 1")
+        return rows[0] if rows else None
+
+    async def process_slow(self, item: dict) -> None:
+        """Jedno video prohlížečem: najde přehrávaný stream, rozlišení a miniaturu (stahování samo nic nestahuje)."""
+        host = item.get("host") or ""
+        try:
+            sn = await sniffer.sniff(item["url"], detail_ctx(self.st))
+        except ResolveError as e:
+            if e.kind in ("network", "engine"):
+                self._back_off(host, BACKOFF_FIRST, f"prohlížeč: {e}"[:140])
+                self._finish_slow(item, "slow", None)              # zůstane čekat
+            else:
+                self._finish_slow(item, "failed", f"{e.kind}: {e}"[:300])
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            log.exception("katalog: pomalé podrobnosti %s", item["id"])
+            self._finish_slow(item, "failed", f"{type(e).__name__}: {e}"[:300])
+        else:
+            cands = sn.get("candidates") or []
+            if not cands:
+                msg = "video je chráněné (DRM)" if sn.get("drm") else "na stránce se nepodařilo najít přehrávané video"
+                self._finish_slow(item, "failed", msg)
+            else:
+                heights = [c.get("height") for c in cands if c.get("height")]
+                info = {"title": item.get("title") or sn.get("title") or None, "thumbnail": sn.get("thumbnail"),
+                        "height": max(heights) if heights else None,
+                        "duration": next((c["duration"] for c in cands if c.get("duration")), None)}
+                await self._store(item, info, expect="slow")
+        finally:
+            self.next_at[host] = time.monotonic() + self.gap()
+
+    def _finish_slow(self, item: dict, state: str, error: str | None) -> None:
+        with self.db.conn() as c:
+            c.execute("update catalog_items set detail_state=?, detail_error=?, updated_at=? where id=? and detail_state='slow'",
+                      (state, error, time.time(), item["id"]))
 
     # --- smyčky -----------------------------------------------------------------------------------
     async def run(self, stop: asyncio.Event) -> None:
@@ -203,6 +255,15 @@ class DetailWorker:
                 if item is not None:
                     self.active[item.get("host") or ""] = asyncio.create_task(self.process(item))
                     continue
+                if (not self.active and not self.slow_task and self.allowed_now() and not self.listing_busy()
+                        and self.st.settings.get("catalog_slow_browser") and not await asyncio.to_thread(self.fast_work_left)):
+                    slow = await asyncio.to_thread(self.pick_slow)           # jeden prohlížeč najednou, až po rychlé práci
+                    if slow is not None and (slow.get("host") or "") not in self.excluded_hosts():
+                        self.slow_task = asyncio.create_task(self.process_slow(slow))
+                if self.slow_task is not None and self.slow_task.done():
+                    t, self.slow_task = self.slow_task, None
+                    if not t.cancelled() and t.exception():
+                        log.error("katalog: pomalé podrobnosti: %s", t.exception())
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001
@@ -210,9 +271,10 @@ class DetailWorker:
                 await _sleep(stop, 5)
                 continue
             await _sleep(stop, 0.5)
-        for t in self.active.values():
+        tasks = [*self.active.values(), *([self.slow_task] if self.slow_task else [])]
+        for t in tasks:
             t.cancel()
-        await asyncio.gather(*self.active.values(), return_exceptions=True)
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _thumb_one(self, row: dict) -> None:
         try:
@@ -246,11 +308,11 @@ class DetailWorker:
     # --- stav pro GUI -----------------------------------------------------------------------------
     def status(self) -> dict:
         r = self.db.query(
-            "select sum(detail_state='pending') pending, sum(detail_state='done') done, sum(detail_state='failed') failed, "
+            "select sum(detail_state='pending') pending, sum(detail_state='slow') slow, sum(detail_state='done') done, sum(detail_state='failed') failed, "
             "sum(thumb_file is null and thumb_url is not null) thumbs_pending, sum(thumb_file = '') thumbs_failed "
             "from catalog_items where state in ('new','queued')")[0]
         now = time.monotonic()
-        return {"pending": r["pending"] or 0, "done": r["done"] or 0, "failed": r["failed"] or 0,
+        return {"pending": r["pending"] or 0, "slow": r["slow"] or 0, "done": r["done"] or 0, "failed": r["failed"] or 0,
                 "thumbs_pending": r["thumbs_pending"] or 0, "thumbs_failed": r["thumbs_failed"] or 0,
                 "paused": self.paused(), "waiting_for_lists": self.listing_busy(), "active_hosts": sorted(self.active),
                 "backoff": [{"host": h, "seconds": int(b["until"] - now), "reason": b["reason"]} for h, b in sorted(self.backoff.items())

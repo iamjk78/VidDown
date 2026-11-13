@@ -104,6 +104,13 @@ Menu **Katalog** slouží k třídění videí před stahováním: přidáte zdr
 - **Přidání zdrojů:** „Přidat zdroje“ – adresy po jedné na řádek, vložené najednou, nebo ze souboru `.txt` (řádky začínající `#` se
   přeskočí). Adresa, která už v katalogu je, se načte znovu celá. Zdroje se zjišťují ve vlastní frontě, kterou vidíte nahoře
   (stav, počet videí, průběh podrobností); stahování to neblokuje.
+- **Weby, které yt-dlp nezná** (typ zdroje „Stránka“): aplikace na stránce najde opakující se odkazy na videa a další stránky seznamu
+  (stejně jako u odběru „stránka s videi“). Nejdřív se zkusí **rychle z běžného HTML**; když seznam v HTML není (vykresluje ho
+  JavaScript), stránku vykreslí Chromium. Videa se ukládají do složky podle názvu stránky. Podrobnosti takových videí se zjišťují
+  **až nakonec, prohlížečem, po jednom** (u karty „podrobnosti nezjištěny“, když video nejde najít). Prohlížeč jde vypnout
+  v Nastavení › Katalog („Pomalé weby zjišťovat prohlížečem“).
+- **Automatické hledání nových videí:** přepínač **Hledat nová videa automaticky** nahoře v Katalogu a interval (6 h až týden).
+  Zdroje se samy znovu prohlédnou a nabídnou jen dosud nenabídnutá videa; řídí se časovým rozvrhem (rozsah „katalog“).
 - **Podrobnosti** (rozlišení, velikost, délka, větší miniatura) se doplňují postupně, po jednom videu na web s nastavitelnou pauzou
   (Nastavení › Katalog), a až po dokončení seznamů všech zdrojů. U každého zdroje jde zdroj **Obnovit** (najde jen nová videa),
   **Načíst znovu vše** (nabídne znovu i odmítnutá a stažená) a **Odebrat** (smaže i paměť o jeho videích).

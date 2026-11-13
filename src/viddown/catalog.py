@@ -21,7 +21,8 @@ from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 from . import schedule
-from .resolvers import ResolveError, ytdlp
+from . import pagelist
+from .resolvers import ResolveError, sniffer, ytdlp
 from .util import domain, sanitize_filename, url_list_name, youtube_channel_base
 
 log = logging.getLogger("viddown.catalog")
@@ -218,6 +219,52 @@ def _dedupe(entries: list[dict]) -> list[dict]:
     return out
 
 
+PAGE_MAX_PAGES = 200
+
+
+async def list_page(url: str, ctx, cause: Exception | None = None) -> dict:
+    """Zdroj typu „stránka“ (web, který yt-dlp nezná): díly se najdou jako opakující se odkazy a další stránky seznamu podle
+    parametru stránkování. Nejdřív rychle z běžného HTML; když se tak seznam nenajde a je zapnutý prohlížeč
+    (`catalog_slow_browser`), stránka se vykreslí v Chromiu (pomalá vrstva). Vyhodí ResolveError."""
+    slow = bool(ctx.settings.get("catalog_slow_browser"))
+    rendered = False
+    try:
+        text, final = await pagelist.fetch(url, ctx.settings)
+        try:
+            cfg = pagelist.detect(text, final)
+        except pagelist.PageError:
+            if not slow:
+                raise
+            text, final = await sniffer.render_html(final, ctx)
+            rendered = True
+            cfg = pagelist.detect(text, final)
+    except pagelist.PageError as e:
+        why = f"web není podporovaný a seznam videí se na stránce nenašel ({e})"
+        raise ResolveError(why + ("" if slow else "; zapněte v Nastavení › Katalog prohlížeč pro pomalé weby"), "unsupported") from cause or e
+    items = [dict(i) for i in cfg["items"]]
+    seen = {i["url"] for i in items}
+    complete = True
+    if cfg.get("page_param") or cfg.get("page_template"):
+        for k in range(1, PAGE_MAX_PAGES):
+            try:
+                await asyncio.sleep(1.0)                                   # šetrně k webu
+                nxt = pagelist.page_url(url, cfg, k)
+                text, final = await (sniffer.render_html(nxt, ctx) if rendered else pagelist.fetch(nxt, ctx.settings))
+            except (pagelist.PageError, ResolveError) as e:
+                complete = complete and any(f"HTTP {c}" in str(e) for c in (404, 410))     # za poslední stránkou vrací mnoho webů 404
+                break
+            fresh = [i for i in pagelist.items_from(text, final, cfg["item_regex"]) if i["url"] not in seen]
+            if not fresh:
+                break
+            seen.update(i["url"] for i in fresh)
+            items += fresh
+        else:
+            complete = False
+    entries = [{"key": i["url"], "id": None, "url": i["url"], "title": i.get("title") or None, "channel": None, "duration": None,
+                "thumb_url": None, "thumb_alts": []} for i in items]
+    return {"kind": "page", "title": cfg.get("title") or domain(url), "thumb_url": None, "entries": entries, "complete": complete}
+
+
 async def list_source(url: str, ctx) -> dict:
     """Seznam videí zdroje (bez stahování): {kind, title, thumb_url, entries[], complete}. Vyhodí ResolveError.
     `complete` je False, když se u kanálu nepodařilo načíst některou záložku (pak se nepovažuje za úplný seznam)."""
@@ -238,7 +285,12 @@ async def list_source(url: str, ctx) -> dict:
             raise err or ResolveError("kanál je prázdný", "unsupported")
         return {"kind": "channel", "title": title or domain(url), "thumb_url": thumb, "entries": _dedupe(entries), "complete": err is None}
 
-    info = await ytdlp.probe(url, ctx, timeout=LIST_TIMEOUT)
+    try:
+        info = await ytdlp.probe(url, ctx, timeout=LIST_TIMEOUT)
+    except ResolveError as e:
+        if e.kind != "unsupported":
+            raise
+        return await list_page(url, ctx, e)
     if info.get("_type") in ("playlist", "multi_video") or "entries" in info:
         entries = _dedupe(_flatten(info.get("entries")))
         if not entries:
@@ -331,7 +383,7 @@ def apply_listing(db, sid: int, listing: dict, mode: str, dl_keys: set[str], dl_
             gone = [(now, h["id"]) for k, h in existing.items() if h["state"] == "new" and k not in seen]
             c.executemany("update catalog_items set state='gone', updated_at=? where id=?", gone)
             missing = len(gone)
-        folder = sanitize_filename(title or "") if kind in ("channel", "playlist") and title else None
+        folder = sanitize_filename(title or "") if kind in ("channel", "playlist", "page") and title else None
         c.execute("update catalog_sources set kind=?, title=?, title_search=?, thumb_url=?, folder=?, status='done', error=null, "
                   "scan_mode=case when scan_mode=? then 'new' else scan_mode end, last_scan=? where id=?",
                   (kind, title, norm(title), listing.get("thumb_url"), folder or None, mode, now, sid))
@@ -550,6 +602,16 @@ def claim_source(db, manual_only: bool = False) -> dict | None:
         return {**dict(r), "status": "scanning"}
 
 
+def auto_refresh(db, hours: float, now: float | None = None) -> int:
+    """Automatické hledání nových videí: zdroje, které se naposledy zjišťovaly před víc než `hours` hodinami (a právě se
+    nezjišťují), se zařadí do fronty v režimu „jen nová“ jako automatické (`manual=0`, řídí je časový rozvrh).
+    Zdroj s chybou se zkusí znovu po stejném intervalu. Vrací počet zařazených zdrojů."""
+    now = time.time() if now is None else now
+    with db.conn() as c:
+        return c.execute("update catalog_sources set status='queued', scan_mode='new', manual=0 where status in ('done','error') "
+                         "and coalesce(last_scan, 0) < ?", (now - hours * 3600,)).rowcount
+
+
 def _fail(db, sid: int, msg: str) -> None:
     with db.conn() as c:
         c.execute("update catalog_sources set status='error', error=?, last_scan=? where id=?", (msg, time.time(), sid))
@@ -573,8 +635,7 @@ async def scan_one(st, src: dict) -> dict:
             c.execute("update catalog_sources set status='queued' where id=? and status='scanning'", (sid,))
         raise
     except ResolveError as e:
-        msg = "web není podporovaný (další weby přibudou v další etapě katalogu)" if e.kind == "unsupported" and "Unsupported URL" in str(e) else str(e)
-        _fail(db, sid, msg[:500])
+        _fail(db, sid, str(e)[:500])
     except Exception as e:  # noqa: BLE001
         log.exception("katalog: zdroj %s", sid)
         _fail(db, sid, f"{type(e).__name__}: {e}"[:500])
@@ -600,6 +661,8 @@ async def task(st, stop: asyncio.Event) -> None:
         try:
             await asyncio.to_thread(reconcile, st.db, thumbs_dir(st.data, st.settings))   # staženo / selhalo → stav položek v katalogu
             open_now = schedule.allowed(st.settings.all(), "catalog", db=st.db)           # mimo okno jen ručně zařazené zdroje
+            if open_now and st.settings.get("catalog_auto"):
+                await asyncio.to_thread(auto_refresh, st.db, float(st.settings.get("catalog_auto_hours") or 24))
             src = await asyncio.to_thread(claim_source, st.db, not open_now)
             if src is None:
                 await _sleep(stop, 3)

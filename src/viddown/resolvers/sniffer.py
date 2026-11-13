@@ -181,6 +181,53 @@ def parse_m3u8(text: str, base: str) -> dict:
     return res
 
 
+async def render_html(url: str, ctx: Ctx, scrolls: int = 6) -> tuple[str, str]:
+    """Načte stránku v headless Chromiu (včetně obsahu vykresleného JavaScriptem), postupně ji odroluje kvůli líně
+    načítaným seznamům a vrátí (HTML, konečná adresa). Slouží katalogu u webů, jejichž seznam videí není v běžném HTML."""
+    try:
+        from playwright.async_api import TimeoutError as PWTimeout
+        from playwright.async_api import async_playwright
+    except ImportError as e:
+        raise ResolveError(f"Playwright není nainstalován: {e}", "engine")
+    s = ctx.settings
+    timeout = float(s.get("sniff_timeout", 40))
+    async with async_playwright() as p:
+        kw = {"headless": True}
+        if s.get("proxy"):
+            kw["proxy"] = {"server": s["proxy"]}
+        try:
+            browser = await p.chromium.launch(**kw)
+        except Exception as e:  # noqa: BLE001
+            raise ResolveError(f"Chromium nelze spustit ({e}). Nainstalujte ho v Enginy.", "engine")
+        try:
+            context = await browser.new_context(user_agent=UA, viewport={"width": 1280, "height": 900}, ignore_https_errors=True, locale="cs-CZ")
+            if ctx.cookies_file:
+                await add_cookies(context, ctx.cookies_file)
+            page = await context.new_page()
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=timeout * 1000)
+            except PWTimeout:
+                pass
+            except Exception as e:  # noqa: BLE001
+                msg = str(e).splitlines()[0]
+                raise ResolveError(f"stránku nelze načíst: {msg}", classify_error(msg))
+            await page.wait_for_timeout(2000)
+            await _in_frames(page, CONSENT_JS)
+            last = 0
+            for _ in range(scrolls):
+                try:
+                    h = await page.evaluate("() => { window.scrollTo(0, document.body.scrollHeight); return document.body.scrollHeight; }")
+                except Exception:  # noqa: BLE001
+                    break
+                await page.wait_for_timeout(1000)
+                if h == last:
+                    break
+                last = h
+            return await page.content(), page.url
+        finally:
+            await browser.close()
+
+
 async def sniff(url: str, ctx: Ctx) -> dict:
     """Načte stránku a vrátí {title, thumbnail, candidates[], drm, headers}."""
     try:
