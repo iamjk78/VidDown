@@ -119,6 +119,42 @@ def queued(st, fake, status, error=None, n=1):
     return a, j
 
 
+def test_expanded_job_is_decided_by_its_children(st, fake):
+    a, j = queued(st, fake, "expanded")
+    assert catalog.reconcile(st.db) == {"done": 0, "back": 1}                         # rozbalilo se na nic: nezůstane viset
+    assert "bez videí" in catalog.query_items(st.db)["items"][0]["download_error"]
+    catalog.queue_items(st.db, st.runner, [a])
+    j2 = jobs(st)[-1]["id"]
+    st.db.update(j2, status="expanded")
+    kids = [st.db.add(f"https://example.com/k{i}", parent_id=j2) for i in range(2)]
+    st.db.update(kids[0], status="running")
+    st.db.update(kids[1], status="done")
+    assert catalog.reconcile(st.db) == {"done": 0, "back": 0}                         # potomek ještě běží
+    st.db.update(kids[0], status="done")
+    assert catalog.reconcile(st.db) == {"done": 1, "back": 0}
+
+
+def test_expanded_job_with_only_failed_children_returns_the_item(st, fake):
+    a, j = queued(st, fake, "expanded")
+    k = st.db.add("https://example.com/k", parent_id=j)
+    st.db.update(k, status="failed")
+    assert catalog.reconcile(st.db) == {"done": 0, "back": 1}
+    assert "nestáhlo" in catalog.query_items(st.db)["items"][0]["download_error"]
+
+
+def test_force_forgets_url_keyed_items_through_their_last_job(st, fake, data, monkeypatch):
+    (data / "archive.txt").write_text("generic abc123\nyoutube z\n", "utf-8")
+    load(st, fake, [{"id": None, "url": "https://web.example/dily/1", "title": "Díl", "ie_key": None}])
+    it = st.db.query("select * from catalog_items")[0]
+    assert it["key"].startswith("http")
+    with st.db.conn() as c:
+        c.execute("update catalog_items set downloaded_before=1 where id=?", (it["id"],))
+    old = st.db.add("https://web.example/dily/1")
+    st.db.update(old, status="done", info=json.dumps({"id": "abc123", "extractor_key": "Generic"}))
+    catalog.queue_items(st.db, st.runner, [it["id"]], force=True)
+    assert (data / "archive.txt").read_text() == "youtube z\n"
+
+
 @pytest.mark.parametrize("status", ["new", "probing", "queued", "running", "cancelling"])
 def test_active_jobs_keep_the_item_queued(st, fake, status):
     a, j = queued(st, fake, status)
@@ -149,13 +185,13 @@ def test_failed_cancelled_or_skipped_download_returns_the_item_with_a_note(st, f
     assert (row["state"], row["job_id"], row["detail_error"]) == ("new", None, expected)
     out = catalog.query_items(st.db)["items"][0]
     assert out["download_error"] == expected and out["state"] == "new"
-    catalog.queue_items(st.db, st.runner, [a])                                        # po novém zařazení poznámka zmizí
+    assert out["downloaded_before"] is (status == "skipped")                          # přeskočeno kvůli archivu: příště nabídnout „znovu“
+    catalog.queue_items(st.db, st.runner, [a], force=(status == "skipped"))          # po novém zařazení poznámka zmizí
     assert catalog.query_items(st.db)["items"][0]["download_error"] is None
 
 
 def test_job_removed_from_history_returns_the_item(st, fake):
     a, j = queued(st, fake, "failed")
-    st.db.query("select 1")
     with st.db.conn() as c:
         c.execute("delete from jobs where id=?", (j,))
     assert catalog.reconcile(st.db) == {"done": 0, "back": 1}
@@ -226,8 +262,10 @@ def test_api_download_action(rt, data, monkeypatch):
     first = c.get("/api/catalog/items", params={"state": "downloaded"}).json()["items"][0]
     r = c.post("/api/catalog/items/action", json={"action": "download", "ids": [first["id"]], "force": True}).json()
     assert r["queued"] == 1 and r["skipped_downloaded"] == 0
+    with rt.db.conn() as cx:
+        cx.execute("update catalog_items set state='new', job_id=null where id=?", (first["id"],))
     r = c.post("/api/catalog/items/action", json={"action": "download", "ids": [first["id"]], "force": "ano"}).json()     # jen pravé true
-    assert r["queued"] == 0 and r["skipped_state"] == 1
+    assert r["queued"] == 0 and r["skipped_downloaded"] == 1
     assert {x["source"] for x in rt.db.query("select source from jobs")} == {"catalog"}
     for bad in ({"action": "download"}, {"action": "download", "ids": "1"}, {"action": "download", "filter": 3}):
         assert c.post("/api/catalog/items/action", json=bad).status_code == 400

@@ -1303,6 +1303,7 @@ function catToggle(id, on) {
   catPaintSel();
 }
 async function catDownload(spec, force) {
+  if (CAT.busy) return;
   CAT.busy = true;
   const r = await act(() => api('/api/catalog/items/action', { method: 'POST', body: { action: 'download', ...spec, ...(force ? { force: true } : {}) } }));
   CAT.busy = false;
@@ -1324,6 +1325,7 @@ function catDownloadAsk(spec, n) {
   $('#catdlgo', m.el).onclick = () => { const f = $('#catforce', m.el).checked; m.close(); catDownload(spec, f); };
 }
 async function catRemove(spec, count) {
+  if (CAT.busy) return;
   CAT.busy = true;
   const r = await act(() => api('/api/catalog/items/action', { method: 'POST', body: { action: 'remove', ...spec } }),
     count > 1 ? T(`Odstraněno: ${count}`, `Removed: ${count}`) : null);

@@ -242,7 +242,8 @@ def test_auto_refresh_queues_only_old_idle_sources_as_automatic(pst):
         c.execute("update catalog_sources set status='scanning', last_scan=? where url like '%/4'", (now - 99 * 3600,))
     assert catalog.auto_refresh(pst.db, 24, now) == 2
     got = {r["url"][-1]: (r["status"], r["scan_mode"], r["manual"]) for r in pst.db.query("select * from catalog_sources")}
-    assert got["1"] == ("queued", "new", 0) and got["3"] == ("queued", "new", 0)         # automatické, jen nová videa
+    assert got["1"] == ("queued", "all", 0)                                             # nevyřízené „načíst znovu vše“ se nezmění na „jen nová“
+    assert got["3"] == ("queued", "new", 0)                                             # automatické, jen nová videa
     assert got["2"][0] == "done" and got["4"][0] == "scanning"                          # čerstvý a právě zjišťovaný zdroj se nechá
     assert catalog.auto_refresh(pst.db, 24, now) == 0                       # podruhé nic (už jsou ve frontě)
 
@@ -276,3 +277,65 @@ def test_task_auto_refreshes_only_inside_the_window_and_when_enabled(pst, fake, 
     assert calls == []
     asyncio.run(go({"catalog_auto": True, "catalog_auto_hours": 6}))
     assert calls and set(calls) == {6.0}
+
+
+def test_auto_refresh_does_not_retry_unsupported_sites(pst):
+    catalog.add_sources(pst.db, ["https://a.example/1", "https://a.example/2"])
+    with pst.db.conn() as c:
+        c.execute("update catalog_sources set status='error', last_scan=1, error='web není podporovaný a seznam videí se nenašel' where url like '%/1'")
+        c.execute("update catalog_sources set status='error', last_scan=1, error='stránka vrací chybu HTTP 503' where url like '%/2'")
+    assert catalog.auto_refresh(pst.db, 24) == 1
+    assert pst.db.query("select status from catalog_sources where url like '%/2'")[0]["status"] == "queued"
+
+
+# ------------------------------------------------------------ úplnost seznamu stránky (nález review)
+def test_page_without_paging_is_incomplete_so_older_videos_are_not_marked_gone(pst, fake, web):
+    web.pages[BASE] = page_html(["a", "b", "c"])
+    add_page(pst, fake)
+    web.pages[BASE] = page_html(["b", "c", "d"])                                       # „a“ vypadl z posledních dílů
+    with pst.db.conn() as c:
+        c.execute("update catalog_sources set status='queued'")
+    scan(pst, BASE)
+    assert {r["key"][-1]: r["state"] for r in pst.db.query("select key, state from catalog_items")} == {"a": "new", "b": "new", "c": "new", "d": "new"}
+
+
+def test_empty_next_page_is_incomplete_but_seen_only_page_is_the_end(pst, fake, web):
+    web.pages[BASE] = page_html(["a", "b"], pager=(0, 1))
+    web.pages[f"{BASE}?pg=1"] = "<html><body>Potvrďte, že nejste robot</body></html>"      # měkká chyba: žádný díl
+    add_page(pst, fake)
+    web.pages[BASE] = page_html(["a", "b"], pager=(0, 1))
+    web.pages[f"{BASE}?pg=1"] = page_html(["c", "d"], pager=(0, 1, 2))
+    web.pages[f"{BASE}?pg=2"] = page_html(["c", "d"], pager=(0, 1, 2))                  # jen už známé: přirozený konec
+    with pst.db.conn() as c:
+        c.execute("update catalog_sources set status='queued'")
+    scan(pst, BASE)
+    assert pst.db.query("select count(*) n from catalog_items where state='new'")[0]["n"] == 4
+
+
+def test_page_fetch_error_is_a_network_error_not_an_unsupported_site(pst, fake, web):
+    web.pages[BASE] = pagelist.PageError("stránka vrací chybu HTTP 503")
+    add_page(pst, fake)
+    err = pst.db.query("select error from catalog_sources")[0]["error"]
+    assert "503" in err and "není podporovaný" not in err
+
+
+# ------------------------------------------------------------ pomalá vrstva (nálezy review)
+def test_slow_pick_skips_backed_off_hosts_and_browser_off_drops_slow_items(st_, fake, info, sniff):
+    make_page_items(st_, fake, 2)
+    with st_.db.conn() as c:
+        c.execute("update catalog_items set detail_state='slow'")
+        c.execute("update catalog_items set host='other.example' where pos=1")
+    w = cd.DetailWorker(st_)
+    assert w.pick_slow(set())["pos"] == 0
+    assert w.pick_slow({"web.example"})["host"] == "other.example"                       # odložený web neblokuje ostatní
+    assert w.pick_slow({"web.example", "other.example"}) is None
+    assert w.drop_slow() == 2
+    assert {r["detail_state"] for r in st_.db.query("select detail_state from catalog_items")} == {"failed"}
+    assert cd.retry_failed(st_.db)["details"] == 2                                       # po zapnutí prohlížeče jde vrátit do fronty
+
+
+def test_missing_browser_engine_fails_the_item_instead_of_looping(st_, fake, info, sniff):
+    make_page_items(st_, fake, 1)
+    info.answers["https://web.example/dily/0"] = ResolveError("Unsupported URL", "unsupported")
+    sniff.answers["https://web.example/dily/0"] = ResolveError("Chromium nelze spustit", "engine")
+    asyncio.run(run_until(st_, lambda: states(st_)["https://web.example/dily/0"][0] == "failed"))

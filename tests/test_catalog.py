@@ -137,7 +137,11 @@ def test_scan_single_video_has_details_and_no_folder(st, fake, monkeypatch):
     assert (it["key"], it["height"], it["size"], it["detail_state"], it["thumb_url"]) == ("fiktivni q1", 1080, 123456, "done", "https://img/x.jpg")
 
 
-def test_scan_errors_are_stored_and_source_stays_for_retry(st, fake):
+def test_scan_errors_are_stored_and_source_stays_for_retry(st, fake, monkeypatch):
+    async def no_list(url, settings=None, timeout=30):
+        return "<html><body>nic</body></html>", url
+    monkeypatch.setattr(catalog.pagelist, "fetch", no_list)
+    st.runner.ctx = lambda: SimpleNamespace(settings={"channel_tabs": ["videos"], "catalog_slow_browser": False})
     fake["https://a.example/1"] = ResolveError("ERROR: Unsupported URL: https://a.example/1", "unsupported")
     fake["https://a.example/2"] = playlist([])
     fake["https://a.example/3"] = RuntimeError("boom")

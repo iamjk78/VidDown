@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import re
+import threading
 import time
 import unicodedata
 from pathlib import Path
@@ -220,6 +221,7 @@ def _dedupe(entries: list[dict]) -> list[dict]:
 
 
 PAGE_MAX_PAGES = 200
+PAGE_TIMEOUT = 1800           # celé zjištění zdroje typu „stránka“ (s)
 
 
 async def list_page(url: str, ctx, cause: Exception | None = None) -> dict:
@@ -229,7 +231,10 @@ async def list_page(url: str, ctx, cause: Exception | None = None) -> dict:
     slow = bool(ctx.settings.get("catalog_slow_browser"))
     rendered = False
     try:
-        text, final = await pagelist.fetch(url, ctx.settings)
+        try:
+            text, final = await pagelist.fetch(url, ctx.settings)
+        except pagelist.PageError as e:                                 # výpadek, 403, 5xx: není to „nepodporovaný web“
+            raise ResolveError(str(e), "network") from e
         try:
             cfg = pagelist.detect(text, final)
         except pagelist.PageError:
@@ -253,13 +258,17 @@ async def list_page(url: str, ctx, cause: Exception | None = None) -> dict:
             except (pagelist.PageError, ResolveError) as e:
                 complete = complete and any(f"HTTP {c}" in str(e) for c in (404, 410))     # za poslední stránkou vrací mnoho webů 404
                 break
-            fresh = [i for i in pagelist.items_from(text, final, cfg["item_regex"]) if i["url"] not in seen]
+            got = pagelist.items_from(text, final, cfg["item_regex"])
+            fresh = [i for i in got if i["url"] not in seen]
             if not fresh:
+                complete = complete and bool(got)                       # stránka bez jediného dílu (captcha, prázdný render) = neúplné
                 break
             seen.update(i["url"] for i in fresh)
             items += fresh
         else:
             complete = False
+    if not (cfg.get("page_param") or cfg.get("page_template")):
+        complete = False                                                # bez stránkování nevíme, zda seznam nekončí „posledními díly“
     entries = [{"key": i["url"], "id": None, "url": i["url"], "title": i.get("title") or None, "channel": None, "duration": None,
                 "thumb_url": None, "thumb_alts": []} for i in items]
     return {"kind": "page", "title": cfg.get("title") or domain(url), "thumb_url": None, "entries": entries, "complete": complete}
@@ -290,7 +299,10 @@ async def list_source(url: str, ctx) -> dict:
     except ResolveError as e:
         if e.kind != "unsupported":
             raise
-        return await list_page(url, ctx, e)
+        try:
+            return await asyncio.wait_for(list_page(url, ctx, e), PAGE_TIMEOUT)
+        except asyncio.TimeoutError:
+            raise ResolveError("načtení stránek seznamu trvá příliš dlouho", "network") from None
     if info.get("_type") in ("playlist", "multi_video") or "entries" in info:
         entries = _dedupe(_flatten(info.get("entries")))
         if not entries:
@@ -499,7 +511,25 @@ def remove_items(db, ids: list[int], folder: Path | None = None) -> dict:
     return {"removed": removed, "skipped": len(ids) - removed}
 
 
+def _forget_job(db, r: dict) -> dict | None:
+    """Popis videa pro vyřazení z archivu yt-dlp: z klíče položky („extraktor id“); u položek s klíčem-adresou (zdroje „Stránka“)
+    z poslední úlohy se stejnou adresou, která video stáhla nebo ho přeskočila."""
+    ext, _, vid = (r["key"] or "").partition(" ")
+    if vid and not r["key"].startswith("http"):
+        return {"url": r["url"], "info": json.dumps({"id": vid, "extractor_key": ext})}
+    j = db.query("select url, info from jobs where url=? and status in ('done','skipped') order by id desc limit 1", (r["url"],))
+    return {"url": j[0]["url"], "info": j[0]["info"]} if j else {"url": r["url"], "info": None}
+
+
+_QUEUE_LOCK = threading.Lock()
+
+
 def queue_items(db, runner, ids: list[int], force: bool = False) -> dict:
+    with _QUEUE_LOCK:                                                   # dvojklik / souběžné požadavky nesmí zařadit totéž dvakrát
+        return _queue_items(db, runner, ids, force)
+
+
+def _queue_items(db, runner, ids: list[int], force: bool = False) -> dict:
     """Zařadí vybrané položky (stav `new`) do fronty stahování, do složky s názvem zdroje (kanál nebo playlist; u jednotlivého
     videa bez složky, nezávisle na nastavení „samostatná složka“). Dříve stažené se bez `force` přeskočí; s `force` se
     nejdřív vyřadí z archivu yt-dlp, aby se stáhly znovu. Adresa, která už ve frontě je, se jen propojí s položkou."""
@@ -510,7 +540,7 @@ def queue_items(db, runner, ids: list[int], force: bool = False) -> dict:
         for r in db.query(f"select i.*, s.folder as source_folder from catalog_items i join catalog_sources s on s.id=i.source_id "
                           f"where i.id in ({','.join('?' * len(chunk))})", chunk):
             found[r["id"]] = r
-    todo, forget = [], []
+    todo = []
     for i in ids:
         r = found.get(i)
         if r is None or r["state"] != "new":
@@ -519,12 +549,11 @@ def queue_items(db, runner, ids: list[int], force: bool = False) -> dict:
             res["skipped_downloaded"] += 1
         else:
             todo.append(r)
-            ext, _, vid = (r["key"] or "").partition(" ")
-            if r["downloaded_before"] and vid and not r["key"].startswith("http"):
-                forget.append({"url": r["url"], "info": json.dumps({"id": vid, "extractor_key": ext})})
-    if forget:
-        runner.archive_forget_many(forget)
     for r in todo:
+        if force:                                                       # vynucené stažení: nejdřív z archivu, jinak by ho yt-dlp přeskočil
+            fj = _forget_job(db, r)
+            if fj:
+                runner.archive_forget_many([fj])
         kw = {"subdir": r["source_folder"]} if r["source_folder"] else {}
         jid, new = runner.add(r["url"], source="catalog", auto_confirm=True, catalog_item_id=r["id"], **kw)
         with db.conn() as c:
@@ -538,10 +567,22 @@ def reconcile(db, folder: Path | None = None) -> dict:
     """Srovná položky ve frontě s úlohami: staženo → z katalogu zmizí (zdroj si ji pamatuje, miniatura se smaže);
     selhalo, zrušeno, přeskočeno nebo úloha zmizela → položka se vrátí mezi nová s poznámkou."""
     done = back = 0
-    rows = db.query("select i.id, i.thumb_file, j.status js, j.error je from catalog_items i left join jobs j on j.id=i.job_id where i.state='queued'")
+    rows = db.query("select i.id, i.job_id, i.thumb_file, j.status js, j.error je from catalog_items i left join jobs j on j.id=i.job_id where i.state='queued'")
     for r in rows:
         js = r["js"]
-        if js in ACTIVE_JOB:
+        if js == "expanded":                                            # adresa se rozbalila jako playlist: rozhodují potomci
+            kids = [k["status"] for k in db.query("select status from jobs where parent_id=?", (r["job_id"],))]
+            if not kids or any(k in ACTIVE_JOB for k in kids):
+                if kids:
+                    continue
+                js = "failed"
+                r = {**r, "je": "adresa se rozbalila na seznam bez videí"}
+            elif "done" in kids:
+                js = "done"
+            else:
+                js = "failed"
+                r = {**r, "je": "žádné video ze seznamu se nestáhlo"}
+        elif js in ACTIVE_JOB:
             continue
         now = time.time()
         if js == "done":
@@ -550,6 +591,9 @@ def reconcile(db, folder: Path | None = None) -> dict:
             remove_thumb(folder, r["thumb_file"])
             done += 1
             continue
+        if js == "skipped" and "archiv" in (r["je"] or "").lower():       # stažené jinudy: příště nabídnout „stáhnout znovu“
+            with db.conn() as c:
+                c.execute("update catalog_items set downloaded_before=1 where id=?", (r["id"],))
         note = {"failed": f"{DL_NOTE} selhalo: {(r['je'] or '').strip()}", "cancelled": f"{DL_NOTE} bylo zrušeno",
                 "skipped": f"{DL_NOTE} přeskočeno: {(r['je'] or '').strip()}", None: f"{DL_NOTE}: úloha už není v historii"}.get(js, f"{DL_NOTE}: {js}")
         with db.conn() as c:
@@ -608,8 +652,9 @@ def auto_refresh(db, hours: float, now: float | None = None) -> int:
     Zdroj s chybou se zkusí znovu po stejném intervalu. Vrací počet zařazených zdrojů."""
     now = time.time() if now is None else now
     with db.conn() as c:
-        return c.execute("update catalog_sources set status='queued', scan_mode='new', manual=0 where status in ('done','error') "
-                         "and coalesce(last_scan, 0) < ?", (now - hours * 3600,)).rowcount
+        return c.execute("update catalog_sources set status='queued', manual=0 where status in ('done','error') "
+                         "and coalesce(last_scan, 0) < ? and not (status='error' and coalesce(error,'') like 'web není podporovaný%')",
+                         (now - hours * 3600,)).rowcount
 
 
 def _fail(db, sid: int, msg: str) -> None:
@@ -657,9 +702,28 @@ async def task(st, stop: asyncio.Event) -> None:
             c.execute("update catalog_sources set status='queued' where status='scanning'")    # po restartu pokračovat
     except Exception:  # noqa: BLE001
         log.exception("katalog: obnovení fronty")
+    rec = asyncio.create_task(_reconcile_loop(st, stop))      # stav položek se srovnává i během dlouhého zjišťování zdroje
+    try:
+        await _task_loop(st, stop)
+    finally:
+        rec.cancel()
+        await asyncio.gather(rec, return_exceptions=True)
+
+
+async def _reconcile_loop(st, stop: asyncio.Event) -> None:
     while not stop.is_set():
         try:
             await asyncio.to_thread(reconcile, st.db, thumbs_dir(st.data, st.settings))   # staženo / selhalo → stav položek v katalogu
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            log.exception("katalog: srovnání stavu položek")
+        await _sleep(stop, 3)
+
+
+async def _task_loop(st, stop: asyncio.Event) -> None:
+    while not stop.is_set():
+        try:
             open_now = schedule.allowed(st.settings.all(), "catalog", db=st.db)           # mimo okno jen ručně zařazené zdroje
             if open_now and st.settings.get("catalog_auto"):
                 await asyncio.to_thread(auto_refresh, st.db, float(st.settings.get("catalog_auto_hours") or 24))

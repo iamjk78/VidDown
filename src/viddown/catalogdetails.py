@@ -201,9 +201,22 @@ class DetailWorker:
             sql += " and coalesce(host,'') not in (%s)" % ",".join("?" * len(away))
         return bool(self.db.query(sql + " limit 1", away))
 
-    def pick_slow(self) -> dict | None:
-        rows = self.db.query("select * from catalog_items where detail_state='slow' and state in ('new','queued') order by source_id, pos limit 1")
+    def pick_slow(self, excluded: set[str] | None = None) -> dict | None:
+        """Další video pro prohlížeč; odložený nebo právě vychlazovaný web se přeskočí (neblokuje ostatní)."""
+        excluded = self.excluded_hosts() if excluded is None else excluded
+        sql = "select * from catalog_items where detail_state='slow' and state in ('new','queued')"
+        args: list = []
+        if excluded:
+            sql += " and coalesce(host,'') not in (%s)" % ",".join("?" * len(excluded))
+            args = sorted(excluded)
+        rows = self.db.query(sql + " order by source_id, pos limit 1", args)
         return rows[0] if rows else None
+
+    def drop_slow(self) -> int:
+        """Prohlížeč je vypnutý: čekající „pomalé“ položky se označí chybou (po zapnutí je vrátí „Zkusit znovu neúspěšné“)."""
+        with self.db.conn() as c:
+            return c.execute("update catalog_items set detail_state='failed', detail_error='vyžaduje prohlížeč (vypnuto v Nastavení › Katalog)', "
+                             "updated_at=? where detail_state='slow'", (time.time(),)).rowcount
 
     async def process_slow(self, item: dict) -> None:
         """Jedno video prohlížečem: najde přehrávaný stream, rozlišení a miniaturu (stahování samo nic nestahuje)."""
@@ -211,7 +224,7 @@ class DetailWorker:
         try:
             sn = await sniffer.sniff(item["url"], detail_ctx(self.st))
         except ResolveError as e:
-            if e.kind in ("network", "engine"):
+            if e.kind == "network":
                 self._back_off(host, BACKOFF_FIRST, f"prohlížeč: {e}"[:140])
                 self._finish_slow(item, "slow", None)              # zůstane čekat
             else:
@@ -257,9 +270,11 @@ class DetailWorker:
                     continue
                 if (not self.active and not self.slow_task and self.allowed_now() and not self.listing_busy()
                         and self.st.settings.get("catalog_slow_browser") and not await asyncio.to_thread(self.fast_work_left)):
-                    slow = await asyncio.to_thread(self.pick_slow)           # jeden prohlížeč najednou, až po rychlé práci
-                    if slow is not None and (slow.get("host") or "") not in self.excluded_hosts():
+                    slow = await asyncio.to_thread(self.pick_slow, self.excluded_hosts())   # jeden prohlížeč najednou, až po rychlé práci
+                    if slow is not None:
                         self.slow_task = asyncio.create_task(self.process_slow(slow))
+                if not self.st.settings.get("catalog_slow_browser"):
+                    await asyncio.to_thread(self.drop_slow)
                 if self.slow_task is not None and self.slow_task.done():
                     t, self.slow_task = self.slow_task, None
                     if not t.cancelled() and t.exception():
