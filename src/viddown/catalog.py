@@ -32,6 +32,8 @@ MAX_QUERY_TOKENS = 10
 MAX_QUERY_CHARS = 200
 MAX_OFFSET = 10_000_000
 MAX_SELECT = 200_000
+DL_NOTE = "stahování"                 # poznámky o neúspěšném stažení začínají tímto slovem (ukládají se do detail_error)
+ACTIVE_JOB = ("new", "probing", "confirm", "queued", "running", "cancelling", "expanded")
 THUMB_ALTS_MAX = 9
 UNAVAILABLE_TITLES = ("[private video]", "[deleted video]")
 
@@ -445,13 +447,73 @@ def remove_items(db, ids: list[int], folder: Path | None = None) -> dict:
     return {"removed": removed, "skipped": len(ids) - removed}
 
 
+def queue_items(db, runner, ids: list[int], force: bool = False) -> dict:
+    """Zařadí vybrané položky (stav `new`) do fronty stahování, do složky s názvem zdroje (kanál nebo playlist; u jednotlivého
+    videa bez složky, nezávisle na nastavení „samostatná složka“). Dříve stažené se bez `force` přeskočí; s `force` se
+    nejdřív vyřadí z archivu yt-dlp, aby se stáhly znovu. Adresa, která už ve frontě je, se jen propojí s položkou."""
+    res = {"queued": 0, "linked": 0, "skipped_downloaded": 0, "skipped_state": 0}
+    found: dict[int, dict] = {}
+    for k in range(0, len(ids), 500):
+        chunk = ids[k:k + 500]
+        for r in db.query(f"select i.*, s.folder as source_folder from catalog_items i join catalog_sources s on s.id=i.source_id "
+                          f"where i.id in ({','.join('?' * len(chunk))})", chunk):
+            found[r["id"]] = r
+    todo, forget = [], []
+    for i in ids:
+        r = found.get(i)
+        if r is None or r["state"] != "new":
+            res["skipped_state"] += 1
+        elif r["downloaded_before"] and not force:
+            res["skipped_downloaded"] += 1
+        else:
+            todo.append(r)
+            ext, _, vid = (r["key"] or "").partition(" ")
+            if r["downloaded_before"] and vid and not r["key"].startswith("http"):
+                forget.append({"url": r["url"], "info": json.dumps({"id": vid, "extractor_key": ext})})
+    if forget:
+        runner.archive_forget_many(forget)
+    for r in todo:
+        kw = {"subdir": r["source_folder"]} if r["source_folder"] else {}
+        jid, new = runner.add(r["url"], source="catalog", auto_confirm=True, catalog_item_id=r["id"], **kw)
+        with db.conn() as c:
+            c.execute("update catalog_items set state='queued', job_id=?, detail_error=null, updated_at=? where id=? and state='new'",
+                      (jid, time.time(), r["id"]))
+        res["queued" if new else "linked"] += 1
+    return res
+
+
+def reconcile(db, folder: Path | None = None) -> dict:
+    """Srovná položky ve frontě s úlohami: staženo → z katalogu zmizí (zdroj si ji pamatuje, miniatura se smaže);
+    selhalo, zrušeno, přeskočeno nebo úloha zmizela → položka se vrátí mezi nová s poznámkou."""
+    done = back = 0
+    rows = db.query("select i.id, i.thumb_file, j.status js, j.error je from catalog_items i left join jobs j on j.id=i.job_id where i.state='queued'")
+    for r in rows:
+        js = r["js"]
+        if js in ACTIVE_JOB:
+            continue
+        now = time.time()
+        if js == "done":
+            with db.conn() as c:
+                c.execute("update catalog_items set state='done', thumb_file=null, detail_error=null, updated_at=? where id=? and state='queued'", (now, r["id"]))
+            remove_thumb(folder, r["thumb_file"])
+            done += 1
+            continue
+        note = {"failed": f"{DL_NOTE} selhalo: {(r['je'] or '').strip()}", "cancelled": f"{DL_NOTE} bylo zrušeno",
+                "skipped": f"{DL_NOTE} přeskočeno: {(r['je'] or '').strip()}", None: f"{DL_NOTE}: úloha už není v historii"}.get(js, f"{DL_NOTE}: {js}")
+        with db.conn() as c:
+            c.execute("update catalog_items set state='new', job_id=null, detail_error=?, updated_at=? where id=? and state='queued'", (note[:300], now, r["id"]))
+        back += 1
+    return {"done": done, "back": back}
+
+
 def item_out(r: dict) -> dict:
     return {"id": r["id"], "source_id": r["source_id"], "source_title": r.get("source_title"), "source_folder": r.get("source_folder"),
             "title": r["title"], "channel": r["channel"], "url": r["url"], "duration": r["duration"], "height": r["height"],
             "size": r["size"], "thumb_url": r["thumb_url"], "has_thumb": bool(r["thumb_file"]),
             "thumb": f"/api/catalog/thumb/{r['id']}?v={int(r['updated_at'] or 0)}" if r["thumb_file"] else None, "state": r["state"],
             "downloaded_before": bool(r["downloaded_before"]), "rejected_before": bool(r["rejected_before"]),
-            "detail_state": r["detail_state"], "detail_error": r["detail_error"], "job_id": r["job_id"]}
+            "detail_state": r["detail_state"], "detail_error": r["detail_error"], "job_id": r["job_id"],
+            "download_error": r["detail_error"] if (r["detail_error"] or "").startswith(DL_NOTE) else None}
 
 
 def sources_out(db) -> dict:
@@ -536,6 +598,7 @@ async def task(st, stop: asyncio.Event) -> None:
         log.exception("katalog: obnovení fronty")
     while not stop.is_set():
         try:
+            await asyncio.to_thread(reconcile, st.db, thumbs_dir(st.data, st.settings))   # staženo / selhalo → stav položek v katalogu
             open_now = schedule.allowed(st.settings.all(), "catalog", db=st.db)           # mimo okno jen ručně zařazené zdroje
             src = await asyncio.to_thread(claim_source, st.db, not open_now)
             if src is None:

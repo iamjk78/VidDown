@@ -99,7 +99,7 @@ def test_api_bulk_remove_by_ids_and_by_filter(client, fake, tmp_path):
     assert c.get("/api/catalog/items", params={"state": "gone"}).json()["total"] == 0
 
 
-@pytest.mark.parametrize("body", [[1], "x", {}, {"action": "download", "ids": [1]}, {"action": "remove"}, {"action": "remove", "ids": "1"},
+@pytest.mark.parametrize("body", [[1], "x", {}, {"action": "smazat", "ids": [1]}, {"action": "remove"}, {"action": "remove", "ids": "1"},
                                   {"action": "remove", "ids": [True]}, {"action": "remove", "filter": 5}, {"action": "remove", "ids": [2 ** 80]}])
 def test_api_action_rejects_bad_requests(client, body):
     c, s = client

@@ -627,18 +627,22 @@ def create_app(app_state) -> FastAPI:
 
     @app.post("/api/catalog/items/action")
     async def catalog_items_action(req: Request):
-        """Hromadná akce nad položkami: {action: "remove", ids: [...]} nebo {action, filter: {...}, exclude: [...]}."""
+        """Hromadná akce nad položkami: {action: "remove" | "download", ids: [...]} nebo {action, filter: {...}, exclude: [...]};
+        u „download“ navíc {force: true} (stáhnout znovu i dříve stažená)."""
         try:
             body = await req.json()
         except ValueError:
             raise HTTPException(400, "Neplatný požadavek.")
-        if not isinstance(body, dict) or body.get("action") not in ("remove",):
+        if not isinstance(body, dict) or body.get("action") not in ("remove", "download"):
             raise HTTPException(400, "Neznámá akce.")
         try:
             ids = await asyncio.to_thread(catalog.select_ids, S.db, body)
         except ValueError as e:
             raise HTTPException(400, f"Neplatný výběr: {e}")
-        res = await asyncio.to_thread(catalog.remove_items, S.db, ids, catalog.thumbs_dir(S.data, S.settings))
+        if body["action"] == "download":
+            res = await asyncio.to_thread(catalog.queue_items, S.db, S.runner, ids, body.get("force") is True)
+        else:
+            res = await asyncio.to_thread(catalog.remove_items, S.db, ids, catalog.thumbs_dir(S.data, S.settings))
         return {**res, "overview": await asyncio.to_thread(_overview)}
 
     @app.get("/api/catalog/thumb/{item_id}")

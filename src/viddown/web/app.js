@@ -1248,6 +1248,7 @@ function catCard(it) {
   const sel = catIsSel(it.id), h = it.height ? `${it.height}p` : '';
   const badges = [it.state === 'queued' ? `<span class="vbd q">${T('ve frontě', 'queued')}</span>` : '', it.downloaded_before ? `<span class="vbd d">${T('Staženo dříve', 'Downloaded before')}</span>` : '',
     it.rejected_before ? `<span class="vbd r">${T('Dříve odmítnuté', 'Rejected before')}</span>` : '', it.state === 'gone' ? `<span class="vbd g">${T('Nedostupné', 'Unavailable')}</span>` : '',
+    it.download_error ? `<span class="vbd g" title="${esc(it.download_error)}">${T('stahování selhalo', 'download failed')}</span>` : '',
     it.detail_state === 'failed' && it.state !== 'gone' ? `<span class="vbd g" title="${esc(it.detail_error || '')}">${T('podrobnosti nezjištěny', 'details unavailable')}</span>` : ''].join('');
   const meta = it.size ? fmtBytes(it.size) : (it.detail_state === 'pending' ? T('zjišťuji…', 'checking…') : '—');
   return `<div class="vcard ${sel ? 'on' : ''}" data-cid="${it.id}"><div class="vth">${it.thumb ? `<img loading="lazy" src="${esc(it.thumb)}" alt="" onerror="this.remove()">` : ''}<div class="vph">${ic('film', 28)}</div>
@@ -1255,7 +1256,7 @@ function catCard(it) {
     <div class="vt"><a href="${esc(it.url)}" target="_blank" rel="noopener" title="${esc(it.title || it.url)}">${esc(it.title || it.url)}</a></div>
     <div class="vm ell" title="${esc(it.source_title || '')}">${esc(it.source_title || '')}${it.channel && it.channel !== it.source_title ? ' · ' + esc(it.channel) : ''}</div>
     <div class="vm2"><span>${meta}</span>${badges}</div>
-    <div class="vact"><button class="btn sm primary" data-cact="download" disabled title="${T('Stahování z katalogu přibude v další etapě', 'Downloading from the catalog comes in the next stage')}">${ic('download', 13)} ${T('Stáhnout', 'Download')}</button>
+    <div class="vact"><button class="btn sm primary" data-cact="download" data-id="${it.id}" data-dl="${it.downloaded_before ? 1 : 0}" ${it.state === 'new' ? '' : 'disabled'}>${ic('download', 13)} ${T('Stáhnout', 'Download')}</button>
       <button class="btn sm" data-cact="remove" data-id="${it.id}" ${it.state === 'queued' ? 'disabled' : ''} title="${T('Odstranit z katalogu', 'Remove from the catalog')}">${ic('trash', 13)} ${T('Odstranit', 'Remove')}</button></div></div>`;
 }
 function catPaintGrid() {
@@ -1271,7 +1272,7 @@ function catPaintSel() {
     ${d.total > shown ? `<button class="btn sm" data-cs="all">${T('Vybrat všech vyhovujících', 'Select all matching')} (${d.total})</button>` : ''}
     <button class="btn sm ghost" data-cs="none" ${n ? '' : 'disabled'}>${T('Zrušit výběr', 'Clear selection')}</button>
     <span class="t2 fs12">${T('Vybráno', 'Selected')}: <b>${n}</b> · ${T('Zobrazeno', 'Showing')} ${d.total ? CAT.offset + 1 : 0}–${CAT.offset + shown} ${T('z', 'of')} ${d.total}</span><span class="grow"></span>
-    <button class="btn sm primary" data-cs="download" disabled title="${T('Stahování z katalogu přibude v další etapě', 'Downloading from the catalog comes in the next stage')}">${ic('download', 13)} ${T('Stáhnout vybrané', 'Download selected')}</button>
+    <button class="btn sm primary" data-cs="download" ${n ? '' : 'disabled'}>${ic('download', 13)} ${T('Stáhnout vybrané', 'Download selected')}</button>
     <button class="btn sm" data-cs="remove" ${n ? '' : 'disabled'}>${ic('trash', 13)} ${T('Odstranit vybrané', 'Remove selected')}</button></div>`;
 }
 function catPaintPager() {
@@ -1288,6 +1289,27 @@ function catToggle(id, on) {
   const card = $(`[data-cid="${id}"]`); if (card) card.classList.toggle('on', on);
   catPaintSel();
 }
+async function catDownload(spec, force) {
+  CAT.busy = true;
+  const r = await act(() => api('/api/catalog/items/action', { method: 'POST', body: { action: 'download', ...spec, ...(force ? { force: true } : {}) } }));
+  CAT.busy = false;
+  if (!r) return;
+  const parts = [];
+  if (r.queued) parts.push(T(`do fronty přidáno ${r.queued}`, `queued ${r.queued}`));
+  if (r.linked) parts.push(T(`už ve frontě ${r.linked}`, `already in the queue ${r.linked}`));
+  if (r.skipped_downloaded) parts.push(T(`přeskočeno „staženo dříve“ ${r.skipped_downloaded}`, `skipped “downloaded before” ${r.skipped_downloaded}`));
+  if (r.skipped_state) parts.push(T(`přeskočeno ${r.skipped_state} (ve frontě nebo odstraněno)`, `skipped ${r.skipped_state} (queued or removed)`));
+  toast(parts.join(', ') || T('Nic k zařazení', 'Nothing to queue'));
+  catClearSel(); catLoad();
+}
+function catDownloadAsk(spec, n) {
+  const m = modal(`<div class="mh">${ic('download', 18)}<h2>${T('Stáhnout z katalogu', 'Download from the catalog')}</h2></div>
+    <div class="mb"><div class="fs13">${T(`Zařadit do fronty ${n} videí. Každé se uloží do složky podle názvu svého zdroje a po úspěšném stažení zmizí z katalogu.`, `Queue ${n} videos. Each is saved in a folder named after its source and disappears from the catalog after a successful download.`)}</div>
+      <label class="row gap8 fs13" style="margin-top:10px"><input type="checkbox" id="catforce"> ${T('I videa označená „Staženo dříve“ stáhnout znovu', 'Also download videos marked “Downloaded before” again')}</label></div>
+    <div class="mf"><button class="btn" id="catdlno">${T('Zrušit', 'Cancel')}</button><button class="btn primary" id="catdlgo">${T('Zařadit do fronty', 'Add to queue')}</button></div>`);
+  $('#catdlno', m.el).onclick = m.close;
+  $('#catdlgo', m.el).onclick = () => { const f = $('#catforce', m.el).checked; m.close(); catDownload(spec, f); };
+}
 async function catRemove(spec, count) {
   CAT.busy = true;
   const r = await act(() => api('/api/catalog/items/action', { method: 'POST', body: { action: 'remove', ...spec } }),
@@ -1297,7 +1319,13 @@ async function catRemove(spec, count) {
 }
 function catGridClick(e) {
   const b = e.target.closest('[data-cact]');
-  if (b && !b.disabled && b.dataset.cact === 'remove') catRemove({ ids: [+b.dataset.id] }, 1);
+  if (!b || b.disabled) return;
+  if (b.dataset.cact === 'remove') catRemove({ ids: [+b.dataset.id] }, 1);
+  else if (b.dataset.cact === 'download') {
+    const again = b.dataset.dl === '1';
+    if (again && !confirm(T('Toto video už bylo staženo dříve. Stáhnout ho znovu?', 'This video was downloaded before. Download it again?'))) return;
+    catDownload({ ids: [+b.dataset.id] }, again);
+  }
 }
 function catSelClick(e) {
   const b = e.target.closest('[data-cs]'); if (!b || b.disabled) return;
@@ -1305,6 +1333,10 @@ function catSelClick(e) {
   if (w === 'page') { CAT.selAll = null; CAT.exclude.clear(); d.items.forEach(i => CAT.sel.add(i.id)); }
   else if (w === 'all') { CAT.selAll = catFilter(); CAT.sel.clear(); CAT.exclude.clear(); }
   else if (w === 'none') catClearSel();
+  else if (w === 'download') {
+    const n = catSelCount();
+    return n ? catDownloadAsk(CAT.selAll ? { filter: CAT.selAll, exclude: [...CAT.exclude] } : { ids: [...CAT.sel] }, n) : undefined;
+  }
   else if (w === 'remove') {
     const n = catSelCount();
     if (!n || !confirm(T(`Odstranit z katalogu ${n} videí? Zdroj si je zapamatuje a při „Načíst znovu vše“ je nabídne s odznakem „Dříve odmítnuté“.`, `Remove ${n} videos from the catalog? The source remembers them and offers them again with the “Rejected before” badge on “Reload all”.`))) return;

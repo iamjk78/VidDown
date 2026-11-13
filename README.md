@@ -113,8 +113,10 @@ Menu **Katalog** slouží k třídění videí před stahováním: přidáte zdr
   se v prohlížeči).
 - **Výběr:** zaškrtnutím karet, **Vybrat zobrazené** (stránka) nebo **Vybrat všech vyhovujících** (i na dalších stránkách; jednotlivé
   karty jde z výběru vyřadit). **Odstranit** (u karty i hromadně) video z katalogu skryje; zdroj si ho pamatuje a nabídne ho znovu až
-  po „Načíst znovu vše“ s odznakem „Dříve odmítnuté“. Videa ve frontě stahování se odstranit nedají. Stahování z katalogu přibude
-  v další etapě.
+  po „Načíst znovu vše“ s odznakem „Dříve odmítnuté“. Videa ve frontě stahování se odstranit nedají. **Stáhnout** (u karty i hromadně) zařadí
+  videa do fronty se zdrojem „katalog“ a uloží je do podsložky stahování podle názvu zdroje (kanálu nebo playlistu). Video, které už
+  bylo staženo dříve, se přeskočí; potvrzením u karty nebo zaškrtnutím „I videa Staženo dříve stáhnout znovu“ se stáhne znovu. Po
+  úspěšném stažení video z katalogu zmizí; když stahování selže nebo se zruší, vrátí se do katalogu s odznakem „stahování selhalo“.
 
 ### Časový rozvrh
 
