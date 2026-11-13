@@ -12,10 +12,12 @@ videa; „načíst znovu vše“ (`scan_mode=all`) nabídne znovu i odmítnutá 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import time
 import unicodedata
+from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 from .resolvers import ResolveError, ytdlp
@@ -28,6 +30,7 @@ MAX_URLS = 2000
 MAX_QUERY_TOKENS = 10
 MAX_QUERY_CHARS = 200
 MAX_OFFSET = 10_000_000
+THUMB_ALTS_MAX = 9
 UNAVAILABLE_TITLES = ("[private video]", "[deleted video]")
 
 # Rozlišení podle nejbližší běžné hodnoty (výška obrazu).
@@ -41,6 +44,7 @@ RES_BUCKETS = {
     "unknown": "i.height is null",
 }
 SORT_COLUMNS = {"height": "height", "size": "size", "duration": "duration", "added": "added_at"}
+THUMB_NAME = re.compile(r"^\d+\.(jpg|jpeg|png|webp|gif)$")
 
 
 def norm(text: str | None) -> str:
@@ -108,12 +112,30 @@ def add_sources(db, urls: list[str]) -> dict:
     return {"added": added, "reloaded": reloaded, "skipped": skipped}
 
 
-def delete_source(db, sid: int) -> bool:
+def thumbs_dir(data, settings) -> Path:
+    """Složka miniatur katalogu (nastavení, jinak <data>/catalog/thumbs)."""
+    d = str(settings.get("catalog_thumbs_dir") or "").strip()
+    return Path(d).expanduser() if d else Path(data) / "catalog" / "thumbs"
+
+
+def remove_thumb(folder: Path | None, name: str | None) -> None:
+    if folder and name and THUMB_NAME.match(name):
+        try:
+            (folder / name).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def delete_source(db, sid: int, folder: Path | None = None) -> bool:
+    """Smaže zdroj, jeho položky (a paměť o nich) i jejich miniatury."""
     with db.conn() as c:
         c.execute("begin immediate")
+        names = [r["thumb_file"] for r in c.execute("select thumb_file from catalog_items where source_id=? and thumb_file != ''", (sid,))]
         c.execute("delete from catalog_items where source_id=?", (sid,))
         n = c.execute("delete from catalog_sources where id=?", (sid,)).rowcount
         c.execute("commit")
+    for name in names:
+        remove_thumb(folder, name)
     return bool(n)
 
 
@@ -136,9 +158,20 @@ def rescan_source(db, sid: int, mode: str) -> bool | None:
 
 
 # --- čtení seznamu zdroje -------------------------------------------------------------------------
+def thumb_candidates(info: dict) -> list[str]:
+    """Adresy miniatur od nejlepší: seznam od konce (yt-dlp ho řadí vzestupně podle kvality, poslední je největší; rozměry
+    u největších často neuvádí), nakonec `thumbnail` jako jistota. Největší varianty starším videím chybějí (404), proto
+    se zkouší postupně shora dolů."""
+    urls: list[str] = []
+    for u in [*reversed([t.get("url") for t in (info.get("thumbnails") or [])]), info.get("thumbnail")]:
+        if u and u not in urls:
+            urls.append(u)
+    return urls
+
+
 def _thumb(e: dict) -> str | None:
-    th = [t for t in (e.get("thumbnails") or []) if t.get("url")]
-    return th[-1]["url"] if th else e.get("thumbnail")
+    c = thumb_candidates(e)
+    return c[0] if c else None
 
 
 def _entry_url(e: dict) -> str | None:
@@ -165,8 +198,10 @@ def _flatten(entries) -> list[dict]:
             continue
         ie = (e.get("ie_key") or e.get("extractor_key") or "").lower()
         key = f"{ie} {e['id']}" if ie and e.get("id") else u
+        cands = thumb_candidates(e)
         out.append({"key": key, "id": e.get("id") if not ie else None, "url": u, "title": e.get("title"),
-                    "channel": e.get("channel") or e.get("uploader"), "duration": e.get("duration"), "thumb_url": _thumb(e)})
+                    "channel": e.get("channel") or e.get("uploader"), "duration": e.get("duration"),
+                    "thumb_url": cands[0] if cands else None, "thumb_alts": cands[1:1 + THUMB_ALTS_MAX]})
     return out
 
 
@@ -217,8 +252,8 @@ async def list_source(url: str, ctx) -> dict:
     return {"kind": "video", "title": info.get("title") or domain(url), "thumb_url": _thumb(info), "complete": True,
             "entries": [{"key": key, "id": None, "url": info.get("webpage_url") or url, "title": info.get("title"),
                          "channel": info.get("channel") or info.get("uploader"), "duration": info.get("duration"),
-                         "thumb_url": _thumb(info), "height": ytdlp.best_height(info), "size": ytdlp.size_estimate(info),
-                         "detail_state": "done"}]}
+                         "thumb_url": _thumb(info), "thumb_alts": thumb_candidates(info)[1:1 + THUMB_ALTS_MAX],
+                         "height": ytdlp.best_height(info), "size": ytdlp.size_estimate(info), "detail_state": "done"}]}
 
 
 # --- uložení seznamu ------------------------------------------------------------------------------
@@ -281,9 +316,10 @@ def apply_listing(db, sid: int, listing: dict, mode: str, dl_keys: set[str], dl_
                     reoffered += 1
                 continue
             downloaded = key in dl_keys or e["url"] in dl_urls or bool(e.get("id") and e["id"] in dl_ids)
-            c.execute("insert into catalog_items(source_id, key, url, title, channel, duration, thumb_url, height, size, search, pos, state, "
-                      "downloaded_before, detail_state, added_at, updated_at) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                      (sid, key, e["url"], e.get("title"), e.get("channel"), e.get("duration"), e.get("thumb_url"), e.get("height"),
+            c.execute("insert into catalog_items(source_id, key, url, host, title, channel, duration, thumb_url, thumb_alts, height, size, search, pos, "
+                      "state, downloaded_before, detail_state, added_at, updated_at) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                      (sid, key, e["url"], domain(e["url"]), e.get("title"), e.get("channel"), e.get("duration"), e.get("thumb_url"),
+                       json.dumps(e["thumb_alts"]) if e.get("thumb_alts") else None, e.get("height"),
                        e.get("size"), norm(f"{e.get('title') or ''} {e.get('channel') or ''}"), pos, "gone" if unavailable else "new",
                        1 if downloaded else 0, "failed" if unavailable else e.get("detail_state", "pending"), now, now))
             added += 1
@@ -351,7 +387,8 @@ def query_items(db, source: int | None = None, q: str = "", res: list[str] | Non
 def item_out(r: dict) -> dict:
     return {"id": r["id"], "source_id": r["source_id"], "source_title": r.get("source_title"), "source_folder": r.get("source_folder"),
             "title": r["title"], "channel": r["channel"], "url": r["url"], "duration": r["duration"], "height": r["height"],
-            "size": r["size"], "thumb_url": r["thumb_url"], "has_thumb": bool(r["thumb_file"]), "state": r["state"],
+            "size": r["size"], "thumb_url": r["thumb_url"], "has_thumb": bool(r["thumb_file"]),
+            "thumb": f"/api/catalog/thumb/{r['id']}?v={int(r['updated_at'] or 0)}" if r["thumb_file"] else None, "state": r["state"],
             "downloaded_before": bool(r["downloaded_before"]), "rejected_before": bool(r["rejected_before"]),
             "detail_state": r["detail_state"], "detail_error": r["detail_error"], "job_id": r["job_id"]}
 

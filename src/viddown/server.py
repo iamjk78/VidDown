@@ -18,7 +18,7 @@ from starlette.background import BackgroundTask
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import __version__, appupdate, autobackup, backup, catalog, pagelist, subscriptions, thumbs, updater
+from . import __version__, appupdate, autobackup, backup, catalog, catalogdetails, pagelist, subscriptions, thumbs, updater
 from .config import DEFAULTS, CHOICES, cookies_path
 from .probe import probe_url
 from .util import check_dir_writable, extract_urls, in_docker, in_schedule, sanitize_filename
@@ -65,7 +65,8 @@ def create_app(app_state) -> FastAPI:
             return JSONResponse({"error": "auth"}, status_code=401)
         resp = await call_next(req)
         if p.startswith("/api/"):
-            resp.headers["Cache-Control"] = "no-store"
+            if "cache-control" not in resp.headers:       # miniatury si nastavují vlastní (max-age); ostatní API se nikdy neukládá
+                resp.headers["Cache-Control"] = "no-store"
         elif p.startswith("/static/"):
             resp.headers["Cache-Control"] = "no-cache"   # vždy ověřit (ETag), ať se po aktualizaci nenačte stará verze GUI
         return resp
@@ -575,9 +576,46 @@ def create_app(app_state) -> FastAPI:
         return {"ok": True, "docker": in_docker()}
 
     # --- katalog -------------------------------------------------------------------------------
+    def _details():
+        return (getattr(S, "catalog_details", None) or catalogdetails.DetailWorker(S)).status()
+
+    def _overview():
+        return {**catalog.sources_out(S.db), "details": _details()}
+
     @app.get("/api/catalog")
     async def catalog_overview():
-        return await asyncio.to_thread(catalog.sources_out, S.db)
+        return await asyncio.to_thread(_overview)
+
+    @app.post("/api/catalog/pause")
+    async def catalog_pause(req: Request):
+        """Pozastaví nebo obnoví zjišťování podrobností a stahování miniatur: {paused: true|false}."""
+        body = await req.json()
+        if not isinstance(body, dict) or not isinstance(body.get("paused"), bool):
+            raise HTTPException(400, "Očekává se {paused: true|false}.")
+        S.db.kv_set("catalog_paused", body["paused"])
+        return await asyncio.to_thread(_overview)
+
+    @app.post("/api/catalog/retry")
+    async def catalog_retry(req: Request):
+        """Zařadí znovu videa, kterým se podrobnosti nebo miniatura nepodařily zjistit: {source?: id}."""
+        body = await req.json() if (await req.body()) else {}
+        src = body.get("source") if isinstance(body, dict) else None
+        if src is not None and (not isinstance(src, int) or isinstance(src, bool) or not 0 < src < 2 ** 62):
+            raise HTTPException(400, "Neplatný zdroj.")
+        res = await asyncio.to_thread(catalogdetails.retry_failed, S.db, src)
+        return {**res, "overview": await asyncio.to_thread(_overview)}
+
+    @app.get("/api/catalog/thumb/{item_id}")
+    async def catalog_thumb(item_id: int):
+        rows = await asyncio.to_thread(S.db.query, "select thumb_file from catalog_items where id=?", (item_id,)) if item_id < 2 ** 62 else []
+        name = rows[0]["thumb_file"] if rows else None
+        if not name or not catalog.THUMB_NAME.match(name):
+            raise HTTPException(404, "Miniatura není.")
+        p = catalog.thumbs_dir(S.data, S.settings) / name
+        if not p.is_file():
+            raise HTTPException(404, "Miniatura není.")
+        mt = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp", ".gif": "image/gif"}.get(p.suffix.lower(), "application/octet-stream")
+        return FileResponse(p, media_type=mt, headers={"Cache-Control": "max-age=86400"})
 
     @app.post("/api/catalog/sources")
     async def catalog_add(req: Request):
@@ -596,13 +634,13 @@ def create_app(app_state) -> FastAPI:
         if not urls and not invalid:
             raise HTTPException(400, "Zadejte aspoň jednu adresu.")
         res = await asyncio.to_thread(catalog.add_sources, S.db, urls)
-        return {**res, "invalid": invalid[:50], "invalid_count": len(invalid), "overview": await asyncio.to_thread(catalog.sources_out, S.db)}
+        return {**res, "invalid": invalid[:50], "invalid_count": len(invalid), "overview": await asyncio.to_thread(_overview)}
 
     @app.delete("/api/catalog/sources/{sid}")
     async def catalog_delete(sid: int):
-        if not await asyncio.to_thread(catalog.delete_source, S.db, sid):
+        if not await asyncio.to_thread(catalog.delete_source, S.db, sid, catalog.thumbs_dir(S.data, S.settings)):
             raise HTTPException(404, "Zdroj nenalezen.")
-        return await asyncio.to_thread(catalog.sources_out, S.db)
+        return await asyncio.to_thread(_overview)
 
     async def _rescan(sid: int, mode: str):
         r = await asyncio.to_thread(catalog.rescan_source, S.db, sid, mode)
@@ -610,7 +648,7 @@ def create_app(app_state) -> FastAPI:
             raise HTTPException(404, "Zdroj nenalezen.")
         if r is False:
             raise HTTPException(409, "Zdroj se právě zjišťuje.")
-        return await asyncio.to_thread(catalog.sources_out, S.db)
+        return await asyncio.to_thread(_overview)
 
     @app.post("/api/catalog/sources/{sid}/refresh")
     async def catalog_refresh(sid: int):
@@ -777,11 +815,11 @@ def create_app(app_state) -> FastAPI:
 
     async def validate_dirs(changes: dict) -> None:
         """Cílová a dočasná složka: musí jít zapisovat, jinak se uložení odmítne."""
-        for key in ("download_dir", "temp_dir", "auto_backup_dir"):
+        for key in ("download_dir", "temp_dir", "auto_backup_dir", "catalog_thumbs_dir"):
             if key not in changes:
                 continue
             val = str(changes[key] or "").strip()
-            if key in ("temp_dir", "auto_backup_dir") and not val:
+            if key in ("temp_dir", "auto_backup_dir", "catalog_thumbs_dir") and not val:
                 changes[key] = ""
                 continue
             ok, msg = await asyncio.to_thread(check_dir_writable, val)

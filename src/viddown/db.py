@@ -167,11 +167,13 @@ create table catalog_items (
     source_id integer not null,
     key text not null,                          -- stabilní klíč videa ve zdroji ("extraktor id" jako v archivu yt-dlp, jinak adresa)
     url text not null,
+    host text,                                  -- web videa (kvůli rozložení zátěže při zjišťování podrobností)
     title text,
     channel text,
     duration real,
     thumb_url text,
-    thumb_file text,
+    thumb_alts text,                            -- JSON: záložní adresy miniatur od lepší k horší (největší varianty starším videím chybějí)
+    thumb_file text,                            -- soubor miniatury ve složce katalogu; prázdný řetězec = stažení se nepodařilo
     height integer,                             -- nejvyšší dostupné rozlišení
     size integer,                               -- odhad velikosti v bajtech
     search text,                                -- normalizovaný název a kanál pro hledání
@@ -187,6 +189,8 @@ create table catalog_items (
 );
 create unique index catalog_items_key on catalog_items(source_id, key);
 create index catalog_items_state on catalog_items(state, source_id, pos);
+create index catalog_items_pending on catalog_items(source_id, pos) where detail_state='pending';
+create index catalog_items_nothumb on catalog_items(source_id, pos) where thumb_file is null and thumb_url is not null;
 create index catalog_items_height on catalog_items(height);
 create index catalog_items_size on catalog_items(size);
 alter table jobs add column catalog_item_id integer;   -- položka katalogu, ze které úloha vznikla

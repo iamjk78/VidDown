@@ -104,6 +104,10 @@ DEFAULTS: dict = {
     "auto_backup_hours": 24,        # jak často (hodiny): 6 | 12 | 24 | 72 | 168
     "auto_backup_dir": "",          # prázdné = <data>/backups
     "auto_backup_keep": 5,          # kolik záloh uchovat; po úspěšné záloze se starší smažou
+    # katalog (PLAN.md kap. 20)
+    "catalog_thumbs_dir": "",               # složka miniatur katalogu; prázdné = <data>/catalog/thumbs
+    "catalog_gap": 3,                       # pauza mezi dotazy na stejný web při zjišťování podrobností (s, 0–60)
+    "catalog_slow_browser": True,           # u webů bez podpory yt-dlp zjišťovat podrobnosti i prohlížečem (až nakonec)
     # aktualizace aplikace zevnitř (PLAN.md kap. 18)
     "app_update_repo": "iamjk78/VidDown",    # GitHub repozitář s vydáními (vlastník/název)
     "app_update_mode": "notify",             # off | notify (jen oznámit) | auto (stáhnout, otestovat a po doběhnutí stahování restartovat)
@@ -230,6 +234,8 @@ class Settings:
                     val = f"{int(h):02d}:{int(m):02d}"
                 if k == "app_update_repo" and val and not valid_repo(val):
                     raise ValueError("app_update_repo must look like owner/name")
+                if k == "catalog_gap" and not 0 <= val <= 60:
+                    raise ValueError("catalog_gap must be 0-60")
                 if k == "app_update_hours" and val not in APP_UPDATE_HOURS:
                     raise ValueError(f"app_update_hours must be one of {APP_UPDATE_HOURS}")
                 if k == "auto_backup_hours" and val not in AUTO_BACKUP_HOURS:

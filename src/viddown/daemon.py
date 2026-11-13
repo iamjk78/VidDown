@@ -14,7 +14,7 @@ import time
 import webbrowser
 from pathlib import Path
 
-from . import __version__, appupdate, autobackup, backup, catalog, updater
+from . import __version__, appupdate, autobackup, backup, catalog, catalogdetails, updater
 from .config import Secrets, Settings, data_dir
 from .db import DB
 from .engines import EngineManager
@@ -210,7 +210,8 @@ async def _main(st: AppState, host: str, port: int, open_browser: bool) -> None:
              asyncio.create_task(appupdate.health_task(st.data, stop), name="app-health"),
              asyncio.create_task(autobackup.task(st, stop), name="auto-backup"),
              asyncio.create_task(updater.task(st, stop), name="app-updater"),
-             asyncio.create_task(catalog.task(st, stop), name="catalog")]
+             asyncio.create_task(catalog.task(st, stop), name="catalog"),
+             asyncio.create_task(catalogdetails.task(st, stop), name="catalog-details")]
     if open_browser:
         async def _open():
             for _ in range(50):

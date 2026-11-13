@@ -1,0 +1,283 @@
+"""Katalog, etapa 2: podrobnosti videí (rozlišení, velikost, délka, nejlepší miniatura) a stahování miniatur.
+
+Pořadí práce: nejdřív se dokončí seznamy všech zdrojů (`catalog.task`), teprve potom se zjišťují podrobnosti. Podrobnosti
+se zjišťují po jednom videu s pauzou mezi dotazy na stejný web (`catalog_gap`, režim výkonu ji prodlužuje); různé weby
+mohou běžet souběžně (nejvýš `MAX_HOSTS`). Omezení ze strany webu (HTTP 429, ověření „nejsem robot“) web odloží na delší
+dobu, která se zdvojnásobuje; smazané nebo soukromé video se označí jen u sebe. Miniatury se stahují zvlášť a rychle.
+Pomalá úroveň (prohlížeč u webů bez podpory yt-dlp) přijde s dalšími typy zdrojů.
+"""
+from __future__ import annotations
+
+import asyncio
+import copy
+import dataclasses
+import json
+import logging
+import random
+import time
+from pathlib import Path
+
+from . import catalog, thumbs
+from .resolvers import ResolveError, ytdlp
+
+log = logging.getLogger("viddown.catalogdetails")
+
+MAX_HOSTS = 3                       # nejvýš tolik webů souběžně
+BACKOFF_FIRST = 120.0               # první odložení webu po omezení (s); pak se zdvojnásobuje
+BACKOFF_MAX = 7200.0
+BACKOFF_LOGIN = 3600.0              # web vyžaduje přihlášení/ověření: zkusit až za hodinu
+PERF_MULT = {"full": 1.0, "balanced": 2.0, "eco": 4.0}
+THUMB_BATCH = 4
+THUMB_CANDIDATES = 10               # kolik kandidátů miniatury se zkusí, než se vzdá (největší varianty starším videím chybějí)
+IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".gif")
+
+
+def detail_ctx(st):
+    """Kontext pro zjišťování podrobností: vždy video v nejlepší kvalitě, bez ohledu na „jen zvuk“ v nastavení."""
+    c = st.runner.ctx()
+    settings = {**c.settings, "audio_only": False, "quality": "max"}
+    try:
+        return dataclasses.replace(c, settings=settings)
+    except TypeError:
+        c2 = copy.copy(c)
+        c2.settings = settings
+        return c2
+
+
+def best_thumbnails(info: dict) -> list[str]:
+    return catalog.thumb_candidates(info)
+
+
+def looks_like_image(path: Path) -> bool:
+    try:
+        head = path.read_bytes()[:12]
+    except OSError:
+        return False
+    return head[:3] == b"\xff\xd8\xff" or head[:8] == b"\x89PNG\r\n\x1a\n" or head[:6] in (b"GIF87a", b"GIF89a") or (head[:4] == b"RIFF" and head[8:12] == b"WEBP")
+
+
+def download_thumb(folder: Path, item_id: int, urls: list[str]) -> str | None:
+    """Stáhne první použitelnou miniaturu ze seznamu a uloží ji jako `<id>.<přípona>` (starší soubor položky nahradí).
+    Vrací název souboru, nebo None."""
+    folder.mkdir(parents=True, exist_ok=True)
+    for url in urls[:THUMB_CANDIDATES]:
+        suffix = Path(url.split("?", 1)[0]).suffix.lower()
+        ext = suffix if suffix in IMAGE_EXTS else ".jpg"
+        tmp = folder / f"{item_id}{ext}.part"
+        try:
+            if not thumbs.fetch(url, tmp) or not looks_like_image(tmp):
+                continue
+            final = folder / f"{item_id}{ext}"
+            tmp.replace(final)
+            for other in IMAGE_EXTS:                          # po změně formátu zůstane jediný soubor
+                if other != ext:
+                    (folder / f"{item_id}{other}").unlink(missing_ok=True)
+            return final.name
+        except OSError as e:
+            log.debug("miniatura %s: %s", url, e)
+        finally:
+            tmp.unlink(missing_ok=True)
+    return None
+
+
+class DetailWorker:
+    def __init__(self, st):
+        self.st = st
+        self.next_at: dict[str, float] = {}          # web -> čas (monotonic), kdy smí další dotaz
+        self.backoff: dict[str, dict] = {}           # web -> {until, delay, reason}
+        self.active: dict[str, asyncio.Task] = {}
+
+    # --- nastavení a stav -------------------------------------------------------------------------
+    @property
+    def db(self):
+        return self.st.db
+
+    def paused(self) -> bool:
+        return bool(self.db.kv_get("catalog_paused", False))
+
+    def gap(self) -> float:
+        """Pauza mezi dotazy na stejný web: nastavení × režim výkonu × náhodný rozptyl ±30 %."""
+        s = self.st.settings
+        return float(s.get("catalog_gap") or 0) * PERF_MULT.get(s.get("perf_mode"), 1.0) * random.uniform(0.7, 1.3)
+
+    def listing_busy(self) -> bool:
+        return bool(self.db.query("select 1 from catalog_sources where status in ('queued','scanning') limit 1"))
+
+    def allowed_now(self) -> bool:
+        """Místo pro napojení na časový rozvrh; zatím jen ruční pozastavení."""
+        return not self.paused()
+
+    def folder(self) -> Path:
+        return catalog.thumbs_dir(self.st.data, self.st.settings)
+
+    # --- výběr práce ------------------------------------------------------------------------------
+    def excluded_hosts(self) -> set[str]:
+        """Weby, na které se teď nesmí sahat: právě zpracovávané, ve vychlazení po dotazu nebo odložené po omezení."""
+        now = time.monotonic()
+        return set(self.active) | {h for h, t in self.next_at.items() if t > now} | {h for h, b in self.backoff.items() if b["until"] > now}
+
+    def pick(self, excluded: set[str] | None = None) -> dict | None:
+        """Další video k zjištění podrobností (v pořadí zdrojů a videí) z webu, který je právě volný."""
+        excluded = self.excluded_hosts() if excluded is None else excluded
+        sql = "select * from catalog_items where detail_state='pending' and state in ('new','queued')"
+        args: list = []
+        if excluded:
+            sql += " and coalesce(host,'') not in (%s)" % ",".join("?" * len(excluded))
+            args = sorted(excluded)
+        rows = self.db.query(sql + " order by source_id, pos limit 1", args)
+        return rows[0] if rows else None
+
+    # --- zpracování jednoho videa -----------------------------------------------------------------
+    async def process(self, item: dict) -> None:
+        host = item.get("host") or ""
+        try:
+            info = await ytdlp.full_info(item["url"], detail_ctx(self.st), timeout=90)
+        except ResolveError as e:
+            self._on_error(item, e.kind, str(e))
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            log.exception("katalog: podrobnosti %s", item["id"])
+            self._finish(item, "failed", f"{type(e).__name__}: {e}"[:300])
+        else:
+            await self._store(item, info)
+            self.backoff.pop(host, None)
+        finally:
+            self.next_at[host] = time.monotonic() + self.gap()
+
+    async def _store(self, item: dict, info: dict) -> None:
+        urls = best_thumbnails(info)
+        title = info.get("title")
+        channel = info.get("channel") or info.get("uploader")
+        with self.db.conn() as c:
+            n = c.execute(
+                "update catalog_items set height=coalesce(?, height), size=coalesce(?, size), duration=coalesce(?, duration), "
+                "title=coalesce(?, title), channel=coalesce(?, channel), thumb_url=coalesce(?, thumb_url), thumb_alts=coalesce(?, thumb_alts), "
+                "search=?, detail_state='done', detail_error=null, updated_at=? "
+                "where id=? and detail_state='pending' and state in ('new','queued')",
+                (ytdlp.best_height(info), ytdlp.size_estimate(info), info.get("duration"), title, channel, urls[0] if urls else None,
+                 json.dumps(urls[1:1 + catalog.THUMB_ALTS_MAX]) if len(urls) > 1 else None,
+                 catalog.norm(f"{title or item['title'] or ''} {channel or item['channel'] or ''}"), time.time(), item["id"])).rowcount
+        if n and urls and urls[0] != item.get("thumb_url"):      # jiná (obvykle lepší) miniatura než ze seznamu: nahradit
+            name = await asyncio.to_thread(download_thumb, self.folder(), item["id"], urls)
+            if name:
+                with self.db.conn() as c:
+                    c.execute("update catalog_items set thumb_file=?, updated_at=? where id=? and state in ('new','queued')", (name, time.time(), item["id"]))
+
+    def _finish(self, item: dict, state: str, error: str | None, item_state: str | None = None) -> None:
+        with self.db.conn() as c:
+            c.execute("update catalog_items set detail_state=?, detail_error=?, state=coalesce(?, state), updated_at=? "
+                      "where id=? and detail_state='pending'", (state, error, item_state, time.time(), item["id"]))
+
+    def _on_error(self, item: dict, kind: str, msg: str) -> None:
+        host = item.get("host") or ""
+        low = msg.lower()
+        if kind == "network":                                       # omezení dotazů, výpadek: web odložit, video zůstane čekat
+            self._back_off(host, BACKOFF_FIRST, "omezení nebo výpadek webu: " + msg[:120])
+        elif kind == "cookies" or "not a bot" in low or "confirm you" in low:
+            self._back_off(host, BACKOFF_LOGIN, "web vyžaduje ověření nebo cookies: " + msg[:120])
+        elif kind == "removed" or "private video" in low:
+            self._finish(item, "failed", msg[:300], item_state="gone" if item.get("state") == "new" else None)
+        else:                                                       # geo, drm, přihlášení k videu, přímý přenos, neznámé: jen u videa
+            self._finish(item, "failed", f"{kind}: {msg}"[:300])
+
+    def _back_off(self, host: str, first: float, reason: str) -> None:
+        prev = self.backoff.get(host)
+        delay = min(BACKOFF_MAX, max(first, (prev["delay"] * 2) if prev else first))
+        self.backoff[host] = {"until": time.monotonic() + delay, "delay": delay, "reason": reason}
+        log.warning("katalog: %s odloženo o %d s (%s)", host, delay, reason)
+
+    # --- smyčky -----------------------------------------------------------------------------------
+    async def run(self, stop: asyncio.Event) -> None:
+        """Podrobnosti po jednom videu na web, souběžně nejvýš `MAX_HOSTS` webů; až po dokončení seznamů všech zdrojů."""
+        while not stop.is_set():
+            try:
+                for h in [h for h, t in self.active.items() if t.done()]:
+                    t = self.active.pop(h)
+                    if not t.cancelled() and t.exception():
+                        log.error("katalog: podrobnosti: %s", t.exception())
+                item = None
+                if len(self.active) < MAX_HOSTS and self.allowed_now() and not self.listing_busy():
+                    item = await asyncio.to_thread(self.pick, self.excluded_hosts())      # množina se spočítá ve smyčce událostí
+                if item is not None:
+                    self.active[item.get("host") or ""] = asyncio.create_task(self.process(item))
+                    continue
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001
+                log.exception("katalog: podrobnosti, neočekávaná chyba")
+                await _sleep(stop, 5)
+                continue
+            await _sleep(stop, 0.5)
+        for t in self.active.values():
+            t.cancel()
+        await asyncio.gather(*self.active.values(), return_exceptions=True)
+
+    async def _thumb_one(self, row: dict) -> None:
+        try:
+            alts = json.loads(row.get("thumb_alts") or "[]")
+        except ValueError:
+            alts = []
+        name = await asyncio.to_thread(download_thumb, self.folder(), row["id"], [row["thumb_url"], *[a for a in alts if isinstance(a, str)]])
+        with self.db.conn() as c:
+            c.execute("update catalog_items set thumb_file=?, updated_at=? where id=? and thumb_file is null",
+                      (name if name else "", time.time(), row["id"]))
+
+    async def thumbs_loop(self, stop: asyncio.Event) -> None:
+        """Stahuje miniatury položkám, které ještě žádnou nemají (rychle, po dávkách; selhání se označí a nezkouší znovu)."""
+        while not stop.is_set():
+            try:
+                rows = [] if self.paused() else await asyncio.to_thread(
+                    self.db.query, "select id, thumb_url, thumb_alts from catalog_items where thumb_file is null and thumb_url is not null "
+                    "and state in ('new','queued') order by source_id, pos limit ?", (THUMB_BATCH,))
+                if rows:
+                    await asyncio.gather(*(self._thumb_one(r) for r in rows))
+                    await _sleep(stop, 0.2)
+                    continue
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001
+                log.exception("katalog: miniatury")
+                await _sleep(stop, 5)
+                continue
+            await _sleep(stop, 3)
+
+    # --- stav pro GUI -----------------------------------------------------------------------------
+    def status(self) -> dict:
+        r = self.db.query(
+            "select sum(detail_state='pending') pending, sum(detail_state='done') done, sum(detail_state='failed') failed, "
+            "sum(thumb_file is null and thumb_url is not null) thumbs_pending, sum(thumb_file = '') thumbs_failed "
+            "from catalog_items where state in ('new','queued')")[0]
+        now = time.monotonic()
+        return {"pending": r["pending"] or 0, "done": r["done"] or 0, "failed": r["failed"] or 0,
+                "thumbs_pending": r["thumbs_pending"] or 0, "thumbs_failed": r["thumbs_failed"] or 0,
+                "paused": self.paused(), "waiting_for_lists": self.listing_busy(), "active_hosts": sorted(self.active),
+                "backoff": [{"host": h, "seconds": int(b["until"] - now), "reason": b["reason"]} for h, b in sorted(self.backoff.items())
+                            if b["until"] > now]}
+
+
+async def _sleep(stop: asyncio.Event, sec: float) -> None:
+    try:
+        await asyncio.wait_for(stop.wait(), sec)
+    except asyncio.TimeoutError:
+        pass
+
+
+def retry_failed(db, source: int | None = None) -> dict:
+    """Zařadí znovu videa, kterým se podrobnosti nebo miniatura nepodařily zjistit."""
+    where, args = "", []
+    if source:
+        where, args = " and source_id=?", [int(source)]
+    with db.conn() as c:
+        c.execute("begin immediate")
+        d = c.execute("update catalog_items set detail_state='pending', detail_error=null where detail_state='failed' "
+                      "and state in ('new','queued')" + where, args).rowcount
+        t = c.execute("update catalog_items set thumb_file=null where thumb_file='' and state in ('new','queued')" + where, args).rowcount
+        c.execute("commit")
+    return {"details": d, "thumbs": t}
+
+
+async def task(st, stop: asyncio.Event) -> None:
+    w = getattr(st, "catalog_details", None) or DetailWorker(st)
+    st.catalog_details = w
+    await asyncio.gather(w.run(stop), w.thumbs_loop(stop))
