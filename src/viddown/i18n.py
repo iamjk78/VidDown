@@ -23,6 +23,7 @@ T = {
         "done_job": "✅ Staženo: {title}\n{path}",
         "engine_fail": "⚠️ Aktualizace {engine} na {new} neprošla testem. Zůstává verze {old}.",
         "engine_both_fail": "⚠️ Test {engine} selhal u nové i staré verze (síť nebo web). Nic se nezměnilo.",
+        "backup_fail": "⚠️ Automatická záloha selhala: {error}",
         "help": ("Pošlete mi odkaz na video, playlist nebo kanál a stáhnu ho.\n\n"
                  "/fronta – co se stahuje a čeká\n/historie – posledních 10 položek\n"
                  "/engine – verze enginů\n/aktualizovat – zkontrolovat aktualizace enginů"),
@@ -57,6 +58,7 @@ T = {
         "done_job": "✅ Downloaded: {title}\n{path}",
         "engine_fail": "⚠️ Update of {engine} to {new} failed its test. Keeping {old}.",
         "engine_both_fail": "⚠️ {engine} test failed for both new and old version (network or website). Nothing changed.",
+        "backup_fail": "⚠️ Automatic backup failed: {error}",
         "help": ("Send me a link to a video, playlist or channel and I'll download it.\n\n"
                  "/fronta – queue\n/historie – last 10 items\n/engine – engine versions\n/aktualizovat – check engine updates"),
         "not_allowed": "This bot is private. Your chat ID is {id}. If you're the owner, enter it in Settings › Telegram.",

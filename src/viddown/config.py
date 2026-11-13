@@ -36,6 +36,8 @@ def default_download_dir() -> str:
     return os.environ.get("VIDDOWN_DEFAULT_DOWNLOAD_DIR") or str(Path.home() / "Downloads" / "VidDown")
 
 
+AUTO_BACKUP_HOURS = (6, 12, 24, 72, 168)     # nabídka intervalu automatických záloh
+
 DEFAULTS: dict = {
     # stahování
     "download_dir": default_download_dir(),
@@ -89,6 +91,11 @@ DEFAULTS: dict = {
     "engine_update_hours": 24,
     "keep_engine_versions": 3,
     "selftest_url": "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+    # automatické zálohy (šifrované soubory .dtb)
+    "auto_backup": False,
+    "auto_backup_hours": 24,        # jak často (hodiny): 6 | 12 | 24 | 72 | 168
+    "auto_backup_dir": "",          # prázdné = <data>/backups
+    "auto_backup_keep": 5,          # kolik záloh uchovat; po úspěšné záloze se starší smažou
     # vzhled, logy, historie
     "language": "cs",               # cs | en
     "theme": "system",              # light | dark | system
@@ -208,6 +215,10 @@ class Settings:
                     if not (0 <= int(h) < 24 and 0 <= int(m) < 60):
                         raise ValueError(f"invalid time: {val}")
                     val = f"{int(h):02d}:{int(m):02d}"
+                if k == "auto_backup_hours" and val not in AUTO_BACKUP_HOURS:
+                    raise ValueError(f"auto_backup_hours must be one of {AUTO_BACKUP_HOURS}")
+                if k == "auto_backup_keep" and not 1 <= val <= 100:
+                    raise ValueError("auto_backup_keep must be 1-100")
                 if k == "methods":
                     if not val or any(x not in ("ytdlp", "sniffer") for x in val):
                         raise ValueError("methods must be ytdlp/sniffer")

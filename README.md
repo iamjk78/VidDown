@@ -110,6 +110,13 @@ starší verze odmítne otevřít (chrání před poškozením při downgradu). 
   Je to ochrana před náhodným nahlédnutím, ne před někým, kdo má kopii aplikace (klíč je v jejím kódu), proto kód ani obraz nezveřejňujte.
   `--plain` (v GUI „bez šifrování“) uloží obyčejný ZIP.
 - Záloha z novější verze, než kterou používáte, se odmítne (nejdřív aktualizujte aplikaci).
+- **Automatické zálohy:** Nastavení › Záloha a obnova. Zapnete přepínač, zvolíte jak často (6 h, 12 h, 1 den, 3 dny, 1 týden),
+  složku a kolik záloh uchovat. Po zapnutí se první záloha vytvoří hned, další podle intervalu. Nová záloha se po vytvoření ověří
+  a teprve potom se smažou nejstarší nad zadaný počet (maže se jen to, co se jmenuje `VidDown_<datum>_<čas>.dtb`).
+  Selže-li záloha (např. nepřipojený NAS), nic se nemaže, po hodině se to zkusí znovu a při selhání přijde zpráva do Telegramu
+  (nejvýš jednou denně). Zálohy ve složce jsou v GUI vidět s tlačítkem „Obnovit“.
+  Prázdná složka = `backups` v datové složce; proti ztrátě disku zvolte jiné místo. V Dockeru musí být složka připojená jako
+  svazek (viz zakomentovaný příklad `/backups` v compose souborech).
 
 ### Ze zdrojového kódu
 

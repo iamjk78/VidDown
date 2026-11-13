@@ -95,7 +95,8 @@ def create(data: Path, out: Path | None = None, include_thumbs: bool = False, en
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp = Path(tempfile.mkdtemp(prefix="vdbk-"))
-    part = out.with_name(out.name + ".part")
+    # nešifrovaný ZIP se skládá lokálně; do cílové složky (často síťové) jde jen hotový šifrovaný soubor
+    part = (tmp / "backup.zip") if encrypt else out.with_name(out.name + ".part")
     try:
         snap = tmp / "viddown.db"
         schema = _snapshot(db, snap)

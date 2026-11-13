@@ -351,6 +351,7 @@ Modul `backup.py`, GUI v Nastavení (karta „Záloha a obnova“), příkazy `v
 - Ověření zálohy: bezpečné názvy souborů (jen povolené), limity velikosti, kontrola integrity databáze, záloha z novější verze schématu se odmítne.
 - Přepis cest při přesunu na jiný stroj (`--remap` / pole v GUI) mění `jobs.filepath`, `jobs.target_dir`, `subscriptions.folder` a `download_dir`/`temp_dir` v nastavení; respektuje hranice složek (`/nas/Videa` se nedotkne `/nas/Videa2`).
 - Soubory chybějící v záloze (např. cookies) se při obnově neodstraňují.
+- **Automatické zálohy** (`autobackup.py`, nastavení `auto_backup`, `auto_backup_hours` 6/12/24/72/168, `auto_backup_dir`, `auto_backup_keep` 1–100): smyčka na pozadí jednou za minutu zkontroluje rozvrh (interval od poslední úspěšné zálohy; změna složky nebo první zapnutí = hned). Záloha se vytvoří (nešifrovaný ZIP vzniká jen v lokální dočasné složce, na cíl jde jen `.dtb`), **ověří** a teprve potom se smažou nejstarší nad `keep`; maže se jen soubor s názvem `VidDown_<datum>_<čas>[-<s>].dtb`, nově vytvořená záloha se nikdy nesmaže. Při chybě se nic nemaže, další pokus za hodinu, Telegram jen při selhání a nejvýš jednou denně. Stav je v `kv` (`auto_backup_state`). GUI ukazuje poslední a příští zálohu, chybu, seznam záloh ve složce a tlačítka „Zálohovat teď“ a „Obnovit“ (obnova ze složky bez stahování do prohlížeče).
 
 ## 20. Inspirace
 

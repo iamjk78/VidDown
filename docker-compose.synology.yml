@@ -21,3 +21,4 @@ services:
     volumes:
       - /volume1/docker/viddown/data:/data           # databáze, nastavení, token, cookies, enginy, logy
       - /volume1/video/VidDown:/downloads      # sem se ukládají videa (cílová složka v GUI: /downloads)
+      # - /volume1/zalohy/viddown:/backups           # složka pro automatické zálohy (v GUI: Nastavení › Záloha a obnova › /backups)

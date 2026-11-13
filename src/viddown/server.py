@@ -18,7 +18,7 @@ from starlette.background import BackgroundTask
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import __version__, backup, pagelist, subscriptions, thumbs
+from . import __version__, autobackup, backup, pagelist, subscriptions, thumbs
 from .config import DEFAULTS, CHOICES, cookies_path
 from .probe import probe_url
 from .util import check_dir_writable, extract_urls, in_docker, in_schedule, sanitize_filename
@@ -573,6 +573,39 @@ def create_app(app_state) -> FastAPI:
         _schedule_restart()
         return {"ok": True, "docker": in_docker()}
 
+    # --- automatické zálohy ---------------------------------------------------------------------
+    async def _ab_status():
+        fold = autobackup.folder(S.data, S.settings)
+        items = await asyncio.to_thread(autobackup.list_backups, fold)
+        return {"enabled": bool(S.settings.get("auto_backup")), "dir": str(fold), "hours": S.settings.get("auto_backup_hours"),
+                "keep": S.settings.get("auto_backup_keep"), "state": autobackup.state(S.db),
+                "next": autobackup.next_due(S.settings, S.db), "backups": items[:20]}
+
+    @app.get("/api/autobackup")
+    async def autobackup_status():
+        return await _ab_status()
+
+    @app.post("/api/autobackup/run")
+    async def autobackup_run():
+        try:
+            await asyncio.to_thread(autobackup.run, S)
+        except backup.BackupError as e:
+            raise HTTPException(400, str(e))
+        return await _ab_status()
+
+    @app.post("/api/autobackup/restore")
+    async def autobackup_restore(req: Request):
+        """Připraví obnovu ze zálohy ve složce automatických záloh (bez stahování do prohlížeče)."""
+        name = str((await req.json()).get("name") or "")
+        p = autobackup.folder(S.data, S.settings) / name
+        if not autobackup.NAME_RE.match(name) or not p.is_file():
+            raise HTTPException(404, "Taková záloha ve složce není.")
+        try:
+            man = await asyncio.to_thread(backup.stage, S.data, p)
+        except backup.BackupError as e:
+            raise HTTPException(400, str(e))
+        return {"manifest": man}
+
     @app.delete("/api/restore")
     async def restore_cancel():
         backup.clear_pending(S.data)
@@ -632,11 +665,11 @@ def create_app(app_state) -> FastAPI:
 
     async def validate_dirs(changes: dict) -> None:
         """Cílová a dočasná složka: musí jít zapisovat, jinak se uložení odmítne."""
-        for key in ("download_dir", "temp_dir"):
+        for key in ("download_dir", "temp_dir", "auto_backup_dir"):
             if key not in changes:
                 continue
             val = str(changes[key] or "").strip()
-            if key == "temp_dir" and not val:
+            if key in ("temp_dir", "auto_backup_dir") and not val:
                 changes[key] = ""
                 continue
             ok, msg = await asyncio.to_thread(check_dir_writable, val)

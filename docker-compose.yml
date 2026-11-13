@@ -23,4 +23,5 @@ services:
       # Další složky, které půjde v GUI zvolit jako cílové (cesta uvnitř kontejneru = pravá strana):
       # - /Volumes/NAS:/nas              # macOS: připojené síťové sdílení
       # - /volume1:/nas                  # Synology: celý svazek
+      # - /Volumes/ZALOHY:/backups       # složka pro automatické zálohy (v GUI zadejte /backups)
       # Místní připojení patří do docker-compose.override.yml (necommituje se).

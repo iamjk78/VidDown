@@ -959,6 +959,11 @@ const SECTIONS = () => [
   ] },
   { icon: 'download', title: ['Záloha a obnova', 'Backup and restore'], col: 0, fields: [
     { type: 'backup' },
+    { k: 'auto_backup', type: 'toggle', label: ['Automatické zálohy', 'Automatic backups'], hint: ['Šifrované soubory .dtb se vytvářejí podle rozvrhu', 'Encrypted .dtb files are created on a schedule'] },
+    { k: 'auto_backup_hours', type: 'seg', opts: [[6, '6 h'], [12, '12 h'], [24, ['1 den', '1 day']], [72, ['3 dny', '3 days']], [168, ['1 týden', '1 week']]], label: ['Jak často', 'How often'] },
+    { k: 'auto_backup_dir', type: 'path', label: ['Složka pro zálohy', 'Backup folder'], hint: ['Prázdné = složka backups v datové složce. Proti ztrátě disku zvolte jiné místo (např. jinou síťovou složku). V Dockeru musí být připojená jako svazek.', 'Empty = the backups folder in the data folder. To survive a disk loss pick another place (e.g. another network folder). In Docker it must be a mounted volume.'] },
+    { k: 'auto_backup_keep', type: 'number', min: 1, max: 100, label: ['Kolik záloh uchovat', 'Backups to keep'], hint: ['Po úspěšné záloze se nejstarší nad tento počet smažou', 'After a successful backup the oldest ones above this number are deleted'] },
+    { type: 'abstatus' },
   ] },
   { icon: 'sliders', title: ['Pokročilé', 'Advanced'], col: 1, fields: [
     { k: 'methods', type: 'seg', opts: [['ytdlp,sniffer', 'yt-dlp → sniffer'], ['sniffer,ytdlp', 'sniffer → yt-dlp'], ['ytdlp', ['jen yt-dlp', 'yt-dlp only']], ['sniffer', ['jen sniffer', 'sniffer only']]], label: ['Pořadí metod', 'Method order'] },
@@ -1008,6 +1013,7 @@ function fieldHtml(f, S) {
       <div class="fld"><div class="lab"><div class="b5">${T('Obnova (import)', 'Restore (import)')}</div><div class="hint">${T('Nahradí současná data daty ze zálohy a restartuje aplikaci. Dosavadní stav se uloží do složky restore/ v datové složce.', 'Replaces the current data with the backup and restarts the app. The previous state is kept in the restore/ folder of the data folder.')}</div></div>
       <div class="row gap8" style="justify-content:flex-end"><label class="btn sm">${T('Vybrat zálohu…', 'Choose backup…')}<input type="file" id="rsf" accept=".dtb,.zip" hidden></label></div></div>
       <div id="rsbox"></div>`;
+    case 'abstatus': return `<div id="abbox"></div>`;
     case 'password': return `<div class="fld"><div class="lab"><div class="b5">${T('Heslo do GUI', 'GUI password')}</div><div class="hint">${S.has_password ? T('Nastaveno – GUI vyžaduje přihlášení', 'Set – the GUI requires sign-in') : T('Nenastaveno – GUI je přístupné bez hesla', 'Not set – the GUI opens without a password')}</div></div>
       <div class="row gap8">${S.has_password ? '<span class="mono t2">••••••••</span>' : ''}<button class="btn sm" id="pwbtn">${S.has_password ? T('Změnit', 'Change') : T('Nastavit', 'Set')}</button></div></div>`;
     case 'tgtoken': { const st = App.st ? App.st.telegram : {};
@@ -1057,6 +1063,7 @@ function bindSettings(root, after) {
   const rf = $('#rsf', root); if (rf) rf.onchange = async e => { const f = e.target.files[0]; if (!f) return; const fd = new FormData(); fd.append('file', f);
     const r = await act(() => api('/api/restore', { method: 'POST', body: fd }), T('Záloha ověřena', 'Backup verified')); e.target.value = ''; if (r) loadRestore($('#rsbox', root)); };
   const rb = $('#rsbox', root); if (rb) loadRestore(rb);
+  const ab = $('#abbox', root); if (ab) loadAutoBackup(ab);
   const pw = $('#pwbtn', root); if (pw) pw.onclick = () => openPassword(rer);
   const tg = $('#tgbtn', root); if (tg) tg.onclick = () => openToken(rer);
   const tt = $('#tgtest', root); if (tt) tt.onclick = () => act(() => api('/api/telegram/test', { method: 'POST' }), T('Testovací zpráva odeslána', 'Test message sent'));
@@ -1074,6 +1081,23 @@ async function waitForRestart() {
     for (let i = 0; i < 90; i++) { try { const r = await fetch('/api/state', { cache: 'no-store' }); if (r.ok || r.status === 401) break; } catch (e) { /* server ještě neběží */ } await new Promise(r => setTimeout(r, 1000)); }
     location.reload();
   }
+async function loadAutoBackup(box) {
+  let d; try { d = await api('/api/autobackup'); } catch (e) { return; }
+  if (!box.isConnected) return;
+  const s = d.state || {}, now = Date.now() / 1000;
+  const line = s.last_ok ? `${T('Poslední záloha', 'Last backup')}: ${fmtDT(s.last_ok)} · ${fmtBytes(s.size)}` : T('Zatím žádná automatická záloha', 'No automatic backup yet');
+  const nxt = d.enabled && d.next ? `${T('Další záloha', 'Next backup')}: ${d.next <= now ? T('co nejdříve', 'as soon as possible') : fmtDT(d.next)}` : T('Automatické zálohy jsou vypnuté', 'Automatic backups are off');
+  const err = s.error ? `<div class="hint" style="margin-top:4px"><span class="badge b-err">${T('Poslední pokus selhal', 'Last attempt failed')} ${fmtDT(s.last_try)}</span> ${esc(s.error)}</div>` : '';
+  const rows = (d.backups || []).map(b => `<div class="row gap8" style="padding:6px 0;border-top:1px solid var(--border)"><span class="mono fs12" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis" title="${esc(b.name)}">${esc(b.name)}</span><span class="t2 fs12">${fmtBytes(b.size)}</span><button class="btn sm" data-abr="${esc(b.name)}">${T('Obnovit', 'Restore')}</button></div>`).join('');
+  box.innerHTML = `<div style="margin:8px 0 6px"><div class="t2" style="font-size:13px">${line}</div><div class="t2" style="font-size:13px">${nxt}</div>${err}
+    <div class="row gap8 wrap" style="margin:10px 0"><button class="btn sm" id="abnow">${ic('refresh', 13)} ${T('Zálohovat teď', 'Back up now')}</button><span class="t2 fs12 mono" style="min-width:0;overflow:hidden;text-overflow:ellipsis">${esc(d.dir)}</span></div>
+    ${rows ? `<div class="hint" style="margin-bottom:4px">${T('Zálohy ve složce', 'Backups in the folder')}</div>${rows}` : ''}</div>`;
+  const nw = $('#abnow', box); if (nw) nw.onclick = async () => { nw.disabled = true; nw.textContent = T('Zálohuji…', 'Backing up…');
+    await act(() => api('/api/autobackup/run', { method: 'POST' }), T('Záloha vytvořena', 'Backup created')); loadAutoBackup(box); };
+  $$('[data-abr]', box).forEach(b => b.onclick = async () => {
+    if (!await act(() => api('/api/autobackup/restore', { method: 'POST', body: { name: b.dataset.abr } }), T('Záloha ověřena', 'Backup verified'))) return;
+    const rs = $('#rsbox'); if (rs) { await loadRestore(rs); rs.scrollIntoView({ block: 'center' }); } });
+}
 function fmtDT(ts) { return new Date(ts * 1000).toLocaleString(LANG === 'cs' ? 'cs-CZ' : 'en-GB'); }
 async function loadRestore(box) {
   let st; try { st = await api('/api/restore'); } catch (e) { return; }
