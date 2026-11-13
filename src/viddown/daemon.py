@@ -14,7 +14,7 @@ import time
 import webbrowser
 from pathlib import Path
 
-from . import __version__
+from . import __version__, appupdate
 from .config import Secrets, Settings, data_dir
 from .db import DB
 from .engines import EngineManager
@@ -198,7 +198,8 @@ async def _main(st: AppState, host: str, port: int, open_browser: bool) -> None:
 
     tasks = [asyncio.create_task(st.runner.run(stop), name="runner"),
              asyncio.create_task(st.bot.run(stop), name="telegram"),
-             asyncio.create_task(server.serve(), name="http")]
+             asyncio.create_task(server.serve(), name="http"),
+             asyncio.create_task(appupdate.health_task(st.data, stop), name="app-health")]
     if open_browser:
         async def _open():
             for _ in range(50):

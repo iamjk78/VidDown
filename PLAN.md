@@ -327,6 +327,22 @@ Nové menu **Statistiky** s přepínačem období: 24 h, 7 dní, 30 dní, 12 mě
 - Shorts a živé záložky se u odběru výchozí vypnuté (jen „videa“).
 - Kvalita a šablona názvu zůstávají globální.
 
-## 18. Inspirace
+## 18. Aktualizace aplikace zevnitř (schváleno 13. 11. 2026, varianta A)
+
+Kód aplikace se aktualizuje bez nového Docker obrazu: `<data>/app/<verze>/` (balíček `viddown`, čistý Python), spouštěč `bootstrap.py` vybere aktivní verzi a spustí ji novým procesem (`execve`, `PYTHONPATH` na verzi). Verze zabudovaná v obraze je záloha („baseline“). Windows ani macOS aplikace (PyInstaller) se dělat nebudou; cílem je Docker (Synology), na Macu jen vývoj.
+
+Pravidla:
+- **Vrstvy:** obraz (Python, ffmpeg, Chromium, závislosti), kód aplikace (aktualizuje se zevnitř), enginy (už mají vlastní aktualizace).
+- **`IMAGE_API`** (`bootstrap.py`) se zvýší při změně závislostí (`pyproject.toml`) nebo Dockerfile. Vydání nese `requires_image_api`; vyžaduje-li víc, než obraz umí, nainstaluje se až po `pull` nového obrazu.
+- **Samotest** před přepnutím běží v odděleném procesu nad **kopií** databáze: verze, import všech modulů, migrace a kontrola integrity, `/api/session` a `/api/state`, `ffmpeg` a `yt-dlp`. Selže-li, verze se označí jako přeskočená.
+- **Zkušební doba:** po přepnutí musí nová verze běžet 120 s (`HEALTHY_AFTER`), jinak se při dvou nezdravých startech za sebou (`MAX_FAILED_STARTS`) automaticky vrátí předchozí verze a vadná se přeskočí. Řádné ukončení (ruční restart) se do počtu nezapočítává; příkazy mimo `serve` také ne.
+- **Databáze:** před přepnutím se uloží záloha (`<data>/app/db-before-<verze>.sqlite`). Starší kód odmítne novější schéma (`SchemaTooNew`), proto automatický návrat po migraci **obnoví zálohu** (poškozená databáze zůstane jako `viddown.db.failed-<verze>`). Ruční návrat to udělá jen s `--restore-db`.
+- **Migrace jsou jen přidávací** (nové sloupce a tabulky, nic se nemaže ani nepřejmenovává); hlídá to test.
+- Je-li obraz stejně nový nebo novější než nainstalovaná verze (po `pull`), nainstalovaná verze se zahodí.
+- Ověřuje se `sha256` archivu, rozbalení je bezpečné (žádné cesty ven, odkazy, limity velikosti). Zdroj aktualizací je jen nastavené soukromé repozitář, token jen pro čtení v `secrets.json`.
+
+Etapy: **1** spouštěč, správa verzí, samotest, návrat a databáze (hotovo: `appupdate.py`, `bootstrap.py`, `selftest.py`, `viddown app …`); **2** kontrola a stažení z GitHub Release a rozšíření `scripts/release.sh`; **3** GUI (Nastavení, banner), Telegram, automatický režim (jen při nečinné frontě, výchozí je oznámit s tlačítkem); **4** dokumentace a ostrá zkouška v Dockeru před Synology. Návrh s obrázky: `design/VidDown_plan_aktualizace.pdf`.
+
+## 19. Inspirace
 
 Myšlenky z projektu [puemos/hls-downloader](https://github.com/puemos/hls-downloader) (MIT): detekce HLS playlistů, parsování m3u8, fragmenty, AES-128, spojování.

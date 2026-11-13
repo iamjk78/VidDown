@@ -22,7 +22,7 @@ dependencies = [
 dev = ["pytest>=8", "pyinstaller>=6.10"]
 
 [project.scripts]
-viddown = "viddown.cli:main"
+viddown = "viddown.bootstrap:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

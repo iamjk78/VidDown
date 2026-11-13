@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 from . import __version__
 from .config import DEFAULTS, Secrets, Settings, data_dir
@@ -193,6 +194,67 @@ def cmd_autostart(a) -> int:
     return 0
 
 
+def cmd_app(a) -> int:
+    """Aktualizace kódu aplikace (PLAN.md kap. 18): správa verzí v <data>/app."""
+    from . import appupdate as au
+    from .config import data_dir
+    store = au.AppStore(data_dir())
+    try:
+        if a.action == "status":
+            s = store.status()
+            print(f"Verze v obraze:    {s['baseline']}  (IMAGE_API {s['image_api']})")
+            print(f"Běží:              {s['running']}")
+            print(f"Aktivní:           {s['current'] or '- (verze z obrazu)'}   předchozí: {s['previous'] or '-'}")
+            print(f"Nainstalováno:     {', '.join(s['installed']) or '-'}")
+            if s["skipped"]:
+                print("Přeskočené:        " + "; ".join(f"{v} ({d['reason']})" for v, d in s["skipped"].items()))
+            if s["probation"]:
+                pr = s["probation"]
+                print(f"Zkušební doba:     verze {pr['version']}, starty {pr['attempts']}/{au.MAX_FAILED_STARTS}")
+            for e in s["events"]:
+                print(f"  {time.strftime('%d.%m. %H:%M', time.localtime(e['t']))}  {e['kind']:<12} {e['version'] or '':<8} {e['msg']}")
+        elif a.action == "pack":
+            if not a.arg:
+                print("Použití: viddown app pack VÝSTUP.zip [--version X.Y.Z]", file=sys.stderr)
+                return 2
+            man = au.pack(Path(a.arg), version=a.version)
+            print(f"{man['file']}\nverze {man['version']}, schéma {man['schema_version']}, sha256 {man['sha256']}")
+        elif a.action == "install":
+            if not a.arg:
+                print("Použití: viddown app install ARCHIV.zip [--sha256 SOUČET]", file=sys.stderr)
+                return 2
+            print(f"Nainstalována verze {store.install_zip(Path(a.arg), a.sha256)}")
+        elif a.action in ("selftest", "activate"):
+            if not a.arg:
+                print(f"Použití: viddown app {a.action} VERZE", file=sys.stderr)
+                return 2
+            if a.action == "selftest" or not a.no_test:
+                ok, rep = store.selftest(a.arg, skip_engines=a.skip_engines)
+                for c in rep["checks"]:
+                    print(f"  {'OK ' if c['ok'] else 'CHYBA'} {c['name']}: {c['detail']}")
+                if not ok:
+                    if a.action == "activate":
+                        store.skip(a.arg, "samotest selhal")
+                        print(f"Verze {a.arg} je přeskočená.", file=sys.stderr)
+                    return 1
+            if a.action == "activate":
+                store.activate(a.arg)
+                print(f"Aktivní je verze {a.arg}. Změna se projeví po restartu aplikace.")
+        elif a.action == "rollback":
+            r = store.rollback("ruční návrat", restore_db=a.restore_db)
+            print(f"Zpět na {r['to'] or 'verzi z obrazu'}" + (" (databáze obnovena ze zálohy)" if r["restored_db"] else "")
+                  + ". Změna se projeví po restartu aplikace.")
+        elif a.action == "unskip":
+            print("Přeskočení zrušeno." if a.arg and store.unskip(a.arg) else "Taková přeskočená verze není.")
+        elif a.action == "remove":
+            store.remove(a.arg or "")
+            print("Odstraněno.")
+    except au.UpdateError as e:
+        print(f"Chyba: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def cmd_doctor(a) -> int:
     from .daemon import running_info
     from .engines import EngineManager
@@ -283,6 +345,14 @@ def main(argv=None) -> int:
     sp.add_argument("--dry-run", action="store_true", help="jen vypíše, kolik záznamů by se změnilo")
     sp = sub.add_parser("autostart", help="spouštění po přihlášení")
     sp.add_argument("action", choices=["on", "off", "status"])
+    sp = sub.add_parser("app", help="aktualizace kódu aplikace: verze, samotest, návrat")
+    sp.add_argument("action", choices=["status", "pack", "install", "selftest", "activate", "rollback", "unskip", "remove"])
+    sp.add_argument("arg", nargs="?", help="verze nebo cesta k archivu")
+    sp.add_argument("--version", help="pack: přepíše verzi v archivu (pro zkoušky)")
+    sp.add_argument("--sha256", help="install: očekávaný kontrolní součet")
+    sp.add_argument("--no-test", action="store_true", help="activate: přeskočí samotest")
+    sp.add_argument("--skip-engines", action="store_true", help="selftest: bez kontroly enginů")
+    sp.add_argument("--restore-db", action="store_true", help="rollback: obnoví zálohu databáze (ztráta dat od přepnutí)")
     sub.add_parser("doctor", help="kontrola závislostí")
     sub.add_parser("version", help="verze")
 
@@ -309,7 +379,7 @@ def _dispatch(p, a) -> int:
         p.error("config set KLÍČ HODNOTA")
     return {"add": cmd_add, "queue": cmd_queue, "history": cmd_history, "engine": cmd_engine, "config": cmd_config,
             "password": cmd_password, "telegram": cmd_telegram, "autostart": cmd_autostart, "doctor": cmd_doctor,
-            "db": cmd_db}[a.cmd](a)
+            "db": cmd_db, "app": cmd_app}[a.cmd](a)
 
 
 if __name__ == "__main__":
