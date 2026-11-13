@@ -27,9 +27,24 @@ def cached(data: Path, jid: int) -> Path | None:
     return None
 
 
-def fetch(url: str, dest: Path, timeout=20) -> bool:
+BROWSER_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) "
+              "Chrome/131.0.0.0 Safari/537.36")
+
+
+def referer_of(page_url: str | None) -> str | None:
+    """Adresa stránky videa jako Referer pro miniatury (mnoho CDN je bez něj odmítne): schéma a hostitel s lomítkem."""
     try:
-        with httpx.Client(follow_redirects=True, timeout=timeout, headers={"User-Agent": UA}) as c:
+        from urllib.parse import urlsplit
+        u = urlsplit(page_url or "")
+    except ValueError:
+        return None
+    return f"{u.scheme}://{u.netloc}/" if u.scheme in ("http", "https") and u.netloc else None
+
+
+def fetch(url: str, dest: Path, timeout=20, referer: str | None = None) -> bool:
+    headers = {"User-Agent": BROWSER_UA, "Referer": referer} if referer else {"User-Agent": UA}
+    try:
+        with httpx.Client(follow_redirects=True, timeout=timeout, headers=headers) as c:
             r = c.get(url)
             if r.status_code != 200 or not r.content:
                 return False

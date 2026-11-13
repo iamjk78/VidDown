@@ -55,10 +55,15 @@ def info(monkeypatch):
 @pytest.fixture(autouse=True)
 def images(monkeypatch):
     """Podvržené stažení obrázku: adresy s „bad“ selžou, „html“ vrátí stránku, „png“ vrátí PNG, ostatní JPEG."""
-    fetched = []
+    class Fetched(list):
+        referers: list = []
 
-    def fetch(url, dest, timeout=20):
+    fetched = Fetched()
+    fetched.referers = []
+
+    def fetch(url, dest, timeout=20, referer=None):
         fetched.append(url)
+        fetched.referers.append(referer)
         if "bad" in url:
             return False
         dest.write_bytes(b"<html>chyba</html>" if "html" in url else (PNG if url.endswith(".png") else JPEG))

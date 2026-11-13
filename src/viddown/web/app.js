@@ -1283,7 +1283,8 @@ function catPaintSources() {
   if (d.pending || d.done || d.failed) bits.push(`<span class="t2">${T('Podrobnosti', 'Details')}: ${T('hotovo', 'done')} ${d.done} · ${T('čeká', 'waiting')} ${d.pending}${d.failed ? ` · ${T('chyb', 'failed')} ${d.failed}` : ''}</span>`);
   if (d.thumbs_pending) bits.push(`<span class="t2">${T('Miniatury', 'Thumbnails')}: ${T('čeká', 'waiting')} ${d.thumbs_pending}</span>`);
   (d.backoff || []).forEach(b => bits.push(`<span class="badge b-warn" title="${esc(b.reason)}">${esc(b.host)}: ${T('odloženo o', 'delayed by')} ${Math.max(1, Math.round(b.seconds / 60))} min</span>`));
-  if (d.failed || d.thumbs_failed) bits.push(`<button class="btn sm ghost" data-csa="retry:0">${T('Zkusit znovu neúspěšné', 'Retry failed')}</button>`);
+  if (d.thumbs_failed) bits.push(`<span class="badge b-warn" title="${T('Web miniaturu neposlal (často chybí oprávnění nebo ji dočasně odmítl). Tlačítko vpravo zkusí načíst chybějící znovu.', 'The site did not send the thumbnail. The button on the right tries the missing ones again.')}">${T('Miniatury nenačteny', 'Thumbnails missing')}: ${d.thumbs_failed}</span>`);
+  if (d.failed || d.thumbs_failed) bits.push(`<button class="btn sm" data-csa="retry:0" title="${T('Znovu zjistí podrobnosti a načte miniatury u videí, kterým se to nepodařilo', 'Retries details and thumbnails for videos where it failed')}">${ic('refresh', 12)} ${T('Zkusit znovu neúspěšné', 'Retry failed')}${d.failed || d.thumbs_failed ? ` (${(d.failed || 0) + (d.thumbs_failed || 0)})` : ''}</button>`);
   $('#catinfo').innerHTML = bits.length ? `<div class="row gap10 wrap fs12" style="padding:2px 4px">${bits.join('')}</div>` : '';
   $('#catinfo').onclick = catSrcClick;
 }

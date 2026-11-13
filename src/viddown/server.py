@@ -657,6 +657,18 @@ def create_app(app_state) -> FastAPI:
         mt = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp", ".gif": "image/gif"}.get(p.suffix.lower(), "application/octet-stream")
         return FileResponse(p, media_type=mt, headers={"Cache-Control": "max-age=86400"})
 
+    @app.get("/api/catalog/anim/{item_id}")
+    async def catalog_anim(item_id: int):
+        rows = await asyncio.to_thread(S.db.query, "select anim_file from catalog_items where id=?", (item_id,)) if item_id < 2 ** 62 else []
+        name = rows[0]["anim_file"] if rows else None
+        if not name or not catalog.ANIM_NAME.match(name):
+            raise HTTPException(404, "Animace není.")
+        p = catalog.thumbs_dir(S.data, S.settings) / name
+        if not p.is_file():
+            raise HTTPException(404, "Animace není.")
+        mt = {".mp4": "video/mp4", ".webm": "video/webm", ".gif": "image/gif", ".webp": "image/webp"}.get(p.suffix.lower(), "application/octet-stream")
+        return FileResponse(p, media_type=mt, headers={"Cache-Control": "max-age=86400"})
+
     @app.post("/api/catalog/sources")
     async def catalog_add(req: Request):
         """Přidá zdroje do fronty zjišťování: {text: "adresy po řádcích"} a/nebo {urls: [...]}. Adresa, která už v katalogu

@@ -18,6 +18,8 @@ import time
 import uuid
 from pathlib import Path
 
+import httpx
+
 from . import catalog, schedule, thumbs
 from .resolvers import ResolveError, sniffer, ytdlp
 
@@ -57,7 +59,7 @@ def looks_like_image(path: Path) -> bool:
     return head[:3] == b"\xff\xd8\xff" or head[:8] == b"\x89PNG\r\n\x1a\n" or head[:6] in (b"GIF87a", b"GIF89a") or (head[:4] == b"RIFF" and head[8:12] == b"WEBP")
 
 
-def download_thumb(folder: Path, item_id: int, urls: list[str]) -> str | None:
+def download_thumb(folder: Path, item_id: int, urls: list[str], referer: str | None = None) -> str | None:
     """Stáhne první použitelnou miniaturu ze seznamu a uloží ji jako `<id>.<přípona>` (starší soubor položky nahradí).
     Vrací název souboru, nebo None."""
     folder.mkdir(parents=True, exist_ok=True)
@@ -66,7 +68,7 @@ def download_thumb(folder: Path, item_id: int, urls: list[str]) -> str | None:
         ext = suffix if suffix in IMAGE_EXTS else ".jpg"
         tmp = folder / f"{item_id}{ext}.{uuid.uuid4().hex[:8]}.part"           # vlastní soubor pro každé stažení (souběh s podrobnostmi)
         try:
-            if not thumbs.fetch(url, tmp) or not looks_like_image(tmp):
+            if not thumbs.fetch(url, tmp, referer=referer) or not looks_like_image(tmp):
                 continue
             final = folder / f"{item_id}{ext}"
             tmp.replace(final)
@@ -79,6 +81,56 @@ def download_thumb(folder: Path, item_id: int, urls: list[str]) -> str | None:
         finally:
             tmp.unlink(missing_ok=True)
     return None
+
+
+def anim_kind(head: bytes) -> str | None:
+    """Rozpozná animaci podle obsahu: mp4, webm, gif nebo animovaný webp (VP8X s příznakem animace); jinak None."""
+    if head[4:8] == b"ftyp":
+        return "mp4"
+    if head[:4] == b"\x1a\x45\xdf\xa3":
+        return "webm"
+    if head[:6] in (b"GIF87a", b"GIF89a"):
+        return "gif"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP" and head[12:16] == b"VP8X" and len(head) > 20 and head[20] & 0x02:
+        return "webp"
+    return None
+
+
+def download_anim(folder: Path, item_id: int, url: str, max_bytes: int, referer: str | None = None) -> str | None:
+    """Stáhne animovaný náhled do složky miniatur jako `<id>.anim.<přípona>`. Soubor větší než `max_bytes` nebo s jiným
+    obsahem (statický obrázek, HTML) se zahodí. Vrací název souboru, nebo None."""
+    folder.mkdir(parents=True, exist_ok=True)
+    tmp = folder / f"{item_id}.anim.{uuid.uuid4().hex[:8]}.part"
+    try:
+        headers = {"User-Agent": thumbs.BROWSER_UA, "Referer": referer} if referer else {"User-Agent": thumbs.UA}
+        with httpx.Client(follow_redirects=True, timeout=30, headers=headers) as c:
+            with c.stream("GET", url) as r:
+                if r.status_code != 200:
+                    return None
+                if int(r.headers.get("content-length") or 0) > max_bytes:
+                    return None
+                size = 0
+                with tmp.open("wb") as f:
+                    for chunk in r.iter_bytes():
+                        size += len(chunk)
+                        if size > max_bytes:                               # velikost se hlídá i bez hlavičky Content-Length
+                            return None
+                        f.write(chunk)
+        with tmp.open("rb") as f:
+            kind = anim_kind(f.read(64)) if size else None
+        if not kind:
+            return None
+        final = folder / f"{item_id}.anim.{kind}"
+        tmp.replace(final)
+        for other in ("mp4", "webm", "gif", "webp"):                       # jediný soubor na položku
+            if other != kind:
+                (folder / f"{item_id}.anim.{other}").unlink(missing_ok=True)
+        return final.name
+    except (OSError, ValueError, httpx.HTTPError) as e:
+        log.debug("animace %s: %s", url, e)
+        return None
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 class DetailWorker:
@@ -155,13 +207,14 @@ class DetailWorker:
             n = c.execute(
                 "update catalog_items set height=coalesce(?, height), size=coalesce(?, size), duration=coalesce(?, duration), "
                 "title=coalesce(?, title), channel=coalesce(?, channel), thumb_url=coalesce(?, thumb_url), thumb_alts=coalesce(?, thumb_alts), "
+                "anim_url=coalesce(?, anim_url), "
                 "search=?, detail_state='done', detail_error=null, updated_at=? "
                 "where id=? and detail_state=? and state in ('new','queued')",
                 (ytdlp.best_height(info), ytdlp.size_estimate(info), info.get("duration"), title, channel, urls[0] if urls else None,
-                 json.dumps(urls[1:1 + catalog.THUMB_ALTS_MAX]) if len(urls) > 1 else None,
+                 json.dumps(urls[1:1 + catalog.THUMB_ALTS_MAX]) if len(urls) > 1 else None, catalog.anim_candidate(info),
                  catalog.norm(f"{title or item['title'] or ''} {channel or item['channel'] or ''}"), time.time(), item["id"], expect)).rowcount
         if n and urls and urls[0] != item.get("thumb_url"):      # jiná (obvykle lepší) miniatura než ze seznamu: nahradit
-            name = await asyncio.to_thread(download_thumb, self.folder(), item["id"], urls)
+            name = await asyncio.to_thread(download_thumb, self.folder(), item["id"], urls, thumbs.referer_of(item.get("url")))
             if name:
                 with self.db.conn() as c:
                     c.execute("update catalog_items set thumb_file=?, updated_at=? where id=? and state in ('new','queued')", (name, time.time(), item["id"]))
@@ -296,22 +349,40 @@ class DetailWorker:
             alts = json.loads(row.get("thumb_alts") or "[]")
         except ValueError:
             alts = []
-        name = await asyncio.to_thread(download_thumb, self.folder(), row["id"], [row["thumb_url"], *[a for a in alts if isinstance(a, str)]])
+        name = await asyncio.to_thread(download_thumb, self.folder(), row["id"], [row["thumb_url"], *[a for a in alts if isinstance(a, str)]],
+                                       thumbs.referer_of(row.get("url")))
         with self.db.conn() as c:
             c.execute("update catalog_items set thumb_file=?, updated_at=? where id=? and thumb_file is null",
                       (name if name else "", time.time(), row["id"]))
+
+    async def _anim_one(self, row: dict) -> None:
+        max_bytes = int(float(self.st.settings.get("catalog_anim_max_mb") or 3) * 1024 * 1024)
+        name = await asyncio.to_thread(download_anim, self.folder(), row["id"], row["anim_url"], max_bytes, thumbs.referer_of(row.get("url")))
+        with self.db.conn() as c:
+            n = c.execute("update catalog_items set anim_file=?, updated_at=? where id=? and anim_file is null and state in ('new','queued')",
+                          (name if name else "", time.time(), row["id"])).rowcount
+        if name and not n:                                        # položka mezitím zmizela: soubor je k ničemu
+            catalog.remove_anim(self.folder(), name)
 
     async def thumbs_loop(self, stop: asyncio.Event) -> None:
         """Stahuje miniatury položkám, které ještě žádnou nemají (rychle, po dávkách; selhání se označí a nezkouší znovu)."""
         while not stop.is_set():
             try:
                 rows = [] if not self.allowed_now() else await asyncio.to_thread(
-                    self.db.query, "select id, thumb_url, thumb_alts from catalog_items where thumb_file is null and thumb_url is not null "
+                    self.db.query, "select id, url, thumb_url, thumb_alts from catalog_items where thumb_file is null and thumb_url is not null "
                     "and state in ('new','queued') order by source_id, pos limit ?", (THUMB_BATCH,))
                 if rows:
                     await asyncio.gather(*(self._thumb_one(r) for r in rows))
                     await _sleep(stop, 0.2)
                     continue
+                if self.st.settings.get("catalog_anim") and self.allowed_now() and not self.paused():     # animace až po všech miniaturách
+                    arows = await asyncio.to_thread(
+                        self.db.query, "select id, url, anim_url from catalog_items where anim_file is null and anim_url is not null "
+                        "and state in ('new','queued') order by source_id, pos limit 2")
+                    if arows:
+                        await asyncio.gather(*(self._anim_one(r) for r in arows))
+                        await _sleep(stop, 0.5)
+                        continue
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001

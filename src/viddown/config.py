@@ -114,6 +114,8 @@ DEFAULTS: dict = {
     "catalog_gap": 3,                       # pauza mezi dotazy na stejný web při zjišťování podrobností (s, 0–60)
     "catalog_auto": False,                  # automaticky hledat nová videa ve zdrojích (jen nenabídnutá; v rozvrhu, je-li zapnutý)
     "catalog_auto_hours": 24,               # jak často (hodiny): 6 | 12 | 24 | 72 | 168
+    "catalog_anim": False,                  # stahovat animované náhledy (gif, webp, mp4), které web nabízí (přehrají se po najetí myší)
+    "catalog_anim_max_mb": 3,               # největší povolená velikost jedné animace (MB, 1–20)
     "catalog_slow_browser": True,           # u webů bez podpory yt-dlp zjišťovat podrobnosti i prohlížečem (až nakonec)
     # aktualizace aplikace zevnitř (PLAN.md kap. 18)
     "app_update_repo": "iamjk78/VidDown",    # GitHub repozitář s vydáními (vlastník/název)
@@ -248,6 +250,8 @@ class Settings:
                     val = f"{int(h):02d}:{int(m):02d}"
                 if k == "app_update_repo" and val and not valid_repo(val):
                     raise ValueError("app_update_repo must look like owner/name")
+                if k == "catalog_anim_max_mb" and not 1 <= val <= 20:
+                    raise ValueError("catalog_anim_max_mb must be 1-20")
                 if k == "catalog_gap" and not 0 <= val <= 60:
                     raise ValueError("catalog_gap must be 0-60")
                 if k == "app_update_hours" and val not in APP_UPDATE_HOURS:

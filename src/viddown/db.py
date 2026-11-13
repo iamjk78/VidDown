@@ -197,6 +197,12 @@ create index catalog_items_size on catalog_items(size);
 alter table jobs add column catalog_item_id integer;   -- položka katalogu, ze které úloha vznikla
 """
 
+CATALOG_ANIM_V9 = """
+alter table catalog_items add column anim_url text;      -- adresa animovaného náhledu (gif, webp, mp4, webm), když ji web nabízí
+alter table catalog_items add column anim_file text;     -- soubor v složce miniatur; null = čeká, '' = nepodařilo se
+create index catalog_items_noanim on catalog_items(source_id, pos) where anim_file is null and anim_url is not null;
+"""
+
 MIGRATIONS: list[tuple[int, object]] = [
     (1, SCHEMA),   # základní schéma (VidDown 0.1.0)
     (2, SUBSCRIPTIONS_V2),   # odběry
@@ -206,6 +212,7 @@ MIGRATIONS: list[tuple[int, object]] = [
     (6, PAGE_SUBS_V6),       # odběr ze stránky s videi
     (7, SUB_INTERVAL_V7),    # vlastní interval kontroly odběru
     (8, CATALOG_V8),         # katalog: zdroje a videa k výběru
+    (9, CATALOG_ANIM_V9),    # katalog: animované náhledy
 ]
 
 

@@ -51,6 +51,8 @@ RES_BUCKETS = {
 }
 SORT_COLUMNS = {"height": "height", "size": "size", "duration": "duration", "added": "added_at"}
 THUMB_NAME = re.compile(r"^\d+\.(jpg|jpeg|png|webp|gif)$")
+ANIM_NAME = re.compile(r"^\d+\.anim\.(mp4|webm|gif|webp)$")
+ANIM_RANK = {".mp4": 0, ".webm": 0, ".m4v": 0, ".webp": 1, ".gif": 2}      # nejdřív nejmenší: video, pak WebP, pak GIF
 
 
 def norm(text: str | None) -> str:
@@ -132,16 +134,27 @@ def remove_thumb(folder: Path | None, name: str | None) -> None:
             pass
 
 
+def remove_anim(folder: Path | None, name: str | None) -> None:
+    if folder and name and ANIM_NAME.match(name):
+        try:
+            (folder / name).unlink(missing_ok=True)
+        except OSError as e:
+            log.warning("animace %s se nepodařilo smazat: %s", name, e)
+
+
 def delete_source(db, sid: int, folder: Path | None = None) -> bool:
     """Smaže zdroj, jeho položky (a paměť o nich) i jejich miniatury."""
     with db.conn() as c:
         c.execute("begin immediate")
         names = [r["thumb_file"] for r in c.execute("select thumb_file from catalog_items where source_id=? and thumb_file != ''", (sid,))]
+        anims = [r["anim_file"] for r in c.execute("select anim_file from catalog_items where source_id=? and anim_file != ''", (sid,))]
         c.execute("delete from catalog_items where source_id=?", (sid,))
         n = c.execute("delete from catalog_sources where id=?", (sid,)).rowcount
         c.execute("commit")
     for name in names:
         remove_thumb(folder, name)
+    for name in anims:
+        remove_anim(folder, name)
     return bool(n)
 
 
@@ -173,6 +186,24 @@ def thumb_candidates(info: dict) -> list[str]:
         if u and u not in urls:
             urls.append(u)
     return urls
+
+
+def anim_candidate(info: dict) -> str | None:
+    """Adresa animovaného náhledu, kterou yt-dlp vrací mezi miniaturami: GIF, MP4/WebM nebo WebP s „anim“ v adrese či id
+    (běžné statické WebP miniatury se nepočítají). Z více adres se bere nejmenší formát (video před WebP před GIF)."""
+    best: tuple[int, str] | None = None
+    for t in [*(info.get("thumbnails") or []), {"url": info.get("thumbnail")}]:
+        u = t.get("url") if isinstance(t, dict) else None
+        if not u or not isinstance(u, str) or not u.startswith("http"):
+            continue
+        ext = Path(urlsplit(u).path).suffix.lower()
+        if ext not in ANIM_RANK:
+            continue
+        if ext == ".webp" and "anim" not in (u + str(t.get("id") or "")).lower():
+            continue
+        if best is None or ANIM_RANK[ext] < best[0]:
+            best = (ANIM_RANK[ext], u)
+    return best[1] if best else None
 
 
 def _thumb(e: dict) -> str | None:
@@ -207,7 +238,7 @@ def _flatten(entries) -> list[dict]:
         cands = thumb_candidates(e)
         out.append({"key": key, "id": e.get("id") if not ie else None, "url": u, "title": e.get("title"),
                     "channel": e.get("channel") or e.get("uploader"), "duration": e.get("duration"),
-                    "thumb_url": cands[0] if cands else None, "thumb_alts": cands[1:1 + THUMB_ALTS_MAX]})
+                    "thumb_url": cands[0] if cands else None, "thumb_alts": cands[1:1 + THUMB_ALTS_MAX], "anim_url": anim_candidate(e)})
     return out
 
 
@@ -333,7 +364,8 @@ async def list_source(url: str, ctx) -> dict:
             "entries": [{"key": key, "id": None, "url": info.get("webpage_url") or url, "title": info.get("title"),
                          "channel": info.get("channel") or info.get("uploader"), "duration": info.get("duration"),
                          "thumb_url": _thumb(info), "thumb_alts": thumb_candidates(info)[1:1 + THUMB_ALTS_MAX],
-                         "height": ytdlp.best_height(info), "size": ytdlp.size_estimate(info), "detail_state": "done"}]}
+                         "height": ytdlp.best_height(info), "size": ytdlp.size_estimate(info), "detail_state": "done",
+                         "anim_url": anim_candidate(info)}]}
 
 
 # --- uložení seznamu ------------------------------------------------------------------------------
@@ -397,11 +429,11 @@ def apply_listing(db, sid: int, listing: dict, mode: str, dl_keys: set[str], dl_
                 continue
             downloaded = key in dl_keys or e["url"] in dl_urls or bool(e.get("id") and e["id"] in dl_ids)
             c.execute("insert into catalog_items(source_id, key, url, host, title, channel, duration, thumb_url, thumb_alts, height, size, search, pos, "
-                      "state, downloaded_before, detail_state, added_at, updated_at) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                      "state, downloaded_before, detail_state, added_at, updated_at, anim_url) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                       (sid, key, e["url"], domain(e["url"]), e.get("title"), e.get("channel"), e.get("duration"), e.get("thumb_url"),
                        json.dumps(e["thumb_alts"]) if e.get("thumb_alts") else None, e.get("height"),
                        e.get("size"), norm(f"{e.get('title') or ''} {e.get('channel') or ''}"), pos, "gone" if unavailable else "new",
-                       1 if downloaded else 0, "failed" if unavailable else e.get("detail_state", "pending"), now, now))
+                       1 if downloaded else 0, "failed" if unavailable else e.get("detail_state", "pending"), now, now, e.get("anim_url")))
             added += 1
         if listing.get("complete", True):                         # videa, která ze zdroje zmizela, se skryjí
             gone = [(now, h["id"]) for k, h in existing.items() if h["state"] == "new" and k not in seen]
@@ -504,22 +536,25 @@ def select_ids(db, spec) -> list[int]:
 def remove_items(db, ids: list[int], folder: Path | None = None) -> dict:
     """Odstraní položky z katalogu (stav `removed`, zdroj si je pamatuje) a smaže jejich miniatury. Položky ve frontě
     stahování (`queued`) se neodstraňují."""
-    removed, names = 0, []
+    removed, names, anims = 0, [], []
     for k in range(0, len(ids), 500):
         chunk = ids[k:k + 500]
         mark = ",".join("?" * len(chunk))
         with db.conn() as c:
             c.execute("begin immediate")
-            rows = c.execute(f"select id, thumb_file from catalog_items where id in ({mark}) and state in ('new','gone')", chunk).fetchall()
+            rows = c.execute(f"select id, thumb_file, anim_file from catalog_items where id in ({mark}) and state in ('new','gone')", chunk).fetchall()
             got = [r["id"] for r in rows]
             if got:
-                c.execute(f"update catalog_items set state='removed', thumb_file=null, job_id=null, updated_at=? where id in ({','.join('?' * len(got))})",
+                c.execute(f"update catalog_items set state='removed', thumb_file=null, anim_file=null, job_id=null, updated_at=? where id in ({','.join('?' * len(got))})",
                           [time.time(), *got])
             c.execute("commit")
         names += [r["thumb_file"] for r in rows if r["thumb_file"]]
+        anims += [r["anim_file"] for r in rows if r["anim_file"]]
         removed += len(got)
     for n in names:
         remove_thumb(folder, n)
+    for n in anims:
+        remove_anim(folder, n)
     return {"removed": removed, "skipped": len(ids) - removed}
 
 
@@ -579,7 +614,7 @@ def reconcile(db, folder: Path | None = None) -> dict:
     """Srovná položky ve frontě s úlohami: staženo → z katalogu zmizí (zdroj si ji pamatuje, miniatura se smaže);
     selhalo, zrušeno, přeskočeno nebo úloha zmizela → položka se vrátí mezi nová s poznámkou."""
     done = back = 0
-    rows = db.query("select i.id, i.job_id, i.thumb_file, j.status js, j.error je from catalog_items i left join jobs j on j.id=i.job_id where i.state='queued'")
+    rows = db.query("select i.id, i.job_id, i.thumb_file, i.anim_file, j.status js, j.error je from catalog_items i left join jobs j on j.id=i.job_id where i.state='queued'")
     for r in rows:
         js = r["js"]
         if js == "expanded":                                            # adresa se rozbalila jako playlist: rozhodují potomci
@@ -599,8 +634,9 @@ def reconcile(db, folder: Path | None = None) -> dict:
         now = time.time()
         if js == "done":
             with db.conn() as c:
-                c.execute("update catalog_items set state='done', thumb_file=null, detail_error=null, updated_at=? where id=? and state='queued'", (now, r["id"]))
+                c.execute("update catalog_items set state='done', thumb_file=null, anim_file=null, detail_error=null, updated_at=? where id=? and state='queued'", (now, r["id"]))
             remove_thumb(folder, r["thumb_file"])
+            remove_anim(folder, r["anim_file"])
             done += 1
             continue
         if js == "skipped" and "archiv" in (r["je"] or "").lower():       # stažené jinudy: příště nabídnout „stáhnout znovu“
@@ -618,7 +654,9 @@ def item_out(r: dict) -> dict:
     return {"id": r["id"], "source_id": r["source_id"], "source_title": r.get("source_title"), "source_folder": r.get("source_folder"),
             "title": r["title"], "channel": r["channel"], "url": r["url"], "duration": r["duration"], "height": r["height"],
             "size": r["size"], "thumb_url": r["thumb_url"], "has_thumb": bool(r["thumb_file"]),
-            "thumb": f"/api/catalog/thumb/{r['id']}?v={int(r['updated_at'] or 0)}" if r["thumb_file"] else None, "state": r["state"],
+            "thumb": f"/api/catalog/thumb/{r['id']}?v={int(r['updated_at'] or 0)}" if r["thumb_file"] else None,
+            "anim": f"/api/catalog/anim/{r['id']}?v={int(r['updated_at'] or 0)}" if r.get("anim_file") else None,
+            "anim_kind": (("video" if r["anim_file"].endswith((".mp4", ".webm")) else "image") if r.get("anim_file") else None), "state": r["state"],
             "downloaded_before": bool(r["downloaded_before"]), "rejected_before": bool(r["rejected_before"]),
             "detail_state": r["detail_state"], "detail_error": r["detail_error"], "job_id": r["job_id"],
             "download_error": r["detail_error"] if (r["detail_error"] or "").startswith(DL_NOTE) else None}
