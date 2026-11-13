@@ -121,7 +121,7 @@ function onState() {
 }
 window.addEventListener('hashchange', () => { parseHash(); render(); });
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => App.settings && applyTheme(App.settings.values.theme));
-function go(v) { location.hash = v; }
+function go(v) { if (/^settings\//.test(v)) App.setQ = ''; location.hash = v; }
 
 function render() {
   clearInterval(App.timer); App.timer = null;
@@ -143,6 +143,7 @@ function renderSide() {
     ['settings', 'settings', T('Nastavení', 'Settings')], ['engines', 'cpu', T('Enginy', 'Engines')], ['help', 'help', T('Nápověda', 'Help')]];
   const subNav = subs.length ? `<div class="subnav">${subs.map(x => `<button class="nav sub ${App.view === 'sub' && +App.args[0] === x.id ? 'on' : ''}" data-go="sub/${x.id}" title="${esc(x.title || x.url)}">
     <span class="dot ${x.last_error ? 'r' : x.pending ? 'y' : x.enabled ? 'g' : ''}"></span><span class="ell">${esc(x.title || x.url)}</span>${x.queued + x.running ? `<span class="n">${x.queued + x.running}</span>` : ''}</button>`).join('')}</div>` : '';
+  const setNav = `<div class="subnav setnav">${SET_GROUPS().map(x => `<button class="nav sub ${App.view === 'settings' && !(App.setQ || '').trim() && setGroup() === x.id ? 'on' : ''}" data-go="settings/${x.id}">${ic(x.icon, 14)}<span class="ell">${x.title}</span></button>`).join('')}</div>`;
   const keepScroll = $('.subnav', side) ? $('.subnav', side).scrollTop : 0;
   const tg = st ? st.telegram : { state: 'off' };
   const tgTxt = { ok: T('Telegram bot připojen', 'Telegram bot connected'), off: T('Telegram vypnutý', 'Telegram off'),
@@ -150,7 +151,7 @@ function renderSide() {
   const disk = st ? st.disk : null;
   const dark = document.documentElement.dataset.theme === 'dark';
   const sideHtml = `<div class="logo"><div class="mk">${ic('download', 16)}</div>VidDown</div>
-  <div class="col gap4 navs">${nav.map(([v, i, l, c]) => `<button class="nav ${App.view === v ? 'on' : ''}" data-go="${v}">${ic(i, 17)}${l}${c ? `<span class="n">${c}</span>` : ''}</button>${v === 'subs' && (App.view === 'subs' || App.view === 'sub') ? subNav : ''}`).join('')}</div>
+  <div class="col gap4 navs">${nav.map(([v, i, l, c]) => `<button class="nav ${App.view === v ? 'on' : ''}" data-go="${v}">${ic(i, 17)}${l}${c ? `<span class="n">${c}</span>` : ''}</button>${v === 'settings' && App.view === 'settings' ? setNav : ''}${v === 'subs' && (App.view === 'subs' || App.view === 'sub') ? subNav : ''}`).join('')}</div>
   <div class="grow"></div>
   <div class="sfoot col gap8">
    ${disk ? `<div class="card" style="padding:12px;background:var(--surface2)">${disk.same_disk
@@ -1050,15 +1051,60 @@ function previewName(tpl) {
   return (tpl || '').replace(/\{([^}]+)\}/g, (m, k) => sample[k.toLowerCase()] ?? '').replace(/[<>:"/\\|?*]/g, ' ') || 'video';
 }
 
+/* Nastavení: karty jsou ve skupinách (podmenu v bočním panelu a pruh nad kartami na úzké obrazovce) */
+const SET_GROUPS = () => [
+  { id: 'dl', icon: 'download', title: T('Stahování', 'Downloading'), cards: ['Stahování', 'Rychlost', 'Časový rozvrh', 'Pojmenování a složky'] },
+  { id: 'cat', icon: 'film', title: T('Katalog', 'Catalog'), cards: ['Katalog'] },
+  { id: 'net', icon: 'send', title: T('Telegram a síť', 'Telegram and network'), cards: ['Telegram', 'Přístup a síť'] },
+  { id: 'app', icon: 'palette', title: T('Aplikace', 'Application'), cards: ['Vzhled a jazyk', 'Aktualizace aplikace', 'Enginy'] },
+  { id: 'data', icon: 'refresh', title: T('Data', 'Data'), cards: ['Záloha a obnova'] },
+  { id: 'adv', icon: 'sliders', title: T('Pokročilé', 'Advanced'), cards: ['Pokročilé'] },
+];
+function setGroup() {
+  const g = SET_GROUPS(), want = App.view === 'settings' ? App.args[0] : null;
+  if (want && g.some(x => x.id === want)) { try { localStorage.setItem('vd_set_group', want); } catch (e) { /* bez úložiště */ } return want; }
+  try { const v = localStorage.getItem('vd_set_group'); if (g.some(x => x.id === v)) return v; } catch (e) { /* bez úložiště */ }
+  return g[0].id;
+}
+/* Rozdělí karty do dvou sloupců podle skutečné výšky: prvních k karet vlevo, zbytek vpravo (pořadí zůstává i na úzké obrazovce);
+   volí se k s nejnižším delším sloupcem. Karty se nejdřív vykreslí do prvního sloupce, aby šly změřit. */
+function balanceCols(root) {
+  const [a, b] = $$('.scol', root), cards = $$('.sect', a);
+  if (cards.length < 2) return;
+  const h = cards.map(c => c.offsetHeight + 14);
+  let best = 0, bestMax = Infinity;
+  for (let k = 1; k <= cards.length; k++) {
+    const m = Math.max(h.slice(0, k).reduce((x, y) => x + y, 0), h.slice(k).reduce((x, y) => x + y, 0));
+    if (m < bestMax) { bestMax = m; best = k; }
+  }
+  cards.slice(best).forEach(c => b.appendChild(c));
+}
+function setMatches(s, q) {
+  const text = [L(s.title), ...s.fields.map(f => `${f.label ? L(f.label) : ''} ${f.hint ? L(f.hint) : ''}`)].join(' ').toLowerCase();
+  return q.toLowerCase().split(/\s+/).filter(Boolean).every(t => text.includes(t));
+}
+
 function renderSettings() {
-  const S = App.settings; const secs = SECTIONS();
-  const card = s => `<div class="card sect"><div class="sh">${ic(s.icon, 16)}<h2>${L(s.title)}</h2></div>${s.fields.map(f => fieldHtml(f, S)).join('')}</div>`;
+  const S = App.settings; const all = SECTIONS(), groups = SET_GROUPS(), gid = setGroup(), q = (App.setQ || '').trim();
+  const grp = groups.find(x => x.id === gid);
+  const secs = q ? all.filter(x => setMatches(x, q)) : grp.cards.map(t => all.find(x => x.title[0] === t)).filter(Boolean);
+  const groupOf = s => (groups.find(x => x.cards.includes(s.title[0])) || {}).title || '';
+  const card = s => `<div class="card sect"><div class="sh">${ic(s.icon, 16)}<h2>${L(s.title)}</h2>${q ? `<span class="t2 fs12" style="margin-left:auto">${esc(groupOf(s))}</span>` : ''}</div>${s.fields.map(f => fieldHtml(f, S)).join('')}</div>`;
   $('#main').innerHTML = `<div class="row gap16 wrap"><div><h1>${T('Nastavení', 'Settings')}</h1><div class="t2" style="margin-top:3px">${T('Změny se ukládají automaticky a platí okamžitě', 'Changes save automatically and apply immediately')}</div></div><div class="grow"></div>
    <a class="btn sm" href="/api/settings/export">${ic('download', 13)} ${T('Exportovat', 'Export')}</a><label class="btn sm">${T('Importovat', 'Import')}<input type="file" id="impf" accept=".json" hidden></label>
    <button class="btn sm" id="wizbtn">${ic('sparkle', 13)} ${T('Průvodce nastavením', 'Setup guide')}</button>
    <button class="btn sm" id="restartbtn" title="${T('Řádně ukončí a znovu spustí celou aplikaci', 'Cleanly stops and starts the whole app again')}">${ic('refresh', 13)} ${T('Restartovat aplikaci', 'Restart app')}</button></div>
-   <div class="sgrid"><div class="scol">${secs.filter(s => s.col === 0).map(card).join('')}</div><div class="scol">${secs.filter(s => s.col === 1).map(card).join('')}</div></div>`;
+   <div class="row gap8 wrap" style="margin:12px 0 4px"><div class="inwrap" style="height:32px;width:300px">${ic('search', 14)}<input id="setq" placeholder="${T('Hledat v nastavení…', 'Search settings…')}" value="${esc(App.setQ || '')}" autocomplete="off"><button class="ibtn" id="setqx" type="button" title="${T('Smazat (Esc)', 'Clear (Esc)')}" ${q ? '' : 'hidden'}>${ic('x', 12)}</button></div></div>
+   <div class="setgroups">${groups.map(x => `<button class="btn sm ${!q && x.id === gid ? 'primary' : ''}" data-go="settings/${x.id}">${ic(x.icon, 13)} ${x.title}</button>`).join('')}</div>
+   ${q && !secs.length ? `<div class="card empty">${ic('search', 28)}<h3>${T('V nastavení nic takového není', 'Nothing like that in the settings')}</h3></div>` : ''}
+   <div class="sgrid"><div class="scol">${secs.map(card).join('')}</div><div class="scol"></div></div>`;
   bindSettings($('#main'));
+  balanceCols($('#main'));
+  const sq = $('#setq');
+  const setQuery = v => { App.setQ = v; const keep = sq.selectionStart; renderSettings(); const n = $('#setq'); n.focus(); n.setSelectionRange(keep, keep); };
+  sq.oninput = () => { clearTimeout(App.setQt); App.setQt = setTimeout(() => setQuery(sq.value), 200); };
+  sq.onkeydown = e => { if (e.key === 'Escape' && sq.value) { sq.value = ''; setQuery(''); } };
+  $('#setqx').onclick = () => { App.setQ = ''; renderSettings(); };
   $('#impf').onchange = async e => { const fd = new FormData(); fd.append('file', e.target.files[0]); const r = await act(() => api('/api/settings/import', { method: 'POST', body: fd }), T('Nastavení načteno', 'Settings imported')); if (r) { App.settings = r; renderSettings(); } };
   $('#wizbtn').onclick = openWizard;
   $('#restartbtn').onclick = restartApp;

@@ -181,7 +181,9 @@ button.chip{cursor:pointer}
 .subnav{display:flex;flex-direction:column;gap:2px;max-height:34vh;overflow-y:auto;margin:2px 0 4px}
 .nav.sub{height:30px;padding-left:30px;font-size:13px;gap:8px}
 .nav.sub .dot{flex:none}
-@media (max-width:760px){.subnav{display:none}}
+.setnav{max-height:none}
+.setgroups{display:none;gap:6px;flex-wrap:wrap;margin:8px 0 6px}
+@media (max-width:760px){.subnav{display:none}.setgroups{display:flex}}
 .sysgrid{display:grid;grid-template-columns:1fr 1fr;gap:18px 22px;margin-top:12px}
 @media (max-width:900px){.sysgrid{grid-template-columns:1fr}}
 @media (max-width:1100px){.nothumb .qr,.nothumb .qr.child{grid-template-columns:24px 18px 22px minmax(0,1fr) 96px}}
