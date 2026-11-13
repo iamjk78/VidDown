@@ -255,22 +255,9 @@ def retry_allowed(kind: str) -> bool:
 
 
 def in_schedule(settings: dict, now: float | None = None) -> bool:
-    if not settings.get("schedule_enabled"):
-        return True
-    t = time.localtime(now or time.time())
-    days = settings.get("schedule_days") or []
-    sh, sm = map(int, settings["schedule_start"].split(":"))
-    eh, em = map(int, settings["schedule_end"].split(":"))
-    cur = t.tm_hour * 60 + t.tm_min
-    start, end = sh * 60 + sm, eh * 60 + em
-    if start == end:
-        return t.tm_wday in days
-    if start < end:
-        return t.tm_wday in days and start <= cur < end
-    # okno přes půlnoc: den se počítá podle začátku okna
-    if cur >= start:
-        return t.tm_wday in days
-    return ((t.tm_wday - 1) % 7) in days and cur < end
+    """Smí teď začít stahování fronty? (Rozhoduje časový rozvrh, viz schedule.py; bez dočasné výjimky.)"""
+    from . import schedule
+    return schedule.allowed(settings, "queue", now)
 
 
 def in_docker() -> bool:

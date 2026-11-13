@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from tests.test_subscriptions import State, rt  # noqa: F401
 from viddown import catalog
+from viddown.config import Settings
 from viddown.db import DB
 from viddown.resolvers import ResolveError
 from viddown.server import create_app
@@ -43,6 +44,7 @@ def fake(monkeypatch):
 class St:
     def __init__(self, data):
         self.data = data
+        self.settings = Settings()
         self.db = DB(data / "viddown.db")
         self.runner = SimpleNamespace(ctx=lambda: SimpleNamespace(settings={"channel_tabs": ["videos"]}))
 
@@ -556,11 +558,11 @@ def test_task_survives_a_database_error(st, fake, monkeypatch):
     add(st, "https://x.example/1")
     real, calls = catalog.claim_source, []
 
-    def flaky(db):
+    def flaky(db, manual_only=False):
         calls.append(1)
         if len(calls) == 1:
             raise sqlite3.OperationalError("database is locked")
-        return real(db)
+        return real(db, manual_only)
 
     async def fast(stop, sec):
         await asyncio.sleep(0.01)

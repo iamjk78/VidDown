@@ -15,9 +15,10 @@ import json
 import logging
 import random
 import time
+import uuid
 from pathlib import Path
 
-from . import catalog, thumbs
+from . import catalog, schedule, thumbs
 from .resolvers import ResolveError, ytdlp
 
 log = logging.getLogger("viddown.catalogdetails")
@@ -63,7 +64,7 @@ def download_thumb(folder: Path, item_id: int, urls: list[str]) -> str | None:
     for url in urls[:THUMB_CANDIDATES]:
         suffix = Path(url.split("?", 1)[0]).suffix.lower()
         ext = suffix if suffix in IMAGE_EXTS else ".jpg"
-        tmp = folder / f"{item_id}{ext}.part"
+        tmp = folder / f"{item_id}{ext}.{uuid.uuid4().hex[:8]}.part"           # vlastní soubor pro každé stažení (souběh s podrobnostmi)
         try:
             if not thumbs.fetch(url, tmp) or not looks_like_image(tmp):
                 continue
@@ -104,8 +105,8 @@ class DetailWorker:
         return bool(self.db.query("select 1 from catalog_sources where status in ('queued','scanning') limit 1"))
 
     def allowed_now(self) -> bool:
-        """Místo pro napojení na časový rozvrh; zatím jen ruční pozastavení."""
-        return not self.paused()
+        """Smí teď začít další práce? Ruční pozastavení a časový rozvrh (rozsah „catalog“)."""
+        return not self.paused() and schedule.allowed(self.st.settings.all(), "catalog", db=self.db)
 
     def folder(self) -> Path:
         return catalog.thumbs_dir(self.st.data, self.st.settings)
@@ -227,7 +228,7 @@ class DetailWorker:
         """Stahuje miniatury položkám, které ještě žádnou nemají (rychle, po dávkách; selhání se označí a nezkouší znovu)."""
         while not stop.is_set():
             try:
-                rows = [] if self.paused() else await asyncio.to_thread(
+                rows = [] if not self.allowed_now() else await asyncio.to_thread(
                     self.db.query, "select id, thumb_url, thumb_alts from catalog_items where thumb_file is null and thumb_url is not null "
                     "and state in ('new','queued') order by source_id, pos limit ?", (THUMB_BATCH,))
                 if rows:

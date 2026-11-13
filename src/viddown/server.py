@@ -18,7 +18,7 @@ from starlette.background import BackgroundTask
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import __version__, appupdate, autobackup, backup, catalog, catalogdetails, pagelist, subscriptions, thumbs, updater
+from . import __version__, appupdate, autobackup, backup, catalog, catalogdetails, pagelist, schedule, subscriptions, thumbs, updater
 from .config import DEFAULTS, CHOICES, cookies_path
 from .probe import probe_url
 from .util import check_dir_writable, extract_urls, in_docker, in_schedule, sanitize_filename
@@ -128,8 +128,8 @@ def create_app(app_state) -> FastAPI:
             "pause_hard": S.runner.pause_is_hard(),
             "target_error": S.db.kv_get("target_error"),
             "cookies_error": S.db.kv_get("cookies_error"),
-            "schedule": {"enabled": s["schedule_enabled"], "start": s["schedule_start"], "end": s["schedule_end"]},
-            "in_window": in_schedule(s),
+            "schedule": {"start": s["schedule_start"], "end": s["schedule_end"], **schedule.describe(s, S.db)},
+            "in_window": schedule.allowed(s, "queue", db=S.db),
             "disk": dict(S.runner.disk_status(s), dir=s["download_dir"], min_gb=s["min_free_gb"],
                          low_kind=S.db.kv_get("disk_low")),
             "telegram": S.bot.status() if S.bot else {"state": "off"},
@@ -574,6 +574,26 @@ def create_app(app_state) -> FastAPI:
             raise HTTPException(400, str(e))
         _schedule_restart()
         return {"ok": True, "docker": in_docker()}
+
+    # --- časový rozvrh -------------------------------------------------------------------------
+    @app.get("/api/schedule")
+    async def schedule_status():
+        return await asyncio.to_thread(lambda: schedule.describe(S.settings.all(), S.db))
+
+    @app.post("/api/schedule/override")
+    async def schedule_override(req: Request):
+        """Dočasně obejde rozvrh: {hours: 1|3|6}."""
+        body = await req.json()
+        hours = body.get("hours") if isinstance(body, dict) else None
+        if isinstance(hours, bool) or hours not in schedule.OVERRIDE_CHOICES:
+            raise HTTPException(400, "Povolené hodnoty: 1, 3 nebo 6 hodin.")
+        schedule.set_override(S.db, hours)
+        return await asyncio.to_thread(lambda: schedule.describe(S.settings.all(), S.db))
+
+    @app.delete("/api/schedule/override")
+    async def schedule_override_clear():
+        schedule.clear_override(S.db)
+        return await asyncio.to_thread(lambda: schedule.describe(S.settings.all(), S.db))
 
     # --- katalog -------------------------------------------------------------------------------
     def _details():

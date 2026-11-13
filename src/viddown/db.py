@@ -158,6 +158,7 @@ create table catalog_sources (
     folder text,                                -- název složky pro stahování (jen kanál a playlist)
     status text not null default 'queued',      -- queued | scanning | done | error
     scan_mode text not null default 'new',      -- new = jen dosud nenabídnutá videa; all = nabídnout znovu i odmítnutá a stažená
+    manual integer not null default 0,          -- 1 = zařazeno ručně (zjistí se hned i mimo časový rozvrh)
     error text,
     added_at real not null,
     last_scan real

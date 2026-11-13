@@ -15,7 +15,7 @@ import shutil
 import time
 from pathlib import Path
 
-from . import cpu, subscriptions, thumbs
+from . import cpu, schedule, subscriptions, thumbs
 from .config import Settings
 from .db import ACTIVE, DB
 from .i18n import t
@@ -174,7 +174,7 @@ class Runner:
         disk_low = disk["low"] is not None
         qpaused = self.queue_paused()
         hard = self.pause_is_hard()
-        window = in_schedule(s, now)
+        window = schedule.allowed(s, "queue", now, self.db)
         for jid, (task, holder) in list(self.running.items()):
             j = self.db.get(jid)
             reason = None
@@ -184,7 +184,7 @@ class Runner:
                 reason = "pause"
             elif qpaused and hard:
                 reason = "queue"
-            elif not window:
+            elif not window and not s.get("schedule_finish_running"):      # okno skončilo: rozpracované se přeruší (nebo doběhnou)
                 reason = "schedule"
             elif disk_low:
                 reason = "disk"
@@ -211,14 +211,14 @@ class Runner:
 
         # 3b) odběry: kontrola nových videí (po jednom odběru, jen když fronta není pozastavená)
         hours = float(s.get("subscription_check_hours") or 0)
-        if not qpaused and (self._sub_task is None or self._sub_task.done()):
+        if not qpaused and (self._sub_task is None or self._sub_task.done()) and schedule.allowed(s, "subscriptions", now, self.db):
             sub = subscriptions.due(self.db, hours, now)
             if sub:
                 self._sub_task = asyncio.create_task(self._check_sub(sub["id"]))
 
         # 3c) náhledy a názvy čekajících položek (po jedné s odstupem, ať to nezatěžuje web ani procesor)
         if s.get("queue_previews", True) and (self._prev_task is None or self._prev_task.done()) and time.monotonic() >= self._prev_next \
-                and self.cpu.mode != "eco":
+                and self.cpu.mode != "eco" and window:
             job = self.db.query(
                 "select * from jobs where kind='video' and status='queued' and thumb_url is null and method is null "
                 "and coalesce(info,'') not like '%\"preview_tried\"%' order by pos limit 1")

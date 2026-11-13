@@ -20,6 +20,7 @@ import unicodedata
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
+from . import schedule
 from .resolvers import ResolveError, ytdlp
 from .util import domain, sanitize_filename, url_list_name, youtube_channel_base
 
@@ -99,13 +100,13 @@ def add_sources(db, urls: list[str]) -> dict:
         for u in urls:
             row = have.get(u)
             if row is None:
-                cur = c.execute("insert into catalog_sources(url, status, scan_mode, added_at) values(?, 'queued', 'new', ?)", (u, now))
+                cur = c.execute("insert into catalog_sources(url, status, scan_mode, manual, added_at) values(?, 'queued', 'new', 1, ?)", (u, now))
                 have[u] = {"id": cur.lastrowid, "url": u, "status": "queued"}
                 added.append(cur.lastrowid)
             elif row["status"] == "scanning":
                 skipped.append({"url": u, "reason": "právě se zjišťuje"})
             else:
-                c.execute("update catalog_sources set status='queued', scan_mode='all', error=null where id=?", (row["id"],))
+                c.execute("update catalog_sources set status='queued', scan_mode='all', manual=1, error=null where id=?", (row["id"],))
                 reloaded.append(row["id"])
         c.execute("commit")
     skipped += [{"url": u, "reason": f"překročen limit {MAX_URLS} adres najednou"} for u in over]
@@ -152,7 +153,7 @@ def rescan_source(db, sid: int, mode: str) -> bool | None:
         if r["status"] == "scanning":
             c.execute("rollback")
             return False
-        c.execute("update catalog_sources set status='queued', scan_mode=?, error=null where id=?", (mode, sid))
+        c.execute("update catalog_sources set status='queued', scan_mode=?, manual=1, error=null where id=?", (mode, sid))
         c.execute("commit")
     return True
 
@@ -412,11 +413,13 @@ def sources_out(db) -> dict:
 
 
 # --- zjišťování na pozadí -------------------------------------------------------------------------
-def claim_source(db) -> dict | None:
-    """Atomicky převezme nejstarší zdroj čekající ve frontě (stav „zjišťuje se“); režim se přečte až při převzetí."""
+def claim_source(db, manual_only: bool = False) -> dict | None:
+    """Atomicky převezme nejstarší zdroj čekající ve frontě (stav „zjišťuje se“); režim se přečte až při převzetí.
+    `manual_only`: mimo časové okno se zjišťují jen zdroje zařazené ručně."""
     with db.conn() as c:
         c.execute("begin immediate")
-        r = c.execute("select * from catalog_sources where status='queued' order by id limit 1").fetchone()
+        r = c.execute("select * from catalog_sources where status='queued'" + (" and manual=1" if manual_only else "") +
+                      " order by id limit 1").fetchone()
         if r is None:
             c.execute("rollback")
             return None
@@ -473,7 +476,8 @@ async def task(st, stop: asyncio.Event) -> None:
         log.exception("katalog: obnovení fronty")
     while not stop.is_set():
         try:
-            src = await asyncio.to_thread(claim_source, st.db)
+            open_now = schedule.allowed(st.settings.all(), "catalog", db=st.db)           # mimo okno jen ručně zařazené zdroje
+            src = await asyncio.to_thread(claim_source, st.db, not open_now)
             if src is None:
                 await _sleep(stop, 3)
                 continue

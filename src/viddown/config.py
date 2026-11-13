@@ -16,6 +16,8 @@ import sys
 import threading
 from pathlib import Path
 
+from . import schedule
+
 
 def data_dir() -> Path:
     env = os.environ.get("VIDDOWN_DATA")
@@ -80,6 +82,9 @@ DEFAULTS: dict = {
     "schedule_start": "22:00",
     "schedule_end": "06:00",
     "schedule_days": [0, 1, 2, 3, 4, 5, 6],
+    "schedule_rules": [],                  # pravidla rozvrhu: [{days: [1, 3], windows: [["02:00", "05:00"], ["19:00", "21:00"]]}]
+    "schedule_scope": ["queue"],           # co se rozvrhem řídí: queue | subscriptions | catalog
+    "schedule_finish_running": False,      # na konci okna nechat rozpracovaná stahování doběhnout (jinak se přeruší)
     "sleep_min": 5,
     "sleep_max": 15,
     "retries": 5,
@@ -198,6 +203,9 @@ class Settings:
             out = copy.deepcopy(DEFAULTS)
             for k, v in self._read_file().items():
                 if k in DEFAULTS:
+                    if k == "schedule_rules":
+                        out[k] = schedule.normalize_rules_safe(v)
+                        continue
                     try:
                         out[k] = _coerce(DEFAULTS[k], v)
                     except (TypeError, ValueError):
@@ -224,7 +232,11 @@ class Settings:
             for k, v in changes.items():
                 if k not in DEFAULTS:
                     raise ValueError(f"unknown setting: {k}")
-                val = _coerce(DEFAULTS[k], v)
+                val = schedule.normalize_rules(v) if k == "schedule_rules" else _coerce(DEFAULTS[k], v)
+                if k == "schedule_scope":
+                    val = [x for x in dict.fromkeys(val)]
+                    if not val or any(x not in schedule.SCOPES for x in val):
+                        raise ValueError(f"schedule_scope must be a non-empty subset of {schedule.SCOPES}")
                 if k in CHOICES and val not in CHOICES[k]:
                     raise ValueError(f"invalid value for {k}: {val}")
                 if k in ("schedule_start", "schedule_end"):
