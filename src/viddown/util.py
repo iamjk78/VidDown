@@ -7,7 +7,7 @@ import shutil
 import time
 import unicodedata
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 URL_RE = re.compile(r"https?://[^\s<>\"'`]+", re.I)
 
@@ -181,7 +181,7 @@ _LIST_PATH = re.compile(r"^/(?:(model|pornstar|channels?|users?|user|creators?|c
 
 
 def url_list_name(url: str) -> tuple[str | None, bool]:
-    """Název seznamu odvozený z adresy, když ho web nevrátí: (název, je to kanál/autor). Např. /model/nejaky-autor/videos."""
+    """Název seznamu odvozený z adresy, když ho web nevrátí: (název, je to kanál/autor). Např. /model/jmeno/videos."""
     try:
         m = _LIST_PATH.match(urlparse(url).path)
     except ValueError:

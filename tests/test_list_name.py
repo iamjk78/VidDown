@@ -2,7 +2,7 @@ from viddown.util import url_list_name
 
 
 def test_model_page_gets_name_and_is_channel():
-    assert url_list_name("https://video.example/model/nejaky-autor/videos") == ("nejaky-autor", True)
+    assert url_list_name("https://example.com/model/jmeno/videos") == ("jmeno", True)
 
 
 def test_plain_playlist_has_no_name():
