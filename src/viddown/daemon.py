@@ -14,7 +14,7 @@ import time
 import webbrowser
 from pathlib import Path
 
-from . import __version__, appupdate
+from . import __version__, appupdate, backup
 from .config import Secrets, Settings, data_dir
 from .db import DB
 from .engines import EngineManager
@@ -139,8 +139,14 @@ def serve(open_browser: bool = False, host: str | None = None, port: int | None 
         if open_browser:
             webbrowser.open(url)
         return 0
+    restored = backup.apply_pending(data)       # obnova ze zálohy se provádí před otevřením databáze
     st = AppState()
     setup_logging(data, st.settings.get("log_level", "INFO"))
+    if restored:
+        if restored.get("ok"):
+            log.info("Obnova ze zálohy dokončena (předchozí stav: %s)", restored.get("before"))
+        else:
+            log.error("Obnova ze zálohy selhala, zůstala stará data: %s", restored.get("error"))
     host = host or bind_host(st.settings, st.secrets)
     port = int(port or os.environ.get("VIDDOWN_PORT") or st.settings.get("port", 8765))
     if host not in ("127.0.0.1", "localhost", "::1") and not st.secrets.has_password() and not env_flag("VIDDOWN_ALLOW_NO_PASSWORD"):

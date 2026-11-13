@@ -96,6 +96,18 @@ Data (`/data`) leží mimo obraz, takže se zachovají; databáze se při startu
 automaticky a před tím se uloží záloha `viddown.db.v<stará verze>.bak` vedle databáze. Databázi z novější verze VidDown
 starší verze odmítne otevřít (chrání před poškozením při downgradu). Stav ukáže `viddown db info` a `viddown doctor`.
 
+**Záloha a obnova (export a import):**
+
+- V GUI: Nastavení › Záloha a obnova. „Stáhnout zálohu“ uloží ZIP, „Vybrat zálohu…“ nahraje zálohu k obnovení.
+  Obnova se provede při restartu aplikace; před ní se dosavadní stav uloží do `restore/before-<čas>/` v datové složce (poslední 3).
+  Při přesunu na jiný stroj lze zadat „staré → nové“ cesty, které se přepíšou v historii, odběrech i nastavení.
+- V terminálu: `viddown backup [soubor.zip] [--thumbs]` a `viddown restore soubor.zip [--remap STARÁ NOVÁ]`.
+  V Dockeru: `docker exec viddown viddown backup /data/zaloha.zip` (soubor je pak v datové složce na hostiteli).
+  Když aplikace běží, `restore` obnovu jen připraví a provede se při jejím dalším startu.
+- Záloha obsahuje databázi (konzistentní snapshot i za běhu), `settings.json`, `secrets.json` (heslo, token bota), `cookies.txt`
+  a `archive.txt`; volitelně náhledy. **Neobsahuje** enginy, logy a dočasné soubory. Obsahuje tajné údaje – ukládejte ji bezpečně.
+- Záloha z novější verze, než kterou používáte, se odmítne (nejdřív aktualizujte aplikaci).
+
 ### Ze zdrojového kódu
 
 Vyžaduje Python 3.10+.

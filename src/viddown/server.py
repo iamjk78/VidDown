@@ -14,10 +14,11 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from starlette.background import BackgroundTask
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import __version__, pagelist, subscriptions, thumbs
+from . import __version__, backup, pagelist, subscriptions, thumbs
 from .config import DEFAULTS, CHOICES, cookies_path
 from .probe import probe_url
 from .util import check_dir_writable, extract_urls, in_docker, in_schedule, sanitize_filename
@@ -512,15 +513,70 @@ def create_app(app_state) -> FastAPI:
             n = S.db.delete_history(body.get("ids"), int(body.get("view") or 0), scope)
         return {"deleted": n, "archive_removed": forgot}
 
-    @app.post("/api/restart")
-    async def restart_app():
-        """Řádně ukončí aplikaci a spustí ji znovu (rozpracovaná stahování se vrátí do fronty)."""
+    def _schedule_restart():
         stop = getattr(S, "stop", None)
         if stop is None:
             raise HTTPException(501, "Restart není v tomto režimu k dispozici")
         S.restart = True
         asyncio.get_running_loop().call_later(0.5, stop.set)
+
+    @app.post("/api/restart")
+    async def restart_app():
+        """Řádně ukončí aplikaci a spustí ji znovu (rozpracovaná stahování se vrátí do fronty)."""
+        _schedule_restart()
         return {"ok": True, "docker": in_docker()}
+
+    # --- záloha a obnova (export a import) ------------------------------------------------------
+    @app.get("/api/backup")
+    async def backup_download(thumbs: int = 0):
+        try:
+            p = await asyncio.to_thread(backup.create, S.data, None, bool(thumbs))
+        except backup.BackupError as e:
+            raise HTTPException(400, str(e))
+        name = f"viddown-backup-{time.strftime('%Y%m%d-%H%M')}.zip"
+        return FileResponse(p, media_type="application/zip", filename=name, background=BackgroundTask(p.unlink, missing_ok=True))
+
+    def _restore_status():
+        pend = backup.pending(S.data)
+        return {"pending": pend, "last": backup.last_result(S.data)}
+
+    @app.get("/api/restore")
+    async def restore_status():
+        return _restore_status()
+
+    @app.post("/api/restore")
+    async def restore_stage(file: UploadFile = File(...)):
+        """Nahraje zálohu a ověří ji. Samotná obnova se provede až po potvrzení a restartu."""
+        import shutil
+        import tempfile
+        tmp = Path(tempfile.mkstemp(suffix=".zip", prefix="vd-restore-")[1])
+        try:
+            with open(tmp, "wb") as out:
+                shutil.copyfileobj(file.file, out, 1 << 20)
+            man = await asyncio.to_thread(backup.stage, S.data, tmp)
+        except backup.BackupError as e:
+            raise HTTPException(400, str(e))
+        finally:
+            tmp.unlink(missing_ok=True)
+        return {"manifest": man}
+
+    @app.post("/api/restore/apply")
+    async def restore_apply(req: Request):
+        """Potvrdí obnovu: uloží případný přepis cest a restartuje aplikaci (obnova proběhne při startu)."""
+        body = await req.json() if (await req.body()) else {}
+        if backup.pending(S.data) is None:
+            raise HTTPException(409, "Není připravená žádná záloha k obnově.")
+        try:
+            backup.set_remap(S.data, str(body.get("remap_old") or ""), str(body.get("remap_new") or ""))
+        except backup.BackupError as e:
+            raise HTTPException(400, str(e))
+        _schedule_restart()
+        return {"ok": True, "docker": in_docker()}
+
+    @app.delete("/api/restore")
+    async def restore_cancel():
+        backup.clear_pending(S.data)
+        return _restore_status()
 
     @app.get("/api/cpu")
     async def cpu_info():

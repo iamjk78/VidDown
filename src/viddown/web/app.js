@@ -957,6 +957,9 @@ const SECTIONS = () => [
     { k: 'keep_engine_versions', type: 'number', min: 1, max: 10, label: ['Uchovat verzí', 'Versions to keep'] },
     { k: 'selftest_url', type: 'text', w: 260, label: ['Testovací URL', 'Test URL'], hint: ['Ověřuje se na ní nová verze yt-dlp', 'Used to test new yt-dlp versions'] },
   ] },
+  { icon: 'download', title: ['Záloha a obnova', 'Backup and restore'], col: 0, fields: [
+    { type: 'backup' },
+  ] },
   { icon: 'sliders', title: ['Pokročilé', 'Advanced'], col: 1, fields: [
     { k: 'methods', type: 'seg', opts: [['ytdlp,sniffer', 'yt-dlp → sniffer'], ['sniffer,ytdlp', 'sniffer → yt-dlp'], ['ytdlp', ['jen yt-dlp', 'yt-dlp only']], ['sniffer', ['jen sniffer', 'sniffer only']]], label: ['Pořadí metod', 'Method order'] },
     { k: 'sniff_timeout', type: 'number', min: 10, suffix: 's', label: ['Čekání snifferu na video', 'Sniffer timeout'] },
@@ -1000,6 +1003,11 @@ function fieldHtml(f, S) {
       <div class="row gap8 wrap" style="justify-content:flex-end"><span class="seg">${[['none', T('Ne', 'Off')], ['file', 'cookies.txt'], ...(S.docker ? [] : [['browser', T('Z prohlížeče', 'From browser')]])].map(([o, l]) => `<button data-k="cookies_mode" data-t="seg" data-v="${o}" class="${mode === o ? 'on' : ''}">${l}</button>`).join('')}</span>
       ${mode === 'file' ? (cf.exists ? `<span class="badge b-ok">${ic('check', 11)} cookies.txt · ${new Date(cf.mtime * 1000).toLocaleDateString()}</span>` : `<span class="badge b-warn">${T('Soubor nenahrán', 'Not uploaded')}</span>`) + `<label class="btn sm">${T('Nahrát', 'Upload')}<input type="file" id="ckfile" accept=".txt" hidden></label>${cf.exists ? `<button class="ibtn" id="ckdel" title="${T('Smazat', 'Delete')}">${ic('trash', 14)}</button>` : ''}` : ''}
       ${mode === 'browser' ? `<select class="input sm" style="width:120px" data-k="cookies_browser" data-t="text">${['chrome', 'firefox', 'safari', 'edge', 'brave', 'opera', 'chromium', 'vivaldi'].map(b => `<option ${S.values.cookies_browser === b ? 'selected' : ''}>${b}</option>`).join('')}</select>` : ''}</div></div>`; }
+    case 'backup': return `<div class="fld"><div class="lab"><div class="b5">${T('Záloha (export)', 'Backup (export)')}</div><div class="hint">${T('Databáze (fronta, historie, odběry, statistiky), nastavení, heslo, token bota, cookies a archiv stažených videí. Obsahuje tajné údaje – uložte ji bezpečně.', 'Database (queue, history, subscriptions, statistics), settings, password, bot token, cookies and the downloaded-videos archive. Contains secrets – keep it safe.')}</div></div>
+      <div class="row gap8 wrap" style="justify-content:flex-end"><label class="row gap4 t2" style="font-size:12.5px"><input type="checkbox" id="bkthumbs"> ${T('s náhledy', 'with thumbnails')}</label><a class="btn sm" id="bkdl" href="/api/backup">${ic('download', 13)} ${T('Stáhnout zálohu', 'Download backup')}</a></div></div>
+      <div class="fld"><div class="lab"><div class="b5">${T('Obnova (import)', 'Restore (import)')}</div><div class="hint">${T('Nahradí současná data daty ze zálohy a restartuje aplikaci. Dosavadní stav se uloží do složky restore/ v datové složce.', 'Replaces the current data with the backup and restarts the app. The previous state is kept in the restore/ folder of the data folder.')}</div></div>
+      <div class="row gap8" style="justify-content:flex-end"><label class="btn sm">${T('Vybrat zálohu…', 'Choose backup…')}<input type="file" id="rsf" accept=".zip" hidden></label></div></div>
+      <div id="rsbox"></div>`;
     case 'password': return `<div class="fld"><div class="lab"><div class="b5">${T('Heslo do GUI', 'GUI password')}</div><div class="hint">${S.has_password ? T('Nastaveno – GUI vyžaduje přihlášení', 'Set – the GUI requires sign-in') : T('Nenastaveno – GUI je přístupné bez hesla', 'Not set – the GUI opens without a password')}</div></div>
       <div class="row gap8">${S.has_password ? '<span class="mono t2">••••••••</span>' : ''}<button class="btn sm" id="pwbtn">${S.has_password ? T('Změnit', 'Change') : T('Nastavit', 'Set')}</button></div></div>`;
     case 'tgtoken': { const st = App.st ? App.st.telegram : {};
@@ -1043,6 +1051,10 @@ function bindSettings(root, after) {
   $$('[data-pick]', root).forEach(b => b.onclick = () => openDirPicker(App.settings.values[b.dataset.pick], p => saveSetting(b.dataset.pick, p, rer)));
   const ck = $('#ckfile', root); if (ck) ck.onchange = async e => { const fd = new FormData(); fd.append('file', e.target.files[0]); const r = await act(() => api('/api/settings/cookies', { method: 'POST', body: fd }), T('Cookies nahrány', 'Cookies uploaded')); if (r) { App.settings = r; rer(); } };
   const ckd = $('#ckdel', root); if (ckd) ckd.onclick = async () => { const r = await act(() => api('/api/settings/cookies', { method: 'DELETE' })); if (r) { App.settings = r; rer(); } };
+  const bt = $('#bkthumbs', root); if (bt) bt.onchange = () => { $('#bkdl', root).href = '/api/backup?thumbs=' + (bt.checked ? 1 : 0); };
+  const rf = $('#rsf', root); if (rf) rf.onchange = async e => { const f = e.target.files[0]; if (!f) return; const fd = new FormData(); fd.append('file', f);
+    const r = await act(() => api('/api/restore', { method: 'POST', body: fd }), T('Záloha ověřena', 'Backup verified')); e.target.value = ''; if (r) loadRestore($('#rsbox', root)); };
+  const rb = $('#rsbox', root); if (rb) loadRestore(rb);
   const pw = $('#pwbtn', root); if (pw) pw.onclick = () => openPassword(rer);
   const tg = $('#tgbtn', root); if (tg) tg.onclick = () => openToken(rer);
   const tt = $('#tgtest', root); if (tt) tt.onclick = () => act(() => api('/api/telegram/test', { method: 'POST' }), T('Testovací zpráva odeslána', 'Test message sent'));
@@ -1051,12 +1063,42 @@ function bindSettings(root, after) {
 async function restartApp() {
     if (!confirm(T('Restartovat celou aplikaci? Rozpracovaná stahování se přeruší a po startu začnou znovu od začátku; fronta zůstane zachována.', 'Restart the whole app? Downloads in progress are interrupted and restart from the beginning; the queue is kept.'))) return;
     if (!await act(() => api('/api/restart', { method: 'POST' }))) return;
+    await waitForRestart();
+  }
+async function waitForRestart() {
     document.body.insertAdjacentHTML('beforeend', `<div id="rsov" style="position:fixed;inset:0;z-index:9999;background:var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px"><div class="spin"></div><div>${T('Restartuji aplikaci…', 'Restarting the app…')}</div></div>`);
     if (App.es) App.es.close();
     await new Promise(r => setTimeout(r, 2500));
     for (let i = 0; i < 90; i++) { try { const r = await fetch('/api/state', { cache: 'no-store' }); if (r.ok || r.status === 401) break; } catch (e) { /* server ještě neběží */ } await new Promise(r => setTimeout(r, 1000)); }
     location.reload();
   }
+function fmtDT(ts) { return new Date(ts * 1000).toLocaleString(LANG === 'cs' ? 'cs-CZ' : 'en-GB'); }
+async function loadRestore(box) {
+  let st; try { st = await api('/api/restore'); } catch (e) { return; }
+  if (!box.isConnected) return;
+  const p = st.pending, l = st.last; let h = '';
+  const desc = m => T(`záloha z ${fmtDT(m.created)}, verze ${esc(m.app_version)}: ${m.done} stažených, ${m.jobs} úloh, ${m.subscriptions} odběrů`,
+    `backup from ${fmtDT(m.created)}, version ${esc(m.app_version)}: ${m.done} downloaded, ${m.jobs} jobs, ${m.subscriptions} subscriptions`);
+  if (p && p.manifest) {
+    const m = p.manifest;
+    h += `<div style="margin:6px 0 12px;padding:12px 14px;border:1px solid var(--border2);border-radius:10px;background:var(--surface2)">
+      <div class="b5">${T('Připraveno k obnovení', 'Ready to restore')}</div>
+      <div class="t2" style="margin:3px 0 10px;font-size:13px">${desc(m)}</div>
+      <div class="hint" style="margin-bottom:6px">${T('Jen při přesunu na jiný stroj: přepsat začátek cest stažených souborů', 'Only when moving to another machine: rewrite the start of downloaded file paths')}</div>
+      <div class="row gap8 wrap"><input class="input sm" id="rsold" style="width:200px" placeholder="${esc(m.download_dir || m.path_hint || T('/stará/cesta', '/old/path'))}"><span class="t2">→</span><input class="input sm" id="rsnew" style="width:200px" placeholder="/downloads"></div>
+      <div class="row gap8" style="margin-top:12px;justify-content:flex-end"><button class="btn sm" id="rscancel">${T('Zrušit', 'Cancel')}</button><button class="btn sm primary" id="rsapply">${T('Obnovit a restartovat', 'Restore and restart')}</button></div></div>`;
+  }
+  if (l) h += l.ok
+    ? `<div class="hint"><span class="badge b-ok">${ic('check', 11)} ${T('Poslední obnova', 'Last restore')} ${fmtDT(l.at)}</span></div>`
+    : `<div class="hint"><span class="badge b-err">${T('Poslední obnova selhala', 'Last restore failed')} ${fmtDT(l.at)}</span> ${esc(l.error || '')}</div>`;
+  box.innerHTML = h;
+  const c = $('#rscancel', box); if (c) c.onclick = async () => { if (await act(() => api('/api/restore', { method: 'DELETE' }))) loadRestore(box); };
+  const a = $('#rsapply', box); if (a) a.onclick = async () => {
+    if (!confirm(T('Nahradit současná data daty ze zálohy? Aplikace se restartuje a rozpracovaná stahování se přeruší. Dosavadní stav se uloží do složky restore/ v datové složce.', 'Replace the current data with the backup? The app restarts and downloads in progress are interrupted. The previous state is kept in the restore/ folder of the data folder.'))) return;
+    if (!await act(() => api('/api/restore/apply', { method: 'POST', body: { remap_old: $('#rsold').value, remap_new: $('#rsnew').value } }))) return;
+    await waitForRestart();
+  };
+}
 async function saveSetting(k, v, after) {
   const r = await act(() => api('/api/settings', { method: 'PUT', body: { [k]: v } }));
   if (!r) { // odmítnuto (např. neplatná složka) – vrátit pole na uloženou hodnotu

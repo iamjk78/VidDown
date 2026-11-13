@@ -343,6 +343,15 @@ Pravidla:
 
 Etapy: **1** spouštěč, správa verzí, samotest, návrat a databáze (hotovo: `appupdate.py`, `bootstrap.py`, `selftest.py`, `viddown app …`); **2** kontrola a stažení z GitHub Release a rozšíření `scripts/release.sh`; **3** GUI (Nastavení, banner), Telegram, automatický režim (jen při nečinné frontě, výchozí je oznámit s tlačítkem); **4** dokumentace a ostrá zkouška v Dockeru před Synology. Návrh s obrázky: `design/VidDown_plan_aktualizace.pdf`.
 
-## 19. Inspirace
+## 19. Záloha a obnova (export a import)
+
+Modul `backup.py`, GUI v Nastavení (karta „Záloha a obnova“), příkazy `viddown backup` a `viddown restore`.
+- Záloha je ZIP: `backup.json` (popis: verze, schéma, počty, cílová složka), konzistentní snapshot `viddown.db` (SQLite backup API, funguje i za provozu), `settings.json`, `secrets.json`, `cookies.txt`, `archive.txt`, volitelně `thumbs/`. Enginy, logy a `tmp/` ne.
+- Import za běhu se jen **připraví** (`restore/pending.zip`); provede se při startu, **před otevřením databáze**. Dosavadní stav se uloží do `restore/before-<čas>/` (poslední 3). Chybná záloha nezabrání startu, zůstanou stará data a výsledek je v `restore/last.json`.
+- Ověření zálohy: bezpečné názvy souborů (jen povolené), limity velikosti, kontrola integrity databáze, záloha z novější verze schématu se odmítne.
+- Přepis cest při přesunu na jiný stroj (`--remap` / pole v GUI) mění `jobs.filepath`, `jobs.target_dir`, `subscriptions.folder` a `download_dir`/`temp_dir` v nastavení; respektuje hranice složek (`/nas/Videa` se nedotkne `/nas/Videa2`).
+- Soubory chybějící v záloze (např. cookies) se při obnově neodstraňují.
+
+## 20. Inspirace
 
 Myšlenky z projektu [puemos/hls-downloader](https://github.com/puemos/hls-downloader) (MIT): detekce HLS playlistů, parsování m3u8, fragmenty, AES-128, spojování.
