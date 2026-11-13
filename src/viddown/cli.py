@@ -213,12 +213,36 @@ def cmd_app(a) -> int:
                 print(f"Zkušební doba:     verze {pr['version']}, starty {pr['attempts']}/{au.MAX_FAILED_STARTS}")
             for e in s["events"]:
                 print(f"  {time.strftime('%d.%m. %H:%M', time.localtime(e['t']))}  {e['kind']:<12} {e['version'] or '':<8} {e['msg']}")
+        elif a.action in ("check", "update"):
+            repo, token = Settings().get("app_update_repo"), Secrets().app_update_token
+            if a.action == "check":
+                c = au.check(store, repo, token)
+                label = {"available": "k dispozici novější verze", "up_to_date": "máte nejnovější verzi",
+                         "skipped": f"verze byla přeskočena ({c['skipped_reason']})", "needs_image": "vyžaduje novější obraz"}[c["status"]]
+                print(f"Máte {c['current']}, nejnovější vydání {c['version']}: {label}.")
+                if c["status"] == "available":
+                    print(f"Velikost {fmt_bytes(c['size'])}. Aktualizace: viddown app update")
+                    if c["notes"]:
+                        print("\n" + c["notes"])
+            else:
+                r = au.update(store, repo, token, force=a.force)
+                if r["status"] == "up_to_date":
+                    print(f"Máte nejnovější verzi ({r['version']}).")
+                else:
+                    print(f"Nainstalována a otestována verze {r['version']}. Změna se projeví po restartu aplikace "
+                          "(spustí se na zkušební dobu a při potížích se sama vrátí).")
+        elif a.action == "token":
+            tok = getpass.getpass("GitHub token pro čtení vydání (prázdné = smazat): ")
+            Secrets().set_app_update_token(tok)
+            print("Token uložen." if tok.strip() else "Token smazán.")
         elif a.action == "pack":
             if not a.arg:
                 print("Použití: viddown app pack VÝSTUP.zip [--version X.Y.Z]", file=sys.stderr)
                 return 2
-            man = au.pack(Path(a.arg), version=a.version)
+            man = au.pack(Path(a.arg), version=a.version, commit=a.commit)
             print(f"{man['file']}\nverze {man['version']}, schéma {man['schema_version']}, sha256 {man['sha256']}")
+            if a.json:
+                Path(a.json).write_text(json.dumps({k: v for k, v in man.items() if k != "file"}, ensure_ascii=False, indent=1), "utf-8")
         elif a.action == "install":
             if not a.arg:
                 print("Použití: viddown app install ARCHIV.zip [--sha256 SOUČET]", file=sys.stderr)
@@ -402,9 +426,12 @@ def main(argv=None) -> int:
     sp.add_argument("--remap", nargs=2, metavar=("STARÁ", "NOVÁ"), help="přepíše začátek cest po přesunu na jiný stroj")
     sp.add_argument("--yes", "-y", action="store_true", help="bez potvrzení")
     sp = sub.add_parser("app", help="aktualizace kódu aplikace: verze, samotest, návrat")
-    sp.add_argument("action", choices=["status", "pack", "install", "selftest", "activate", "rollback", "unskip", "remove"])
+    sp.add_argument("action", choices=["status", "check", "update", "token", "pack", "install", "selftest", "activate", "rollback", "unskip", "remove"])
     sp.add_argument("arg", nargs="?", help="verze nebo cesta k archivu")
     sp.add_argument("--version", help="pack: přepíše verzi v archivu (pro zkoušky)")
+    sp.add_argument("--commit", help="pack: zkrácený commit zapsaný do manifestu")
+    sp.add_argument("--json", help="pack: zapíše manifest vydání (včetně sha256) do tohoto souboru")
+    sp.add_argument("--force", action="store_true", help="update: zkusí znovu i dřív přeskočenou verzi")
     sp.add_argument("--sha256", help="install: očekávaný kontrolní součet")
     sp.add_argument("--no-test", action="store_true", help="activate: přeskočí samotest")
     sp.add_argument("--skip-engines", action="store_true", help="selftest: bez kontroly enginů")

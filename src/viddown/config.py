@@ -10,6 +10,7 @@ import copy
 import hashlib
 import json
 import os
+import re
 import secrets as pysecrets
 import sys
 import threading
@@ -34,6 +35,12 @@ def default_download_dir() -> str:
     """Výchozí cílová složka. VIDDOWN_DEFAULT_DOWNLOAD_DIR ji jen předvyplní (v GUI zůstane měnitelná),
     VIDDOWN_DOWNLOAD_DIR ji naopak pevně zamkne."""
     return os.environ.get("VIDDOWN_DEFAULT_DOWNLOAD_DIR") or str(Path.home() / "Downloads" / "VidDown")
+
+
+def valid_repo(repo: str) -> bool:
+    """GitHub repozitář ve tvaru vlastník/název (bez `.` a `..`, které by změnily cestu v URL)."""
+    parts = (repo or "").split("/")
+    return len(parts) == 2 and all(re.fullmatch(r"[A-Za-z0-9_.-]+", x) and set(x) != {"."} for x in parts)
 
 
 AUTO_BACKUP_HOURS = (6, 12, 24, 72, 168)     # nabídka intervalu automatických záloh
@@ -96,6 +103,8 @@ DEFAULTS: dict = {
     "auto_backup_hours": 24,        # jak často (hodiny): 6 | 12 | 24 | 72 | 168
     "auto_backup_dir": "",          # prázdné = <data>/backups
     "auto_backup_keep": 5,          # kolik záloh uchovat; po úspěšné záloze se starší smažou
+    # aktualizace aplikace zevnitř (PLAN.md kap. 18)
+    "app_update_repo": "iamjk78/VidDown",    # GitHub repozitář s vydáními (vlastník/název)
     # vzhled, logy, historie
     "language": "cs",               # cs | en
     "theme": "system",              # light | dark | system
@@ -215,6 +224,8 @@ class Settings:
                     if not (0 <= int(h) < 24 and 0 <= int(m) < 60):
                         raise ValueError(f"invalid time: {val}")
                     val = f"{int(h):02d}:{int(m):02d}"
+                if k == "app_update_repo" and val and not valid_repo(val):
+                    raise ValueError("app_update_repo must look like owner/name")
                 if k == "auto_backup_hours" and val not in AUTO_BACKUP_HOURS:
                     raise ValueError(f"auto_backup_hours must be one of {AUTO_BACKUP_HOURS}")
                 if k == "auto_backup_keep" and not 1 <= val <= 100:
@@ -265,6 +276,19 @@ class Secrets:
     def set_telegram_token(self, token: str) -> None:
         d = self._load()
         d["telegram_token"] = token.strip()
+        self._save(d)
+
+    # --- token pro čtení vydání aplikace z (soukromého) GitHub repozitáře
+    @property
+    def app_update_token(self) -> str:
+        return os.environ.get("VIDDOWN_APP_UPDATE_TOKEN") or self._load().get("app_update_token", "")
+
+    def set_app_update_token(self, token: str) -> None:
+        d = self._load()
+        if token.strip():
+            d["app_update_token"] = token.strip()
+        else:
+            d.pop("app_update_token", None)
         self._save(d)
 
     # --- heslo do GUI

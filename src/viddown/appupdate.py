@@ -10,6 +10,7 @@ Stav je v `<data>/app/state.json`:
   skipped      {verze: {reason, at}} – vadné verze, které se už nezkouší
   probation    {version, attempts, since, db_backup, schema_before} nebo None
   events       posledních 30 událostí pro GUI a Telegram
+  check        výsledek poslední kontroly nových vydání {at, status, version, error}
 """
 from __future__ import annotations
 
@@ -376,7 +377,7 @@ class AppStore:
         return {"baseline": baseline_version(), "running": os.environ.get("VIDDOWN_APP_ACTIVE") or baseline_version(),
                 "current": st["current"], "previous": st["previous"], "installed": self.installed(),
                 "skipped": st["skipped"], "probation": st["probation"], "events": st["events"][-8:],
-                "image_api": image_api()}
+                "image_api": image_api(), "check": st.get("check")}
 
 
 def pack(out: Path, version: str | None = None, requires_image_api: int | None = None,
@@ -421,3 +422,159 @@ async def health_task(data: Path, stop: asyncio.Event, after: float | None = Non
         await asyncio.to_thread(store.mark_healthy, ver)
     else:
         await asyncio.to_thread(store.note_clean_stop, ver)
+
+
+# --- vydání na GitHubu: kontrola a aktualizace -------------------------------------------------
+MANIFEST_ASSET = "manifest.json"
+MAX_MANIFEST_BYTES = 64 * 1024
+
+
+def github_api() -> str:
+    return os.environ.get("VIDDOWN_GITHUB_API", "https://api.github.com").rstrip("/")
+
+
+def _client(token: str | None):
+    """HTTP klient. Token se posílá jen na GitHub API; při přesměrování na jiný server (úložiště souborů) ho httpx
+    zahodí, takže nikam jinam neodteče."""
+    import httpx
+    headers = {"User-Agent": "VidDown-updater", "X-GitHub-Api-Version": "2022-11-28"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return httpx.Client(follow_redirects=True, timeout=30, headers=headers)
+
+
+def _explain(r, repo: str, token: str | None) -> UpdateError:
+    code = r.status_code
+    if code == 404:
+        return UpdateError(f"vydání v repozitáři {repo} nenalezeno" + ("" if token else " (soukromý repozitář vyžaduje token pro čtení)"))
+    if code in (401, 403):
+        limit = r.headers.get("x-ratelimit-remaining") == "0"
+        return UpdateError("překročen limit dotazů GitHubu, zkuste později" if limit else
+                           "GitHub odmítl přístup: token je neplatný nebo nemá právo číst obsah repozitáře")
+    return UpdateError(f"GitHub odpověděl chybou {code}")
+
+
+def latest_release(repo: str, token: str | None) -> dict:
+    """Nejnovější vydání repozitáře: {version, tag, notes, assets: {název: {id, size}}}."""
+    import httpx
+    from .config import valid_repo
+    if not valid_repo(repo):
+        raise UpdateError(f"neplatný repozitář: {repo!r} (očekává se vlastník/název)")
+    try:
+        with _client(token) as c:
+            r = c.get(f"{github_api()}/repos/{repo}/releases/latest", headers={"Accept": "application/vnd.github+json"})
+    except httpx.HTTPError as e:
+        raise UpdateError(f"GitHub není dostupný: {type(e).__name__}") from e
+    if r.status_code != 200:
+        raise _explain(r, repo, token)
+    d = r.json()
+    tag = str(d.get("tag_name", ""))
+    ver = tag[1:] if tag[:1] in "vV" else tag
+    if not VER_RE.match(ver):
+        raise UpdateError(f"vydání {tag!r} nemá platnou verzi")
+    assets = {a["name"]: {"id": a["id"], "size": int(a.get("size") or 0)} for a in d.get("assets", []) if "name" in a and "id" in a}
+    return {"version": ver, "tag": tag, "notes": (d.get("body") or "")[:2000], "assets": assets}
+
+
+def _download_asset(repo: str, token: str | None, asset_id: int, dest, max_bytes: int) -> None:
+    import httpx
+    try:
+        with _client(token) as c, c.stream("GET", f"{github_api()}/repos/{repo}/releases/assets/{asset_id}",
+                                           headers={"Accept": "application/octet-stream"}) as r:
+            if r.status_code != 200:
+                raise _explain(r, repo, token)
+            n = 0
+            with open(dest, "wb") as f:
+                for chunk in r.iter_bytes(1 << 16):
+                    n += len(chunk)
+                    if n > max_bytes:
+                        raise UpdateError("stahovaný soubor je větší, než se čekalo")
+                    f.write(chunk)
+    except httpx.HTTPError as e:
+        raise UpdateError(f"stažení selhalo: {type(e).__name__}") from e
+
+
+def _release_manifest(repo: str, token: str | None, rel: dict) -> dict:
+    a = rel["assets"].get(MANIFEST_ASSET)
+    zname = f"viddown-{rel['version']}.zip"
+    if not a or zname not in rel["assets"]:
+        raise UpdateError(f"vydání {rel['tag']} nemá očekávané soubory ({MANIFEST_ASSET}, {zname})")
+    with tempfile.TemporaryDirectory() as t:
+        mp = Path(t) / "m.json"
+        _download_asset(repo, token, a["id"], mp, MAX_MANIFEST_BYTES)
+        try:
+            man = json.loads(mp.read_text("utf-8"))
+        except ValueError as e:
+            raise UpdateError("manifest vydání je poškozený") from e
+    if str(man.get("version")) != rel["version"]:
+        raise UpdateError(f"manifest ({man.get('version')}) neodpovídá vydání ({rel['version']})")
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", str(man.get("sha256", ""))):
+        raise UpdateError("manifest nemá platný kontrolní součet")
+    return man
+
+
+def check(store: AppStore, repo: str, token: str | None) -> dict:
+    """Zjistí, zda je k dispozici novější vydání (viz `_check`)."""
+    res, _ = _check(store, repo, token)
+    return res
+
+
+def _check(store: AppStore, repo: str, token: str | None) -> tuple[dict, dict]:
+    """Zjistí, zda je k dispozici novější vydání. Stav: available | up_to_date | skipped | needs_image.
+    Výsledek se zapíše do stavu (kvůli GUI); chyba sítě stav nemění a vyhodí UpdateError."""
+    effective = store.state()["current"] or baseline_version()
+    try:
+        rel = latest_release(repo, token)
+        man = _release_manifest(repo, token, rel)
+    except UpdateError as e:
+        st = store.state()
+        st["check"] = {"at": time.time(), "status": "error", "version": None, "error": str(e)}
+        store.save(st)
+        raise
+    ver = rel["version"]
+    st = store.state()
+    if vkey(ver) <= vkey(effective):
+        status = "up_to_date"
+    elif ver in st["skipped"]:
+        status = "skipped"
+    elif int(man.get("requires_image_api", 1)) > image_api():
+        status = "needs_image"
+    else:
+        status = "available"
+    res = {"status": status, "version": ver, "current": effective, "notes": rel["notes"], "sha256": man["sha256"],
+           "requires_image_api": int(man.get("requires_image_api", 1)), "size": rel["assets"][f"viddown-{ver}.zip"]["size"],
+           "skipped_reason": (st["skipped"].get(ver) or {}).get("reason")}
+    st["check"] = {"at": time.time(), "status": status, "version": ver, "error": None}
+    store.save(st)
+    return res, rel
+
+
+def update(store: AppStore, repo: str, token: str | None, force: bool = False, skip_engines: bool = False) -> dict:
+    """Zjistí, stáhne, ověří a nainstaluje novější vydání, otestuje ho a přepne na něj (po restartu aplikace).
+    Vadná verze (samotest selže) se odstraní a označí jako přeskočená. Chyba sítě nic nemění."""
+    c, rel = _check(store, repo, token)
+    ver = c["version"]
+    if c["status"] == "up_to_date":
+        return {"status": "up_to_date", "version": c["current"]}
+    if c["status"] == "needs_image":
+        raise UpdateError(f"verze {ver} vyžaduje novější obraz (API {c['requires_image_api']}, obraz má {image_api()}); "
+                          "aktualizujte obraz příkazem pull")
+    if c["status"] == "skipped":
+        if not force:
+            raise UpdateError(f"verze {ver} byla přeskočena ({c['skipped_reason']}); zkusit znovu lze s --force")
+        store.unskip(ver)
+    if c["size"] > MAX_ZIP_BYTES:
+        raise UpdateError("archiv vydání je příliš velký")
+    with tempfile.TemporaryDirectory(dir=store.root if store.root.is_dir() else None) as t:
+        zp = Path(t) / f"viddown-{ver}.zip"
+        _download_asset(repo, token, rel["assets"][f"viddown-{ver}.zip"]["id"], zp, MAX_ZIP_BYTES)
+        installed = store.install_zip(zp, c["sha256"])
+    ok, report = store.selftest(installed, skip_engines=skip_engines)
+    if not ok:
+        bad = next((x for x in report["checks"] if not x["ok"]), {"name": "samotest", "detail": ""})
+        reason = f"samotest selhal ({bad['name']}: {str(bad['detail'])[:160]})"
+        store.remove(installed)
+        store.skip(installed, reason)
+        raise UpdateError(f"verze {installed} neprošla samotestem a byla přeskočena: {reason}")
+    store.activate(installed)
+    return {"status": "activated", "version": installed, "restart": True, "notes": c["notes"], "report": report}

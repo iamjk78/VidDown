@@ -96,6 +96,17 @@ Data (`/data`) leží mimo obraz, takže se zachovají; databáze se při startu
 automaticky a před tím se uloží záloha `viddown.db.v<stará verze>.bak` vedle databáze. Databázi z novější verze VidDown
 starší verze odmítne otevřít (chrání před poškozením při downgradu). Stav ukáže `viddown db info` a `viddown doctor`.
 
+**Aktualizace kódu bez nového obrazu** (zatím z terminálu):
+
+- Vydání: zvyšte verzi v `src/viddown/__init__.py`, commitněte, pushněte a spusťte `scripts/release.sh`. Vedle obrazu vytvoří
+  na GitHubu vydání `v<verze>` s archivem kódu a manifestem (`scripts/release.sh --app-only` jen sestaví archiv).
+  Při změně závislostí nebo Dockerfile zvyšte `IMAGE_API` v `src/viddown/bootstrap.py`.
+- Na straně aplikace: `docker exec viddown viddown app check` ukáže, zda je novější verze; `viddown app update` ji stáhne,
+  ověří, otestuje a připraví; po restartu aplikace (nebo kontejneru) poběží. Nová verze má zkušební dobu a při potížích se sama
+  vrátí na předchozí a vadná se přeskočí. Stav ukáže `viddown app status`.
+- Soukromý repozitář vyžaduje GitHub token jen pro čtení (Contents: read): `docker exec -it viddown viddown app token`
+  (nebo proměnná `VIDDOWN_APP_UPDATE_TOKEN`). Repozitář je v nastavení `app_update_repo`.
+
 **Záloha a obnova (export a import):**
 
 - V GUI: Nastavení › Záloha a obnova. „Stáhnout zálohu“ uloží šifrovaný soubor `VidDown_<datum>_<čas>.dtb`, „Vybrat zálohu…“ nahraje zálohu k obnovení (`.dtb` i ZIP).
