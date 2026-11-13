@@ -730,8 +730,12 @@ class Runner:
             return None
         if job["status"] in ("done", "skipped"):
             self.archive_forget(job)
-        keep = {k: job[k] for k in ("sub_id", "target_dir", "subdir") if job.get(k)}  # složka odběru zůstane
+        keep = {k: job[k] for k in ("sub_id", "target_dir", "subdir", "catalog_item_id") if job.get(k)}  # složka odběru a vazba na katalog zůstanou
         new_id, _ = self.add(job["url"], source=job["source"], auto_confirm=True, **keep)
+        if job.get("catalog_item_id"):                         # položka katalogu znovu čeká na novou úlohu
+            with self.db.conn() as c:
+                c.execute("update catalog_items set state='queued', job_id=?, detail_error=null, updated_at=? "
+                          "where id=? and state in ('new','queued')", (new_id, time.time(), job["catalog_item_id"]))
         return new_id
 
     @staticmethod

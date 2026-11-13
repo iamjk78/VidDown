@@ -45,12 +45,22 @@ async def fetch(url: str, settings: dict | None = None, timeout: float = 30) -> 
         kw["proxy"] = proxy
     try:
         async with httpx.AsyncClient(follow_redirects=True, timeout=timeout, headers={"User-Agent": UA, "Accept-Language": "cs,sk,en;q=0.8"}, **kw) as c:
-            r = await c.get(url)
+            async with c.stream("GET", url) as r:
+                if r.status_code >= 400:
+                    raise PageError(f"stránka vrací chybu HTTP {r.status_code}")
+                ctype = (r.headers.get("content-type") or "").split(";")[0].strip().lower()
+                if ctype and not (ctype.startswith("text/") or "html" in ctype or "xml" in ctype):
+                    raise PageError(f"adresa nevede na webovou stránku ({ctype})")
+                body = bytearray()
+                async for chunk in r.aiter_bytes():          # velký soubor se nenačítá celý do paměti
+                    body += chunk
+                    if len(body) >= MAX_BYTES:
+                        break
+                final = str(r.url)
+                enc = r.encoding or "utf-8"
     except httpx.HTTPError as e:
         raise PageError(f"stránku se nepodařilo načíst: {e}") from e
-    if r.status_code >= 400:
-        raise PageError(f"stránka vrací chybu HTTP {r.status_code}")
-    return r.text[:MAX_BYTES], str(r.url)
+    return bytes(body[:MAX_BYTES]).decode(enc, errors="replace"), final
 
 
 class _Links(HTMLParser):

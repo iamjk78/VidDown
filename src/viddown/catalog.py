@@ -227,9 +227,9 @@ PAGE_TIMEOUT = 1800           # celé zjištění zdroje typu „stránka“ (s)
 async def list_page(url: str, ctx, cause: Exception | None = None) -> dict:
     """Zdroj typu „stránka“ (web, který yt-dlp nezná): díly se najdou jako opakující se odkazy a další stránky seznamu podle
     parametru stránkování. Nejdřív rychle z běžného HTML; když se tak seznam nenajde a je zapnutý prohlížeč
-    (`catalog_slow_browser`), stránka se vykreslí v Chromiu (pomalá vrstva). Vyhodí ResolveError."""
+    (`catalog_slow_browser`), stránky se vykreslí v Chromiu (pomalá vrstva, jeden prohlížeč pro všechny stránky).
+    Vyhodí ResolveError."""
     slow = bool(ctx.settings.get("catalog_slow_browser"))
-    rendered = False
     try:
         try:
             text, final = await pagelist.fetch(url, ctx.settings)
@@ -237,15 +237,27 @@ async def list_page(url: str, ctx, cause: Exception | None = None) -> dict:
             raise ResolveError(str(e), "network") from e
         try:
             cfg = pagelist.detect(text, final)
+            renderer = None
         except pagelist.PageError:
             if not slow:
                 raise
-            text, final = await sniffer.render_html(final, ctx)
-            rendered = True
-            cfg = pagelist.detect(text, final)
+            renderer = sniffer.Renderer(ctx)
     except pagelist.PageError as e:
         why = f"web není podporovaný a seznam videí se na stránce nenašel ({e})"
         raise ResolveError(why + ("" if slow else "; zapněte v Nastavení › Katalog prohlížeč pro pomalé weby"), "unsupported") from cause or e
+    if renderer is None:
+        return await _page_entries(url, ctx, cfg, None)
+    async with renderer as rd:
+        try:
+            text, final = await rd.render(final)
+            cfg = pagelist.detect(text, final)
+        except pagelist.PageError as e:
+            raise ResolveError(f"web není podporovaný a seznam videí se na stránce nenašel ({e})", "unsupported") from cause or e
+        return await _page_entries(url, ctx, cfg, rd)
+
+
+async def _page_entries(url: str, ctx, cfg: dict, rd) -> dict:
+    """Projde stránky seznamu podle zjištěné konfigurace; `rd` je prohlížeč (vykreslené stránky) nebo None (běžné HTML)."""
     items = [dict(i) for i in cfg["items"]]
     seen = {i["url"] for i in items}
     complete = True
@@ -254,7 +266,7 @@ async def list_page(url: str, ctx, cause: Exception | None = None) -> dict:
             try:
                 await asyncio.sleep(1.0)                                   # šetrně k webu
                 nxt = pagelist.page_url(url, cfg, k)
-                text, final = await (sniffer.render_html(nxt, ctx) if rendered else pagelist.fetch(nxt, ctx.settings))
+                text, final = await (rd.render(nxt) if rd else pagelist.fetch(nxt, ctx.settings))
             except (pagelist.PageError, ResolveError) as e:
                 complete = complete and any(f"HTTP {c}" in str(e) for c in (404, 410))     # za poslední stránkou vrací mnoho webů 404
                 break

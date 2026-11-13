@@ -181,29 +181,48 @@ def parse_m3u8(text: str, base: str) -> dict:
     return res
 
 
-async def render_html(url: str, ctx: Ctx, scrolls: int = 6) -> tuple[str, str]:
-    """Načte stránku v headless Chromiu (včetně obsahu vykresleného JavaScriptem), postupně ji odroluje kvůli líně
-    načítaným seznamům a vrátí (HTML, konečná adresa). Slouží katalogu u webů, jejichž seznam videí není v běžném HTML."""
-    try:
-        from playwright.async_api import TimeoutError as PWTimeout
-        from playwright.async_api import async_playwright
-    except ImportError as e:
-        raise ResolveError(f"Playwright není nainstalován: {e}", "engine")
-    s = ctx.settings
-    timeout = float(s.get("sniff_timeout", 40))
-    async with async_playwright() as p:
+class Renderer:
+    """Jeden headless Chromium pro vykreslení více stránek po sobě (`async with Renderer(ctx) as r: await r.render(url)`)."""
+
+    def __init__(self, ctx: Ctx):
+        self.ctx = ctx
+        self._pw = self._browser = self._context = None
+
+    async def __aenter__(self):
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError as e:
+            raise ResolveError(f"Playwright není nainstalován: {e}", "engine")
+        s = self.ctx.settings
+        self._pw = await async_playwright().start()
         kw = {"headless": True}
         if s.get("proxy"):
             kw["proxy"] = {"server": s["proxy"]}
         try:
-            browser = await p.chromium.launch(**kw)
+            self._browser = await self._pw.chromium.launch(**kw)
         except Exception as e:  # noqa: BLE001
+            await self._pw.stop()
             raise ResolveError(f"Chromium nelze spustit ({e}). Nainstalujte ho v Enginy.", "engine")
+        self._context = await self._browser.new_context(user_agent=UA, viewport={"width": 1280, "height": 900}, locale="cs-CZ")
+        if self.ctx.cookies_file:
+            await add_cookies(self._context, self.ctx.cookies_file)
+        return self
+
+    async def __aexit__(self, *exc):
         try:
-            context = await browser.new_context(user_agent=UA, viewport={"width": 1280, "height": 900}, ignore_https_errors=True, locale="cs-CZ")
-            if ctx.cookies_file:
-                await add_cookies(context, ctx.cookies_file)
-            page = await context.new_page()
+            if self._browser:
+                await self._browser.close()
+        finally:
+            if self._pw:
+                await self._pw.stop()
+
+    async def render(self, url: str, scrolls: int = 6) -> tuple[str, str]:
+        """Načte stránku (včetně obsahu vykresleného JavaScriptem), postupně ji odroluje kvůli líně načítaným seznamům
+        a vrátí (HTML, konečná adresa)."""
+        from playwright.async_api import TimeoutError as PWTimeout
+        timeout = float(self.ctx.settings.get("sniff_timeout", 40))
+        page = await self._context.new_page()
+        try:
             try:
                 await page.goto(url, wait_until="domcontentloaded", timeout=timeout * 1000)
             except PWTimeout:
@@ -225,7 +244,13 @@ async def render_html(url: str, ctx: Ctx, scrolls: int = 6) -> tuple[str, str]:
                 last = h
             return await page.content(), page.url
         finally:
-            await browser.close()
+            await page.close()
+
+
+async def render_html(url: str, ctx: Ctx, scrolls: int = 6) -> tuple[str, str]:
+    """Vykreslí jednu stránku vlastním prohlížečem (viz `Renderer`)."""
+    async with Renderer(ctx) as r:
+        return await r.render(url, scrolls)
 
 
 async def sniff(url: str, ctx: Ctx) -> dict:

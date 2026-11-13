@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from tests.test_catalog import fake, scan  # noqa: F401
+from tests.test_runner import rt  # noqa: F401
 from tests.test_catalog_details import St as DSt, images, info, rows, run_until, states  # noqa: F401
 from viddown import catalog, catalogdetails as cd, pagelist
 from viddown.config import Settings
@@ -53,11 +54,23 @@ def web(monkeypatch):
             raise a
         return a, url
 
-    async def render(url, ctx, scrolls=6):
-        rendered.setdefault("calls", []).append(url)
-        return rendered[url], url
+    class FakeRenderer:
+        """Jeden „prohlížeč“ pro všechny stránky: eviduje počet spuštění."""
+        def __init__(self, ctx):
+            pass
+
+        async def __aenter__(self):
+            rendered["launches"] = rendered.get("launches", 0) + 1
+            return self
+
+        async def __aexit__(self, *exc):
+            rendered["closed"] = rendered.get("closed", 0) + 1
+
+        async def render(self, url, scrolls=6):
+            rendered.setdefault("calls", []).append(url)
+            return rendered[url], url
     monkeypatch.setattr(pagelist, "fetch", fetch)
-    monkeypatch.setattr(catalog.sniffer, "render_html", render)
+    monkeypatch.setattr(catalog.sniffer, "Renderer", FakeRenderer)
     monkeypatch.setattr(catalog.pagelist, "fetch", fetch)
 
     async def nosleep(_):
@@ -339,3 +352,46 @@ def test_missing_browser_engine_fails_the_item_instead_of_looping(st_, fake, inf
     info.answers["https://web.example/dily/0"] = ResolveError("Unsupported URL", "unsupported")
     sniff.answers["https://web.example/dily/0"] = ResolveError("Chromium nelze spustit", "engine")
     asyncio.run(run_until(st_, lambda: states(st_)["https://web.example/dily/0"][0] == "failed"))
+
+
+def test_browser_renders_all_pages_with_one_launch(pst, fake, web):
+    web.pages[BASE] = "<html><body>skript</body></html>"
+    web.rendered[BASE] = page_html(["a", "b"], pager=(0, 1))
+    web.rendered[f"{BASE}?pg=1"] = page_html(["c", "d"], pager=(0, 1, 2))
+    web.rendered[f"{BASE}?pg=2"] = page_html(["c", "d"], pager=(0, 1, 2))
+    assert add_page(pst, fake)["total"] == 4
+    assert web.rendered["launches"] == 1 and web.rendered["closed"] == 1 and len(web.rendered["calls"]) == 3
+
+
+def test_retry_keeps_the_catalog_link_and_requeues_the_item(rt):
+    from viddown import catalog as cat
+    with rt.db.conn() as c:
+        c.execute("insert into catalog_sources(id,url,status,added_at,folder) values (1,'https://s.example/p','done',1,'Složka')")
+        c.execute("insert into catalog_items(id,source_id,key,url,state,detail_state,added_at,updated_at) values (5,1,'k','https://s.example/v','new','done',1,1)")
+    jid, _ = rt.add("https://s.example/v", source="catalog", auto_confirm=True, catalog_item_id=5, subdir="Složka")
+    rt.db.update(jid, status="failed", error="boom")
+    cat.reconcile(rt.db)
+    assert rt.db.query("select state from catalog_items")[0]["state"] == "new"
+    new_id = rt.retry(jid)
+    row = rt.db.query("select state, job_id from catalog_items")[0]
+    assert (row["state"], row["job_id"]) == ("queued", new_id)
+    j = rt.db.get(new_id)
+    assert j["catalog_item_id"] == 5 and j["subdir"] == "Složka"
+
+
+def test_fetch_limits_memory_and_rejects_non_html(monkeypatch):
+    import httpx
+    big = b"<html>" + b"x" * 5_000_000
+    handlers = {"/big": httpx.Response(200, content=big, headers={"content-type": "text/html; charset=utf-8"}),
+                "/video": httpx.Response(200, content=b"\0" * 100, headers={"content-type": "video/mp4"}),
+                "/missing": httpx.Response(404, content=b"")}
+    real = httpx.AsyncClient
+
+    def client(*a, **kw):
+        return real(*a, transport=httpx.MockTransport(lambda req: handlers[req.url.path]), **kw)
+    monkeypatch.setattr(pagelist.httpx, "AsyncClient", client)
+    text, final = asyncio.run(pagelist.fetch("https://w.example/big"))
+    assert len(text) <= pagelist.MAX_BYTES and final == "https://w.example/big"
+    for path, msg in (("/video", "nevede na webovou stránku"), ("/missing", "HTTP 404")):
+        with pytest.raises(pagelist.PageError, match=msg):
+            asyncio.run(pagelist.fetch("https://w.example" + path))
