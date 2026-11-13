@@ -329,3 +329,61 @@ def test_failed_thumbnails_can_be_retried(st, fake, info, images):
     assert cd.retry_failed(st.db)["thumbs"] == 1
     asyncio.run(run_until(st, lambda: anim_rows(st)["youtube a"]["thumb_file"], thumbs=True))
     assert anim_rows(st)["youtube a"]["thumb_file"].endswith(".jpg") and cd.DetailWorker(st).status()["thumbs_failed"] == 0
+
+
+# ------------------------------------------------------------ etapa 2: doplnění animací a stav
+def seed_refill(st, fake):
+    make(st, fake, [e("a"), e("b"), e("c"), e("d"), e("f")])
+    with st.db.conn() as c:
+        c.execute("update catalog_items set detail_state='done'")
+        c.execute("update catalog_items set anim_url='https://c/b.gif', anim_file='' where key='youtube b'")                        # nad limit
+        c.execute("update catalog_items set anim_url='https://c/c.gif', anim_file='7.anim.gif' where key='youtube c'")              # hotovo
+        c.execute("update catalog_items set state='removed' where key='youtube d'")                                                 # skryté se nezpracují
+        c.execute("update catalog_items set detail_state='failed' where key='youtube f'")                                           # chyba podrobností: ne
+
+
+def test_refill_rechecks_only_visible_done_items_without_an_animation_url(st, fake):
+    seed_refill(st, fake)
+    assert cd.refill_anims(st.db) == {"details": 1, "retry": 1}
+    r = anim_rows(st)
+    assert r["youtube a"]["detail_state"] == "pending"                                    # bez adresy animace: znovu zjistit podrobnosti
+    assert r["youtube b"]["anim_file"] is None and r["youtube b"]["detail_state"] == "done"   # nad limit: nový pokus o stažení
+    assert r["youtube c"]["anim_file"] == "7.anim.gif"                                    # hotovou nechá
+    assert r["youtube d"]["detail_state"] == "done" and r["youtube f"]["detail_state"] == "failed"
+    assert cd.refill_anims(st.db) == {"details": 0, "retry": 0}                          # podruhé nic: položka už čeká na podrobnosti
+
+
+def test_refill_can_be_limited_to_one_source(st, fake):
+    seed_refill(st, fake)
+    other = st.db.query("select id from catalog_sources")[0]["id"] + 1
+    assert cd.refill_anims(st.db, other) == {"details": 0, "retry": 0}
+    assert cd.refill_anims(st.db, st.db.query("select id from catalog_sources")[0]["id"])["details"] == 1
+
+
+def test_refill_end_to_end_reads_the_animation_url_from_details_and_downloads_it(st, fake, info, web):
+    make(st, fake, [e("a")])
+    with st.db.conn() as c:
+        c.execute("update catalog_items set detail_state='done'")            # starší položka: adresa animace se neukládala
+    info.answers["https://example.com/watch/a"] = {**info.default, "thumbnails": [{"url": "https://img/s.jpg"}, {"url": "https://img/a.gif"}]}
+    web.pages["https://img/a.gif"] = (200, GIF, {})
+    assert cd.refill_anims(st.db)["details"] == 1
+    asyncio.run(run_until(st, lambda: anim_rows(st)["youtube a"]["anim_file"], thumbs=True))
+    assert anim_rows(st)["youtube a"]["anim_file"].endswith(".anim.gif")
+
+
+def test_status_counts_animations(st, fake):
+    seed_refill(st, fake)
+    with st.db.conn() as c:
+        c.execute("update catalog_items set anim_url='https://c/a.gif' where key='youtube a'")
+    s = cd.DetailWorker(st).status()
+    assert (s["anim_pending"], s["anim_have"], s["anim_failed"]) == (1, 1, 1)
+
+
+def test_api_refill_validates_and_reports(client):
+    c, s = client
+    assert c.post("/api/catalog/anim/refill", json={"source": "1"}).status_code == 400
+    assert c.post("/api/catalog/anim/refill", json={"source": True}).status_code == 400
+    assert c.post("/api/catalog/anim/refill", json={"source": 0}).status_code == 400
+    r = c.post("/api/catalog/anim/refill")
+    assert r.status_code == 200 and r.json()["details"] == 0 and "overview" in r.json()
+    assert {"anim_pending", "anim_have", "anim_failed"} <= set(r.json()["overview"]["details"])

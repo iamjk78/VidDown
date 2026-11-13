@@ -1182,7 +1182,7 @@ function catClearSel() { CAT.sel.clear(); CAT.exclude.clear(); CAT.selAll = null
 
 function renderCatalog() {
   $('#main').innerHTML = `<div class="row gap16 wrap"><div><h1>${T('Katalog', 'Catalog')}</h1><div class="t2" style="margin-top:3px">${T('Videa ze zdrojů k výběru: nic se nestahuje, dokud se nerozhodnete', 'Videos from your sources to pick from: nothing downloads until you decide')}</div></div>
-    <div class="grow"></div><span class="row gap6 fs13" id="catauto"></span><button class="btn" id="catpause"></button><button class="btn primary lg" id="catadd">${ic('plus', 15)} ${T('Přidat zdroje', 'Add sources')}</button></div>
+    <div class="grow"></div><span class="row gap6 fs13" id="catauto"></span><button class="btn" id="cataf" title="${T('Znovu zjistí podrobnosti videí bez animace a zkusí znovu stáhnout ty, které byly nad limitem. Zapněte před tím stahování animací v Nastavení › Katalog.', 'Re-checks videos without an animation and retries those that were over the limit. Turn on animation downloads in Settings › Catalog first.')}">${ic('play', 14)} ${T('Doplnit animace', 'Fill in animations')}</button><button class="btn" id="catpause"></button><button class="btn primary lg" id="catadd">${ic('plus', 15)} ${T('Přidat zdroje', 'Add sources')}</button></div>
     <div id="catbanner" class="col gap8"></div><div id="catinfo"></div><div id="catsrc" class="catsrcs"></div>
     <div class="card cattools"><div class="row gap8 wrap">
       <div class="inwrap" style="height:32px;width:280px">${ic('search', 14)}<input id="catq" placeholder="${T('Hledat v názvu videa a kanálu…', 'Search video and channel names…')}" value="${esc(CAT.q)}" autocomplete="off"><button class="ibtn" id="catqx" type="button" title="${T('Smazat (Esc)', 'Clear (Esc)')}" ${CAT.q ? '' : 'hidden'}>${ic('x', 12)}</button></div>
@@ -1207,10 +1207,18 @@ function renderCatalog() {
   $('#catres').onclick = e => { const b = e.target.closest('[data-res]'); if (b) reload(() => { const v = b.dataset.res, i = CAT.res.indexOf(v); i >= 0 ? CAT.res.splice(i, 1) : CAT.res.push(v); }); };
   $('#catstate').onclick = e => { const b = e.target.closest('[data-st]'); if (b) reload(() => { const v = b.dataset.st, i = CAT.state.indexOf(v); i >= 0 ? CAT.state.splice(i, 1) : CAT.state.push(v); }); };
   $('#catadd').onclick = openCatAdd;
+  $('#cataf').onclick = async () => {
+    if (!App.settings.values.catalog_anim) return toast(T('Nejdřív zapněte stahování animací v Nastavení › Katalog', 'First turn on animation downloads in Settings › Catalog'), true);
+    const r = await act(() => api('/api/catalog/anim/refill', { method: 'POST', body: CAT.source ? { source: CAT.source } : {} }));
+    if (!r) return;
+    CAT.ov = r.overview; catPaintSources();
+    toast(r.details || r.retry ? T(`Doplňuji animace: znovu zjistím ${r.details} videí, další pokus u ${r.retry}`, `Filling in animations: re-checking ${r.details} videos, retrying ${r.retry}`) : T('Není co doplnit', 'Nothing to fill in'));
+  };
   catPaintAuto();
   $('#catpause').onclick = async () => { const paused = CAT.ov && CAT.ov.details.paused; const r = await act(() => api('/api/catalog/pause', { method: 'POST', body: { paused: !paused } })); if (r) { CAT.ov = r; catPaintSources(); } };
   $('#catsrc').onclick = catSrcClick;
   $('#catgrid').onclick = catGridClick;
+  $('#catgrid').onmouseover = catAnimHover; $('#catgrid').onmouseout = catAnimHover;
   $('#catgrid').onchange = e => { const c = e.target.closest('[data-csel]'); if (c) catToggle(+c.dataset.csel, c.checked); };
   $('#catsel').onclick = catSelClick;
   $('#catpager').onclick = e => { const b = e.target.closest('[data-page]'); if (b && !b.disabled) { CAT.offset = (+b.dataset.page - 1) * CAT.limit; catLoad(); $('#mainwrap').scrollTop = 0; } };
@@ -1283,6 +1291,7 @@ function catPaintSources() {
   else if (d.waiting_for_lists) bits.push(`<span class="t2">${T('Nejdřív se dokončí seznamy všech zdrojů…', 'Finishing the lists of all sources first…')}</span>`);
   if (d.slow) bits.push(`<span class="t2" title="${T('Weby, které yt-dlp nezná: podrobnosti se zjišťují prohlížečem až po rychlé práci, po jednom videu.', 'Sites yt-dlp does not know: details are checked with the browser after the fast work, one video at a time.')}">${T('Pomalé (prohlížečem)', 'Slow (browser)')}: ${T('čeká', 'waiting')} ${d.slow}</span>`);
   if (d.pending || d.done || d.failed) bits.push(`<span class="t2">${T('Podrobnosti', 'Details')}: ${T('hotovo', 'done')} ${d.done} · ${T('čeká', 'waiting')} ${d.pending}${d.failed ? ` · ${T('chyb', 'failed')} ${d.failed}` : ''}</span>`);
+  if (App.settings.values.catalog_anim && (d.anim_pending || d.anim_have || d.anim_failed)) bits.push(`<span class="t2" title="${T('Animace, které web nabízí; stahují se po miniaturách', 'Animations the site offers; downloaded after the thumbnails')}">${T('Animace', 'Animations')}: ${T('staženo', 'downloaded')} ${d.anim_have}${d.anim_pending ? ` · ${T('čeká', 'waiting')} ${d.anim_pending}` : ''}${d.anim_failed ? ` · ${T('nad limit nebo nedostupné', 'over the limit or unavailable')} ${d.anim_failed}` : ''}</span>`);
   if (d.thumbs_pending) bits.push(`<span class="t2">${T('Miniatury', 'Thumbnails')}: ${T('čeká', 'waiting')} ${d.thumbs_pending}</span>`);
   (d.backoff || []).forEach(b => bits.push(`<span class="badge b-warn" title="${esc(b.reason)}">${esc(b.host)}: ${T('odloženo o', 'delayed by')} ${Math.max(1, Math.round(b.seconds / 60))} min</span>`));
   if (d.thumbs_failed) bits.push(`<span class="badge b-warn" title="${T('Web miniaturu neposlal (často chybí oprávnění nebo ji dočasně odmítl). Tlačítko vpravo zkusí načíst chybějící znovu.', 'The site did not send the thumbnail. The button on the right tries the missing ones again.')}">${T('Miniatury nenačteny', 'Thumbnails missing')}: ${d.thumbs_failed}</span>`);
@@ -1313,7 +1322,9 @@ function catCard(it) {
     it.download_error ? `<span class="vbd g" title="${esc(it.download_error)}">${T('stahování selhalo', 'download failed')}</span>` : '',
     it.detail_state === 'failed' && it.state !== 'gone' ? `<span class="vbd g" title="${esc(it.detail_error || '')}">${T('podrobnosti nezjištěny', 'details unavailable')}</span>` : ''].join('');
   const meta = it.size ? fmtBytes(it.size) : (it.detail_state === 'pending' ? T('zjišťuji…', 'checking…') : '—');
-  return `<div class="vcard ${sel ? 'on' : ''}" data-cid="${it.id}"><div class="vth">${it.thumb ? `<img loading="lazy" src="${esc(it.thumb)}" alt="" onerror="this.remove()">` : ''}<div class="vph">${ic('film', 28)}</div>
+  return `<div class="vcard ${sel ? 'on' : ''}" data-cid="${it.id}"><div class="vth ${it.anim ? 'has-anim' : ''}">${it.thumb ? `<img loading="lazy" src="${esc(it.thumb)}" alt="" onerror="this.remove()">` : ''}<div class="vph">${ic('film', 28)}</div>
+    ${it.anim ? (it.anim_kind === 'video' ? `<video class="vanim" muted loop playsinline preload="none" data-asrc="${esc(it.anim)}"></video>` : `<img class="vanim" alt="" data-asrc="${esc(it.anim)}">`) : ''}
+    ${it.anim ? `<span class="vb3" title="${T('Najetím myší (na dotyku klepnutím) se přehraje animace', 'Hover (tap on touch screens) to play the animation')}">${ic('play', 10)} ${T('animace', 'animation')}</span>` : ''}
     ${h ? `<span class="vb1">${h}</span>` : ''}<label class="vck"><input type="checkbox" data-csel="${it.id}" ${sel ? 'checked' : ''}></label>${it.duration ? `<span class="vb2">${fmtDur(it.duration)}</span>` : ''}</div>
     <div class="vt"><a href="${esc(it.url)}" target="_blank" rel="noopener" title="${esc(it.title || it.url)}">${esc(it.title || it.url)}</a></div>
     <div class="vm ell" title="${esc(it.source_title || '')}">${esc(it.source_title || '')}${it.channel && it.channel !== it.source_title ? ' · ' + esc(it.channel) : ''}</div>
@@ -1381,7 +1392,27 @@ async function catRemove(spec, count) {
   CAT.busy = false;
   if (r) { if (r.skipped) toast(T(`Přeskočeno ${r.skipped} (ve frontě nebo už odstraněno)`, `Skipped ${r.skipped} (queued or already removed)`)); catClearSel(); catLoad(); }
 }
+/* Animace v kartě: načte se a přehraje až při najetí myší (dotyk: klepnutí na náhled), jinak se nic nestahuje ani nepřehrává */
+function catAnimOn(th, on) {
+  const el = $('.vanim', th); if (!el) return;
+  if (on) {
+    if (!el.getAttribute('src')) el.src = el.dataset.asrc;
+    th.classList.add('anim-on');
+    if (el.tagName === 'VIDEO') { const p = el.play(); if (p && p.catch) p.catch(() => {}); }
+  } else {
+    th.classList.remove('anim-on');
+    if (el.tagName === 'VIDEO') el.pause(); else el.removeAttribute('src');            // obrázek: odpojením se animace zastaví a uvolní paměť
+  }
+}
+function catAnimHover(e) {
+  const th = e.target.closest && e.target.closest('.vth.has-anim'); if (!th) return;
+  const inside = th.contains(e.relatedTarget);
+  if (e.type === 'mouseover' && !inside) catAnimOn(th, true);
+  if (e.type === 'mouseout' && !inside) catAnimOn(th, false);
+}
 function catGridClick(e) {
+  const th = e.target.closest('.vth.has-anim');
+  if (th && !e.target.closest('.vck, a, button') && matchMedia('(hover: none)').matches) { catAnimOn(th, !th.classList.contains('anim-on')); return; }
   const b = e.target.closest('[data-cact]');
   if (!b || b.disabled) return;
   if (b.dataset.cact === 'remove') catRemove({ ids: [+b.dataset.id] }, 1);

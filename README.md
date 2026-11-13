@@ -111,6 +111,11 @@ Menu **Katalog** slouží k třídění videí před stahováním: přidáte zdr
   v Nastavení › Katalog („Pomalé weby zjišťovat prohlížečem“).
 - **Automatické hledání nových videí:** přepínač **Hledat nová videa automaticky** nahoře v Katalogu a interval (6 h až týden).
   Zdroje se samy znovu prohlédnou a nabídnou jen dosud nenabídnutá videa; řídí se časovým rozvrhem (rozsah „katalog“).
+- **Animované náhledy:** v Nastavení › Katalog zapněte „Stahovat animované náhledy“ (výchozí vypnuto; největší velikost jedné animace je
+  5 MB, 1 až 20). Když web mezi miniaturami nabízí animaci (GIF, WebP, MP4), uloží se vedle miniatury a karta dostane odznak
+  „animace“; **přehraje se po najetí myší** (na dotykovém displeji klepnutím na náhled), jinak se nic nepřehrává. Větší animace se nestáhne
+  a zůstane statická miniatura. U už načtených videí tlačítko **Doplnit animace** znovu zjistí podrobnosti videí bez animace (po jednom
+  na web s pauzou) a zkusí znovu ty, které byly nad limitem.
 - **Podrobnosti** (rozlišení, velikost, délka, větší miniatura) se doplňují postupně, po jednom videu na web s nastavitelnou pauzou
   (Nastavení › Katalog), a až po dokončení seznamů všech zdrojů. U každého zdroje jde zdroj **Obnovit** (najde jen nová videa),
   **Načíst znovu vše** (nabídne znovu i odmítnutá a stažená) a **Odebrat** (smaže i paměť o jeho videích).

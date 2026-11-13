@@ -395,11 +395,14 @@ class DetailWorker:
     def status(self) -> dict:
         r = self.db.query(
             "select sum(detail_state='pending') pending, sum(detail_state='slow') slow, sum(detail_state='done') done, sum(detail_state='failed') failed, "
-            "sum(thumb_file is null and thumb_url is not null) thumbs_pending, sum(thumb_file = '') thumbs_failed "
+            "sum(thumb_file is null and thumb_url is not null) thumbs_pending, sum(thumb_file = '') thumbs_failed, "
+            "sum(anim_file is null and anim_url is not null) anim_pending, sum(anim_file is not null and anim_file != '') anim_have, "
+            "sum(anim_file = '') anim_failed "
             "from catalog_items where state in ('new','queued')")[0]
         now = time.monotonic()
         return {"pending": r["pending"] or 0, "slow": r["slow"] or 0, "done": r["done"] or 0, "failed": r["failed"] or 0,
                 "thumbs_pending": r["thumbs_pending"] or 0, "thumbs_failed": r["thumbs_failed"] or 0,
+                "anim_pending": r["anim_pending"] or 0, "anim_have": r["anim_have"] or 0, "anim_failed": r["anim_failed"] or 0,
                 "paused": self.paused(), "waiting_for_lists": self.listing_busy(), "active_hosts": sorted(self.active),
                 "backoff": [{"host": h, "seconds": int(b["until"] - now), "reason": b["reason"]} for h, b in sorted(self.backoff.items())
                             if b["until"] > now]}
@@ -424,6 +427,22 @@ def retry_failed(db, source: int | None = None) -> dict:
         t = c.execute("update catalog_items set thumb_file=null where thumb_file='' and state in ('new','queued')" + where, args).rowcount
         c.execute("commit")
     return {"details": d, "thumbs": t}
+
+
+def refill_anims(db, source: int | None = None) -> dict:
+    """„Doplnit animace“: viditelným videím bez adresy animace znovu zjistí podrobnosti (adresa se dřív neukládala; zjistí se
+    spolu s ostatními podrobnostmi, po jednom na web s pauzou) a videím, kterým se animace nepodařilo stáhnout, dá další pokus
+    (třeba po zvýšení limitu velikosti). Vrací počty {"details", "retry"}."""
+    where, args = "", []
+    if source:
+        where, args = " and source_id=?", [int(source)]
+    with db.conn() as c:
+        c.execute("begin immediate")
+        d = c.execute("update catalog_items set detail_state='pending', detail_error=null where detail_state='done' "
+                      "and anim_url is null and anim_file is null and state in ('new','queued')" + where, args).rowcount
+        r = c.execute("update catalog_items set anim_file=null where anim_file='' and anim_url is not null and state in ('new','queued')" + where, args).rowcount
+        c.execute("commit")
+    return {"details": d, "retry": r}
 
 
 async def task(st, stop: asyncio.Event) -> None:

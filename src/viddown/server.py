@@ -625,6 +625,17 @@ def create_app(app_state) -> FastAPI:
         res = await asyncio.to_thread(catalogdetails.retry_failed, S.db, src)
         return {**res, "overview": await asyncio.to_thread(_overview)}
 
+    @app.post("/api/catalog/anim/refill")
+    async def catalog_anim_refill(req: Request):
+        """Doplní animace u už načtených videí: {source?: id}. Znovu zjistí podrobnosti videí bez adresy animace a dá další pokus
+        těm, kterým se stažení nepodařilo."""
+        body = await req.json() if (await req.body()) else {}
+        src = body.get("source") if isinstance(body, dict) else None
+        if src is not None and (not isinstance(src, int) or isinstance(src, bool) or not 0 < src < 2 ** 62):
+            raise HTTPException(400, "Neplatný zdroj.")
+        res = await asyncio.to_thread(catalogdetails.refill_anims, S.db, src)
+        return {**res, "overview": await asyncio.to_thread(_overview)}
+
     @app.post("/api/catalog/items/action")
     async def catalog_items_action(req: Request):
         """Hromadná akce nad položkami: {action: "remove" | "download", ids: [...]} nebo {action, filter: {...}, exclude: [...]};

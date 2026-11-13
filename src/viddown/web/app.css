@@ -207,6 +207,11 @@ button.chip{cursor:pointer}
 .vcard.on{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-soft)}
 .vth{position:relative;aspect-ratio:16/9;background:var(--surface2);overflow:hidden}
 .vth img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:1}
+.vanim{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:1;opacity:0;transition:opacity .15s;pointer-events:none;background:var(--surface2)}
+.vth.anim-on .vanim{opacity:1}
+.vth.has-anim{cursor:pointer}
+.vb3{position:absolute;z-index:2;left:8px;bottom:8px;background:rgba(16,24,40,.78);color:#fff;border-radius:6px;padding:1px 7px;font-size:11px;font-weight:600;display:flex;align-items:center;gap:4px}
+.vth.anim-on .vb3{display:none}
 .vph{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--muted)}
 .vb1,.vb2{position:absolute;z-index:2;background:rgba(16,24,40,.78);color:#fff;border-radius:6px;padding:1px 7px;font-size:11.5px;font-weight:700}
 .vb1{left:8px;top:8px}.vb2{right:8px;bottom:8px;font-weight:600}
