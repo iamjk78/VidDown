@@ -139,6 +139,7 @@ okno přes půlnoc (22:00–06:00) platí podle dne začátku a stejný začáte
   začnou až v okně.
 - **Dočasná výjimka:** v banneru „čeká na časové okno“ (ve frontě, v odběrech) i v Nastavení jde rozvrh na 1, 3 nebo 6 hodin obejít.
 - Dřívější nastavení jednoho okna se zobrazí jako první pravidlo a po první úpravě se uloží do nového tvaru.
+- Ostrou zkoušku v Dockeru spustí `.venv/bin/python scripts/e2e_schedule.py` (jednorázový kontejner, nesahá na běžící VidDown).
 
 ### Aktualizace aplikace bez nového obrazu
 
