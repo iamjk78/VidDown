@@ -114,7 +114,8 @@ Menu **Katalog** slouží k třídění videí před stahováním: přidáte zdr
 - **Animované náhledy:** v Nastavení › Katalog zapněte „Stahovat animované náhledy“ (výchozí vypnuto; největší velikost jedné animace je
   5 MB, 1 až 20). Když web mezi miniaturami nabízí animaci (GIF, WebP, MP4), uloží se vedle miniatury a karta dostane odznak
   „animace“; **přehraje se po najetí myší** (na dotykovém displeji klepnutím na náhled), jinak se nic nepřehrává. Větší animace se nestáhne
-  a zůstane statická miniatura. U už načtených videí tlačítko **Doplnit animace** znovu zjistí podrobnosti videí bez animace (po jednom
+  a zůstane statická miniatura. U webů, které nabízejí **storyboard** (okénka z videa, např. YouTube), složí aplikace z několika okének
+  rovnoměrně z celého videa krátké smyčkové MP4 (potřebuje ffmpeg, který je v Dockeru i ve správci enginů). U už načtených videí tlačítko **Doplnit animace** znovu zjistí podrobnosti videí bez animace (po jednom
   na web s pauzou) a zkusí znovu ty, které byly nad limitem.
 - **Podrobnosti** (rozlišení, velikost, délka, větší miniatura) se doplňují postupně, po jednom videu na web s nastavitelnou pauzou
   (Nastavení › Katalog), a až po dokončení seznamů všech zdrojů. U každého zdroje jde zdroj **Obnovit** (najde jen nová videa),

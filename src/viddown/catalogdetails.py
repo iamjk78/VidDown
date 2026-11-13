@@ -14,13 +14,14 @@ import dataclasses
 import json
 import logging
 import random
+import shutil
 import time
 import uuid
 from pathlib import Path
 
 import httpx
 
-from . import catalog, schedule, thumbs
+from . import catalog, schedule, storyboard, thumbs
 from .resolvers import ResolveError, sniffer, ytdlp
 
 log = logging.getLogger("viddown.catalogdetails")
@@ -211,7 +212,7 @@ class DetailWorker:
                 "search=?, detail_state='done', detail_error=null, updated_at=? "
                 "where id=? and detail_state=? and state in ('new','queued')",
                 (ytdlp.best_height(info), ytdlp.size_estimate(info), info.get("duration"), title, channel, urls[0] if urls else None,
-                 json.dumps(urls[1:1 + catalog.THUMB_ALTS_MAX]) if len(urls) > 1 else None, catalog.anim_candidate(info),
+                 json.dumps(urls[1:1 + catalog.THUMB_ALTS_MAX]) if len(urls) > 1 else None, catalog.anim_source(info),
                  catalog.norm(f"{title or item['title'] or ''} {channel or item['channel'] or ''}"), time.time(), item["id"], expect)).rowcount
         if n and urls and urls[0] != item.get("thumb_url"):      # jiná (obvykle lepší) miniatura než ze seznamu: nahradit
             name = await asyncio.to_thread(download_thumb, self.folder(), item["id"], urls, thumbs.referer_of(item.get("url")))
@@ -355,9 +356,20 @@ class DetailWorker:
             c.execute("update catalog_items set thumb_file=?, updated_at=? where id=? and thumb_file is null",
                       (name if name else "", time.time(), row["id"]))
 
+    def ffmpeg(self) -> str | None:
+        """Cesta k ffmpeg ze správce enginů (jinak ffmpeg v PATH)."""
+        try:
+            return str(self.st.runner.ctx().engines.get("ffmpeg").bin_path())
+        except Exception:  # noqa: BLE001
+            return shutil.which("ffmpeg")
+
     async def _anim_one(self, row: dict) -> None:
         max_bytes = int(float(self.st.settings.get("catalog_anim_max_mb") or 5) * 1024 * 1024)
-        name = await asyncio.to_thread(download_anim, self.folder(), row["id"], row["anim_url"], max_bytes, thumbs.referer_of(row.get("url")))
+        referer = thumbs.referer_of(row.get("url"))
+        if storyboard.is_spec(row["anim_url"]):                       # storyboard: obrázky se složí ffmpegem do krátkého MP4
+            name = await asyncio.to_thread(storyboard.build, self.folder(), row["id"], row["anim_url"], self.ffmpeg(), max_bytes, referer)
+        else:
+            name = await asyncio.to_thread(download_anim, self.folder(), row["id"], row["anim_url"], max_bytes, referer)
         with self.db.conn() as c:
             n = c.execute("update catalog_items set anim_file=?, updated_at=? where id=? and anim_file is null and state in ('new','queued')",
                           (name if name else "", time.time(), row["id"])).rowcount

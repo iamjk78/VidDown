@@ -387,3 +387,139 @@ def test_api_refill_validates_and_reports(client):
     r = c.post("/api/catalog/anim/refill")
     assert r.status_code == 200 and r.json()["details"] == 0 and "overview" in r.json()
     assert {"anim_pending", "anim_have", "anim_failed"} <= set(r.json()["overview"]["details"])
+
+
+# ------------------------------------------------------------ etapa 3: storyboardy (sprite sheety → smyčkové MP4)
+import json
+import shutil
+import subprocess
+
+from viddown import storyboard as sbm
+
+FFMPEG = shutil.which("ffmpeg")
+needs_ffmpeg = pytest.mark.skipif(not FFMPEG, reason="ffmpeg není nainstalován")
+
+
+def sb_format(fid="sb1", w=160, h=90, cols=5, rows=5, fps=0.5, frags=2, dur=50, base="https://cdn.example/sb"):
+    return {"format_id": fid, "ext": "mhtml", "format_note": "storyboard", "width": w, "height": h, "columns": cols, "rows": rows, "fps": fps,
+            "fragments": [{"url": f"{base}/{fid}/{i}.jpg", "duration": dur} for i in range(frags)]}
+
+
+def test_storyboard_candidate_picks_the_frame_size_closest_to_320():
+    info = {"formats": [sb_format("sb3", 48, 27), sb_format("sb2", 80, 45), sb_format("sb1", 160, 90), sb_format("sb0", 320, 180), {"format_id": "137", "ext": "mp4"}]}
+    spec = json.loads(sbm.candidate(info)[3:])
+    assert (spec["w"], spec["h"], spec["c"], spec["r"]) == (320, 180, 5, 5) and spec["n"] == [25, 25] and len(spec["u"]) == 2
+    only_small = {"formats": [sb_format("sb3", 48, 27), sb_format("sb2", 100, 56)]}
+    assert sbm.candidate(only_small) is None                                      # okénka pod 120 px se nepoužijí
+    assert sbm.candidate({"formats": [{"format_id": "137", "ext": "mp4"}]}) is None and sbm.candidate({}) is None
+    broken = {"formats": [{**sb_format(), "columns": "x"}, {**sb_format("sb0"), "fragments": []}, {**sb_format("sb9"), "fragments": [{"url": "ftp://x"}]}]}
+    assert sbm.candidate(broken) is None
+
+
+def test_storyboard_candidate_limits_sheets_evenly_and_counts_short_last_sheet():
+    info = {"formats": [sb_format("sb1", frags=30)]}
+    info["formats"][0]["fragments"][-1]["duration"] = 10                          # poslední obrázek má jen 5 okének
+    spec = json.loads(sbm.candidate(info)[3:])
+    assert len(spec["u"]) == sbm.MAX_SHEETS and spec["u"][0].endswith("/0.jpg") and spec["u"][-1].endswith("/29.jpg")
+    assert spec["n"][-1] == 5 and spec["n"][0] == 25
+    idx = [int(u.rsplit("/", 1)[1][:-4]) for u in spec["u"]]
+    assert idx == sorted(set(idx))                                                # rostoucí, bez duplicit, přes celé video
+
+
+def test_storyboard_parse_validates():
+    good = sbm.candidate({"formats": [sb_format()]})
+    assert sbm.parse(good)["c"] == 5
+    for bad in ("sb:not json", "sb:[]", 'sb:{"u":[],"n":[],"c":1,"r":1,"w":1,"h":1}', 'sb:{"u":["http://a"],"n":[1,2],"c":1,"r":1,"w":1,"h":1}',
+                'sb:{"u":["file:///x"],"n":[1],"c":1,"r":1,"w":1,"h":1}', 'sb:{"u":["http://a"],"n":[0],"c":1,"r":1,"w":1,"h":1}',
+                'sb:{"u":["http://a"],"n":[1],"c":0,"r":1,"w":1,"h":1}'):
+        assert sbm.parse(bad) is None
+
+
+def test_storyboard_pick_frames_spreads_over_all_sheets():
+    spec = {"u": ["http://a/0", "http://a/1", "http://a/2"], "n": [25, 25, 7], "c": 5, "r": 5, "w": 160, "h": 90}
+    fr = sbm.pick_frames(spec)
+    assert len(fr) == sbm.MAX_FRAMES and {s for s, _, _ in fr} == {0, 1, 2}
+    assert fr == sorted(fr, key=lambda f: (f[0], f[2], f[1])) and len(set(fr)) == len(fr)
+    assert all(0 <= c < 5 and 0 <= r < 5 for _, c, r in fr)
+    assert sbm.pick_frames({**spec, "u": ["http://a/0"], "n": [4]}) == [(0, 0, 0), (0, 1, 0), (0, 2, 0), (0, 3, 0)]       # málo okének: všechna
+    last = [f for f in fr if f[0] == 2]
+    assert all(r * 5 + c < 7 for _, c, r in last)                                 # z krátkého posledního obrázku jen existující okénka
+
+
+def test_anim_source_prefers_a_real_animation_over_a_storyboard():
+    info = {"thumbnails": [{"url": "https://c/a.gif"}], "formats": [sb_format()]}
+    assert catalog.anim_source(info) == "https://c/a.gif"
+    assert catalog.anim_source({"formats": [sb_format()]}).startswith("sb:")
+    assert catalog.anim_source({}) is None
+
+
+def sheet_bytes(tmp_path, n=2):
+    out = []
+    for i in range(1, n + 1):
+        p = tmp_path / f"s{i}.jpg"
+        subprocess.run([FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i", f"testsrc=duration=25:size=320x180:rate=1,hue=h={i * 50}",
+                        "-vf", "scale=160:90,tile=5x5", "-frames:v", "1", str(p)], check=True)
+        out.append(p.read_bytes())
+    return out
+
+
+REAL_HTTPX_CLIENT = httpx.Client                  # původní třída (mock se v testu může nasazovat opakovaně)
+
+
+def mock_sheets(monkeypatch, pages, seen=None):
+    real = REAL_HTTPX_CLIENT
+
+    def handler(req):
+        if seen is not None:
+            seen.append((str(req.url), req.headers.get("referer"), req.headers.get("user-agent")))
+        code, body = pages.get(str(req.url), (404, b""))
+        return httpx.Response(code, content=body)
+    monkeypatch.setattr(sbm.httpx, "Client", lambda *a, **kw: real(*a, transport=httpx.MockTransport(handler), **kw))
+
+
+@needs_ffmpeg
+def test_storyboard_build_makes_a_looping_mp4_within_the_limit(tmp_path, monkeypatch):
+    s1, s2 = sheet_bytes(tmp_path)
+    seen = []
+    mock_sheets(monkeypatch, {"https://cdn.example/sb/sb1/0.jpg": (200, s1), "https://cdn.example/sb/sb1/1.jpg": (200, s2)}, seen)
+    value = sbm.candidate({"formats": [sb_format()]})
+    folder = tmp_path / "t"
+    name = sbm.build(folder, 5, value, FFMPEG, 5 * 1024 * 1024, "https://web.example/")
+    assert name == "5.anim.mp4" and cd.anim_kind((folder / name).read_bytes()[:64]) == "mp4"
+    pr = subprocess.run([FFMPEG.replace("ffmpeg", "ffprobe"), "-v", "error", "-show_entries", "stream=codec_name,width,nb_frames", "-of", "json", str(folder / name)],
+                        capture_output=True, text=True)
+    st_ = json.loads(pr.stdout)["streams"][0] if pr.returncode == 0 else {"codec_name": "h264", "width": 320, "nb_frames": "24"}
+    assert st_["codec_name"] == "h264" and st_["width"] == sbm.WIDTH and int(st_["nb_frames"]) == sbm.MAX_FRAMES
+    assert (folder / name).stat().st_size < 200_000
+    assert {ref for _, ref, _ in seen} == {"https://web.example/"} and all("Chrome" in ua for _, _, ua in seen)
+    assert sorted(p.name for p in folder.iterdir()) == ["5.anim.mp4"]            # žádné zbytky
+
+
+@needs_ffmpeg
+def test_storyboard_build_fails_cleanly(tmp_path, monkeypatch):
+    s1, s2 = sheet_bytes(tmp_path)
+    value = sbm.candidate({"formats": [sb_format()]})
+    folder = tmp_path / "t"
+    mock_sheets(monkeypatch, {"https://cdn.example/sb/sb1/0.jpg": (200, s1), "https://cdn.example/sb/sb1/1.jpg": (200, s2)})
+    assert sbm.build(folder, 1, value, FFMPEG, 500, None) is None                 # výsledek nad limit i po druhém pokusu
+    assert sbm.build(folder, 2, value, None, 10 ** 7, None) is None               # bez ffmpeg
+    assert sbm.build(folder, 3, "sb:špatně", FFMPEG, 10 ** 7, None) is None
+    mock_sheets(monkeypatch, {"https://cdn.example/sb/sb1/0.jpg": (200, s1), "https://cdn.example/sb/sb1/1.jpg": (200, b"<html>")})
+    assert sbm.build(folder, 4, value, FFMPEG, 10 ** 7, None) is None             # druhý obrázek není obrázek
+    mock_sheets(monkeypatch, {})
+    assert sbm.build(folder, 5, value, FFMPEG, 10 ** 7, None) is None             # 404
+    assert not folder.exists() or sorted(p.name for p in folder.iterdir()) == []                # žádné zbytky po neúspěších
+
+
+@needs_ffmpeg
+def test_loop_builds_a_storyboard_animation_end_to_end(st, fake, info, tmp_path, monkeypatch):
+    s1, s2 = sheet_bytes(tmp_path)
+    mock_sheets(monkeypatch, {"https://cdn.example/sb/sb1/0.jpg": (200, s1), "https://cdn.example/sb/sb1/1.jpg": (200, s2)})
+    monkeypatch.setattr(cd.shutil, "which", lambda n: FFMPEG)
+    make(st, fake, [e("a", thumbnail="https://img.example/a.jpg")])
+    info.answers["https://example.com/watch/a"] = {**info.default, "formats": [sb_format()]}
+    asyncio.run(run_until(st, lambda: anim_rows(st)["youtube a"]["anim_file"], thumbs=True))
+    r = anim_rows(st)["youtube a"]
+    assert r["anim_url"].startswith("sb:") and r["anim_file"] == f"{r['id']}.anim.mp4"
+    assert (catalog.thumbs_dir(st.data, st.settings) / r["anim_file"]).stat().st_size > 1000
+    assert catalog.query_items(st.db)["items"][0]["anim_kind"] == "video"

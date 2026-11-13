@@ -22,7 +22,7 @@ from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 from . import schedule
-from . import pagelist
+from . import pagelist, storyboard
 from .resolvers import ResolveError, sniffer, ytdlp
 from .util import domain, sanitize_filename, url_list_name, youtube_channel_base
 
@@ -206,6 +206,11 @@ def anim_candidate(info: dict) -> str | None:
     return best[1] if best else None
 
 
+def anim_source(info: dict) -> str | None:
+    """Animace pro položku: nejdřív hotová animace mezi miniaturami, jinak storyboard (`sb:<JSON>`, složí se ffmpegem)."""
+    return anim_candidate(info) or storyboard.candidate(info)
+
+
 def _thumb(e: dict) -> str | None:
     c = thumb_candidates(e)
     return c[0] if c else None
@@ -365,7 +370,7 @@ async def list_source(url: str, ctx) -> dict:
                          "channel": info.get("channel") or info.get("uploader"), "duration": info.get("duration"),
                          "thumb_url": _thumb(info), "thumb_alts": thumb_candidates(info)[1:1 + THUMB_ALTS_MAX],
                          "height": ytdlp.best_height(info), "size": ytdlp.size_estimate(info), "detail_state": "done",
-                         "anim_url": anim_candidate(info)}]}
+                         "anim_url": anim_source(info)}]}
 
 
 # --- uložení seznamu ------------------------------------------------------------------------------
