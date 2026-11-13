@@ -105,7 +105,7 @@ def test_static_gui_served(client):
 
 def test_download_dir_validated_on_save(client, tmp_path):
     c, st = client
-    good = tmp_path / "nas" / "VidDown"
+    good = tmp_path / "nas" / "Videa"
     r = c.put("/api/settings", json={"download_dir": str(good)})
     assert r.status_code == 200 and r.json()["values"]["download_dir"] == str(good) and good.is_dir()
     ro = tmp_path / "ro"
