@@ -56,6 +56,9 @@ async def _run_json(cmd: list[str], timeout: float) -> dict:
     except asyncio.TimeoutError:
         proc.kill()
         raise ResolveError("vypršel časový limit kontroly", "network")
+    except asyncio.CancelledError:      # zrušení (např. vypnutí aplikace) nesmí nechat yt-dlp běžet dál
+        proc.kill()
+        raise
     text = out.decode("utf-8", "replace")
     etext = err.decode("utf-8", "replace")
     if proc.returncode != 0 and not text.strip().startswith("{"):

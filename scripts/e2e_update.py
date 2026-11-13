@@ -98,7 +98,7 @@ def crash_on_start(text: str) -> str:
 
 
 def add_migration(text: str) -> str:
-    return text + '\nMIGRATIONS.append((8, "alter table jobs add column zz_e2e text;"))\n'
+    return text + '\nMIGRATIONS.append((MIGRATIONS[-1][0] + 1, "alter table jobs add column zz_e2e text;"))\n'
 
 
 def mutate_crash(zp: Path) -> None:

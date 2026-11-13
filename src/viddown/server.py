@@ -18,7 +18,7 @@ from starlette.background import BackgroundTask
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import __version__, appupdate, autobackup, backup, pagelist, subscriptions, thumbs, updater
+from . import __version__, appupdate, autobackup, backup, catalog, pagelist, subscriptions, thumbs, updater
 from .config import DEFAULTS, CHOICES, cookies_path
 from .probe import probe_url
 from .util import check_dir_writable, extract_urls, in_docker, in_schedule, sanitize_filename
@@ -573,6 +573,61 @@ def create_app(app_state) -> FastAPI:
             raise HTTPException(400, str(e))
         _schedule_restart()
         return {"ok": True, "docker": in_docker()}
+
+    # --- katalog -------------------------------------------------------------------------------
+    @app.get("/api/catalog")
+    async def catalog_overview():
+        return await asyncio.to_thread(catalog.sources_out, S.db)
+
+    @app.post("/api/catalog/sources")
+    async def catalog_add(req: Request):
+        """Přidá zdroje do fronty zjišťování: {text: "adresy po řádcích"} a/nebo {urls: [...]}. Adresa, která už v katalogu
+        je, se načte znovu celá (jako „načíst znovu vše“)."""
+        try:
+            body = await req.json()
+        except ValueError:
+            raise HTTPException(400, "Neplatný požadavek.")
+        text, urls_in = (body.get("text") or "", body.get("urls") or []) if isinstance(body, dict) else (None, None)
+        if not isinstance(text, str) or not isinstance(urls_in, list) or not all(isinstance(u, str) for u in urls_in):
+            raise HTTPException(400, "Neplatný požadavek: čeká se text nebo seznam adres.")
+        if len(text) > 1_000_000 or len(urls_in) > 100_000:
+            raise HTTPException(413, "Příliš mnoho adres najednou.")
+        urls, invalid = catalog.parse_urls(text + "\n" + "\n".join(urls_in))
+        if not urls and not invalid:
+            raise HTTPException(400, "Zadejte aspoň jednu adresu.")
+        res = await asyncio.to_thread(catalog.add_sources, S.db, urls)
+        return {**res, "invalid": invalid[:50], "invalid_count": len(invalid), "overview": await asyncio.to_thread(catalog.sources_out, S.db)}
+
+    @app.delete("/api/catalog/sources/{sid}")
+    async def catalog_delete(sid: int):
+        if not await asyncio.to_thread(catalog.delete_source, S.db, sid):
+            raise HTTPException(404, "Zdroj nenalezen.")
+        return await asyncio.to_thread(catalog.sources_out, S.db)
+
+    async def _rescan(sid: int, mode: str):
+        r = await asyncio.to_thread(catalog.rescan_source, S.db, sid, mode)
+        if r is None:
+            raise HTTPException(404, "Zdroj nenalezen.")
+        if r is False:
+            raise HTTPException(409, "Zdroj se právě zjišťuje.")
+        return await asyncio.to_thread(catalog.sources_out, S.db)
+
+    @app.post("/api/catalog/sources/{sid}/refresh")
+    async def catalog_refresh(sid: int):
+        """Hledá nová videa: přidá jen ta, která zdroj dosud nenabídl."""
+        return await _rescan(sid, "new")
+
+    @app.post("/api/catalog/sources/{sid}/reload")
+    async def catalog_reload(sid: int):
+        """Načte znovu vše: nabídne znovu i odmítnutá a stažená videa (s odznaky)."""
+        return await _rescan(sid, "all")
+
+    @app.get("/api/catalog/items")
+    async def catalog_items(source: int = 0, q: str = "", res: str = "", state: str = "", sort: str = "pos", dir: str = "asc",
+                            limit: int = 100, offset: int = 0):
+        split = lambda v: [x for x in v.split(",") if x]  # noqa: E731
+        source = source if source < 2 ** 62 else -1          # mimo rozsah databáze: nic nevyhovuje
+        return await asyncio.to_thread(catalog.query_items, S.db, source or None, q, split(res), split(state), sort, dir, limit, offset)
 
     # --- aktualizace aplikace zevnitř -----------------------------------------------------------
     async def _app_call(fn, *a, **kw):

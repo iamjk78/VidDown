@@ -147,6 +147,51 @@ SUB_INTERVAL_V7 = """
 alter table subscriptions add column check_hours real;   -- vlastní interval kontroly (h); null = globální nastavení
 """
 
+CATALOG_V8 = """
+create table catalog_sources (
+    id integer primary key autoincrement,
+    url text not null unique,
+    kind text,                                  -- channel | playlist | video (po zjištění)
+    title text,                                 -- název kanálu/playlistu (zobrazení, složka pro stahování)
+    title_search text,                          -- normalizovaný název pro hledání
+    thumb_url text,
+    folder text,                                -- název složky pro stahování (jen kanál a playlist)
+    status text not null default 'queued',      -- queued | scanning | done | error
+    scan_mode text not null default 'new',      -- new = jen dosud nenabídnutá videa; all = nabídnout znovu i odmítnutá a stažená
+    error text,
+    added_at real not null,
+    last_scan real
+);
+create table catalog_items (
+    id integer primary key autoincrement,
+    source_id integer not null,
+    key text not null,                          -- stabilní klíč videa ve zdroji ("extraktor id" jako v archivu yt-dlp, jinak adresa)
+    url text not null,
+    title text,
+    channel text,
+    duration real,
+    thumb_url text,
+    thumb_file text,
+    height integer,                             -- nejvyšší dostupné rozlišení
+    size integer,                               -- odhad velikosti v bajtech
+    search text,                                -- normalizovaný název a kanál pro hledání
+    pos integer not null default 0,             -- pořadí ve zdroji
+    state text not null default 'new',          -- new | queued (viditelné), removed | done | gone (pamatované, skryté)
+    downloaded_before integer not null default 0,
+    rejected_before integer not null default 0,
+    detail_state text not null default 'pending',   -- pending | fast_done | done | failed
+    detail_error text,
+    job_id integer,
+    added_at real not null,
+    updated_at real not null
+);
+create unique index catalog_items_key on catalog_items(source_id, key);
+create index catalog_items_state on catalog_items(state, source_id, pos);
+create index catalog_items_height on catalog_items(height);
+create index catalog_items_size on catalog_items(size);
+alter table jobs add column catalog_item_id integer;   -- položka katalogu, ze které úloha vznikla
+"""
+
 MIGRATIONS: list[tuple[int, object]] = [
     (1, SCHEMA),   # základní schéma (VidDown 0.1.0)
     (2, SUBSCRIPTIONS_V2),   # odběry
@@ -155,6 +200,7 @@ MIGRATIONS: list[tuple[int, object]] = [
     (5, PHASES_V5),          # fáze stahování
     (6, PAGE_SUBS_V6),       # odběr ze stránky s videi
     (7, SUB_INTERVAL_V7),    # vlastní interval kontroly odběru
+    (8, CATALOG_V8),         # katalog: zdroje a videa k výběru
 ]
 
 
