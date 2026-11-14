@@ -202,3 +202,41 @@ def test_source_scan_does_not_use_the_browser_when_disabled_or_for_not_found(st,
     pages.answers[SRC] = pagelist.PageError("stránka vrací chybu HTTP 404")
     run_scan(cd.DetailWorker(st), st)
     assert FakeBrowser.rendered == []                                                 # 404 není blokování
+
+
+# --- strukturální párování: klip v téže značce / uvnitř odkazu na video ----------------------------------------
+def card_a(slug, clip):
+    return f'<div class="thumb"><a class="img" href="https://x.example/videos/{slug}" data-previewvideo="https://cdn.x/a/{clip}/526x298.mp4"><img src="t.jpg"></a><span>t</span></div>'
+
+
+def test_match_listing_pairs_by_enclosing_link_even_when_clip_ids_differ_from_page_ids():
+    items = [{"id": 1, "url": "https://x.example/videos/prvni-xhAAA1", "thumb_url": "https://img.x/MTAy"},
+             {"id": 2, "url": "https://x.example/videos/druhe-xhBBB2", "thumb_url": "https://img.x/MTAz"},
+             {"id": 3, "url": "https://x.example/videos/treti-xhCCC3", "thumb_url": "https://img.x/MTA0"}]
+    html_ = card_a("prvni-xhAAA1", "k1/031/577/633") + card_a("druhe-xhBBB2", "k2/031/548/453") + '<div><a href="https://x.example/videos/treti-xhCCC3"><img></a></div>'
+    found, seen, n = cp.match_listing(html_, "https://x.example/list", items)
+    assert found == {1: "https://cdn.x/a/k1/031/577/633/526x298.mp4", 2: "https://cdn.x/a/k2/031/548/453/526x298.mp4"}
+    assert seen == {1, 2, 3} and n == 2                                   # třetí video je na stránce, ale klip nemá (jeho odkaz je dřív uzavřen)
+
+
+def test_match_listing_anchor_ignores_clip_after_the_link_was_closed_and_relative_links():
+    items = [{"id": 1, "url": "https://x.example/videos/a-xh1", "thumb_url": None}]
+    html_ = '<a href="/videos/a-xh1/"><img></a><div data-previewvideo="https://cdn.x/a/other.mp4"></div>'       # klip leží za uzavřeným odkazem
+    found, seen, _ = cp.match_listing(html_, "https://x.example/list", items)
+    assert found == {} and seen == {1}
+    found, _, _ = cp.match_listing('<a href="/videos/a-xh1/" data-previewvideo="https://cdn.x/a/mine.mp4"></a>', "https://x.example/list", items)
+    assert found == {1: "https://cdn.x/a/mine.mp4"}                                                          # relativní odkaz, koncové lomítko
+
+
+def test_source_scan_does_not_mark_videos_without_clip_when_matching_mostly_failed(st, fake, pages, monkeypatch):
+    seed(st, fake, [11111111, 22222222, 33333333, 44444444])
+    # na stránce jsou všechna čtyři videa, ale klip se spáruje jen u jednoho: nejspíš chyba párování, ne „videa nemají klip“
+    body = card(11111111, "k11111111abcdef")
+    for n in (22222222, 33333333, 44444444):
+        body += f'<li><a href="/watch?viewkey=k{n}abcdef">x</a></li>'
+    pages.answers[SRC] = body
+    w = cd.DetailWorker(st)
+    run_scan(w, st)
+    got = anims(st)
+    assert got["youtube k11111111abcdef"].startswith("https://cdn.x/v/11111111/")
+    assert [got[f"youtube k{n}abcdef"] for n in (22222222, 33333333, 44444444)] == [None, None, None]        # zůstanou pro hledání na stránce videa

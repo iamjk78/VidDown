@@ -282,6 +282,8 @@ Frontu zpracovává vždy jen jeden proces (zámek). CLI zapisuje do stejné dat
 
 ### Telegram bot
 
+Ve skupinovém chatu smějí bota ovládat jen uživatelé uvedení v nastavení `telegram_user_ids` (čárkami oddělená ID uživatelů; prázdné = skupina se ignoruje). Osobní chat se ověřuje podle ID chatu. Aktualizace a restart aplikace jdou jen z osobního chatu.
+
 1. V Telegramu otevřete **@BotFather**, pošlete `/newbot` a zkopírujte token.
 2. Token vložte v **Nastavení › Telegram** (nebo `viddown telegram --token …`).
 3. Napište botovi. Odpoví vaším chat ID – vložte ho do pole **Povolené chat ID**.

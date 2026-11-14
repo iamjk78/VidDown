@@ -157,6 +157,57 @@ def _nokey(url: str) -> str:
     return url.split("?", 1)[0].split("#", 1)[0]
 
 
+_A_RE = re.compile(r"<a\b(?P<attrs>[^>]{0,4000})>", re.I)
+
+
+def _norm_page_url(u: str) -> tuple[str, str, str]:
+    """Adresa stránky bez schématu, fragmentu a koncového lomítka: (hostitel, cesta, dotaz)."""
+    try:
+        sp = urlsplit(u)
+    except ValueError:
+        return ("", "", "")
+    return (sp.netloc.lower(), sp.path.rstrip("/"), sp.query)
+
+
+ANCHOR_MAX = 2500                                                         # klip a odkaz na video jedné karty jsou od sebe nejvýš tolik znaků
+
+
+def _anchor_matches(text: str, page_url: str, items: list[dict], cands: list[tuple[int, int, int, str]]) -> tuple[dict[int, tuple], set[int]]:
+    """Strukturální párování: klip patří videu, na jehož stránku vede odkaz `<a href>`, který klip obklopuje (klip je v téže značce
+    nebo uvnitř odkazu, před jeho uzavřením). Spolehlivější než číslo v adrese, funguje i když web používá jiné identifikátory v adrese
+    klipu a stránky. Vrací ({id položky: nejlepší klip}, {id položek, jejichž odkaz na stránce je})."""
+    by_url = {}
+    for it in items:
+        k = _norm_page_url(it.get("url") or "")
+        if k[0]:
+            by_url.setdefault(k, []).append(it["id"])
+    anchors: list[tuple[int, int]] = []                                    # (pozice značky <a>, id videa)
+    seen: set[int] = set()
+    for m in _A_RE.finditer(text[:MAX_TEXT]):
+        href = next((a["val"] for a in _ATTR_RE.finditer(m.group("attrs")) if a["name"].lower() == "href"), None)
+        if not href:
+            continue
+        ids = by_url.get(_norm_page_url(urljoin(page_url, html.unescape(href))))
+        if ids and len(ids) == 1:                                           # adresa patřící jedinému videu
+            anchors.append((m.start(), ids[0]))
+            seen.add(ids[0])
+    if not anchors:
+        return {}, seen
+    import bisect
+    starts = [a[0] for a in anchors]
+    best: dict[int, tuple[int, int, int, str]] = {}
+    for c in cands:
+        i = bisect.bisect_right(starts, c[2]) - 1
+        if i < 0:
+            continue
+        pos, iid = anchors[i]
+        if c[2] - pos > ANCHOR_MAX or "</a" in text[pos:c[2]].lower():     # odkaz už skončil: klip patří jinému místu stránky
+            continue
+        if iid not in best or c < best[iid]:
+            best[iid] = c
+    return best, seen
+
+
 def match_listing(text: str, page_url: str, items: list[dict], context: list[dict] | None = None) -> tuple[dict[int, str], set[int], int]:
     """Na stránce zdroje (výpisu) spáruje náhledové klipy s videi podle společného identifikátoru: číslo nebo slovo z adresy klipu,
     které je i v adrese miniatury nebo stránky videa a identifikuje právě jedno video (a právě jeden klip). Nejednoznačné se
@@ -182,8 +233,12 @@ def match_listing(text: str, page_url: str, items: list[dict], context: list[dic
             tok_items[t] = tok_items.get(t, 0) + 1
     page_tokens = _tokens(text[:MAX_TEXT])
     found: dict[int, str] = {}
-    seen: set[int] = set()
+    by_anchor, seen = _anchor_matches(text, page_url, items, cands)
+    for iid, c in by_anchor.items():
+        found[iid] = c[3]
     for it in items:
+        if it["id"] in by_anchor:
+            continue
         mine = {t for t in toks[it["id"]] if tok_items[t] == 1}               # jen identifikátory patřící jedinému videu
         if mine & page_tokens:
             seen.add(it["id"])

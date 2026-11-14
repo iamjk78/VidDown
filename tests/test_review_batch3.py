@@ -224,3 +224,49 @@ def test_api_passes_duration_and_age_filters_through(client):
     assert titles("age=week&dur=60") == []                                                            # filtry se kombinují
     got = c.get("/api/catalog/items?sort=published&dir=asc").json()["items"]
     assert [i["title"] for i in got][:2] == ["dlouhe", "minuta"] and got[-1]["title"] == "bez"        # nejstarší první, neznámé na konec
+
+
+# --- proxy ---------------------------------------------------------------------------------------------------------------
+def test_proxy_kw_accepts_http_and_socks_and_never_falls_back_to_direct(monkeypatch):
+    from viddown import netsafe
+    assert netsafe.proxy_kw("") == {} and netsafe.proxy_kw(None) == {}
+    assert netsafe.proxy_kw("http://p.example:8080") == {"proxy": "http://p.example:8080"}
+    assert netsafe.proxy_kw("p.example:8080") == {"proxy": "http://p.example:8080"}          # bez schématu = HTTP proxy
+    import importlib.util as iu
+    real = iu.find_spec
+    monkeypatch.setattr(iu, "find_spec", lambda name, *a, **kw: object() if name == "socksio" else real(name, *a, **kw))
+    assert netsafe.proxy_kw("socks5://127.0.0.1:1080") == {"proxy": "socks5://127.0.0.1:1080"}
+    assert netsafe.proxy_kw("socks5h://127.0.0.1:1080")["proxy"].startswith("socks5h")
+    monkeypatch.setattr(iu, "find_spec", lambda name, *a, **kw: None if name == "socksio" else real(name, *a, **kw))
+    with pytest.raises(netsafe.ProxyError):
+        netsafe.proxy_kw("socks5://127.0.0.1:1080")                                          # bez podpory SOCKS raději chyba než přímé spojení
+    with pytest.raises(netsafe.ProxyError):
+        netsafe.proxy_kw("ftp://p.example")
+
+
+def test_fetchers_fail_closed_when_the_proxy_is_unusable(tmp_path):
+    from viddown import netsafe
+    with pytest.raises(netsafe.ProxyError):
+        netsafe.fetch_limited("https://example.com/x", {}, 1000, "ftp://p.example")
+    with pytest.raises(pagelist.PageError):
+        asyncio.run(pagelist.fetch("https://example.com/x", {"proxy": "ftp://p.example"}))
+    assert cd.download_anim(tmp_path, 1, "https://example.com/x.mp4", 1000, None, "ftp://p.example") is None     # nic se neodešle přímo
+
+
+# --- Telegram: skupina ---------------------------------------------------------------------------------------------------
+def group_msg(text, uid, chat=42):
+    return {"update_id": 5, "message": {"message_id": 9, "from": {"id": uid}, "chat": {"id": chat, "type": "supergroup"}, "text": text}}
+
+
+def test_group_chat_needs_an_allowed_user(bot):
+    bot.settings.update({"telegram_user_ids": ""})
+    n = len(bot.sent)
+    asyncio.run(bot.handle(group_msg("/fronta", 111)))
+    assert len(bot.sent) == n                                                         # bez povolených uživatelů se skupina ignoruje
+    bot.settings.update({"telegram_user_ids": "111, 222"})
+    asyncio.run(bot.handle(group_msg("/fronta", 333)))
+    assert len(bot.sent) == n                                                         # cizí člen skupiny nic nezmůže
+    asyncio.run(bot.handle(group_msg("/fronta", 222)))
+    assert len(bot.sent) == n + 1 and "prázdná" in bot.sent[-1][1]["text"]            # povolený uživatel ano
+    asyncio.run(bot.handle(msg("/fronta")))                                           # osobní chat funguje beze změny
+    assert len(bot.sent) == n + 2

@@ -18,6 +18,29 @@ MAX_HOPS = 5
 _EXOTIC_IP = re.compile(r"^[0-9a-fx.:]+$", re.I)          # 127.1, 0177.0.0.1, 0x7f.1, 2130706433 …
 
 
+class ProxyError(OSError):
+    """Nastavená proxy se nedá použít (chybí podpora SOCKS, neznámé schéma): raději žádný dotaz než dotaz mimo proxy (prozradil by IP)."""
+
+
+def proxy_kw(proxy: str | None) -> dict:
+    """Parametr `proxy` pro `httpx` z nastavení: `http(s)://…` i `socks5://…` (potřebuje balíček socksio); adresa bez schématu se bere
+    jako HTTP proxy. Nepoužitelná proxy vyhodí `ProxyError`, dotaz se nikdy tiše neodešle přímo."""
+    p = (proxy or "").strip()
+    if not p:
+        return {}
+    if "://" not in p:
+        p = "http://" + p
+    scheme = urlsplit(p).scheme.lower()
+    if scheme in ("http", "https"):
+        return {"proxy": p}
+    if scheme in ("socks5", "socks5h", "socks4"):
+        import importlib.util
+        if importlib.util.find_spec("socksio") is None:
+            raise ProxyError("proxy SOCKS vyžaduje balíček socksio (pip install 'httpx[socks]')")
+        return {"proxy": p}
+    raise ProxyError(f"nepodporované schéma proxy: {scheme}")
+
+
 def allow_private() -> bool:
     return env_flag("VIDDOWN_ALLOW_PRIVATE_PREVIEW")
 
@@ -104,7 +127,7 @@ def fetch_limited(url: str, headers: dict, max_bytes: int, proxy: str | None = N
 
 
 def _fetch_limited(url: str, headers: dict, max_bytes: int, proxy: str | None, deadline: float, total_timeout: float):
-    kw = {"proxy": proxy} if proxy and proxy.startswith("http") else {}
+    kw = proxy_kw(proxy)
     with httpx.Client(follow_redirects=False, timeout=min(30.0, total_timeout), headers=headers, **kw) as c:
         for _ in range(MAX_HOPS + 1):
             if not host_ok(url):

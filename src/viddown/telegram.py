@@ -45,6 +45,14 @@ class TelegramBot:
     def chat(self) -> str:
         return str(self.settings.get("telegram_chat_id") or "").strip()
 
+    def sender_ok(self, chat: dict, sender: dict | None) -> bool:
+        """Osobní chat stačí ověřit podle ID chatu. Ve skupině by bota jinak ovládal každý člen, proto smí jen uživatelé uvedení
+        v nastavení `telegram_user_ids`; bez něj se skupina ignoruje."""
+        if (chat or {}).get("type", "private") == "private":
+            return True
+        ids = {x.strip() for x in str(self.settings.get("telegram_user_ids") or "").split(",") if x.strip()}
+        return bool(sender and str(sender.get("id")) in ids)
+
     # ------------------------------------------------------------ API
     async def call(self, method: str, http_timeout: float = 30, **params):
         if not self._client or not self._token:
@@ -149,7 +157,7 @@ class TelegramBot:
         if "callback_query" in u:
             cq = u["callback_query"]
             chat = str(cq["message"]["chat"]["id"])
-            if chat != self.chat():
+            if chat != self.chat() or not self.sender_ok(cq["message"]["chat"], cq.get("from")):
                 return
             action, _, jid = (cq.get("data") or "").partition(":")
             if action == "app":
@@ -178,6 +186,8 @@ class TelegramBot:
         if chat != self.chat():
             if msg["chat"].get("type") == "private":
                 await self.call("sendMessage", chat_id=chat, text=t(L, "not_allowed", id=chat))
+            return
+        if not self.sender_ok(msg["chat"], msg.get("from")):                 # skupina: jen povolení uživatelé
             return
         text = msg.get("text") or msg.get("caption") or ""
         cmd = text.strip().split()[0].lower().split("@")[0] if text.strip().startswith("/") else ""

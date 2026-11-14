@@ -544,8 +544,9 @@ class DetailWorker:
                 with self.db.conn() as c:
                     for iid, u in found.items():
                         c.execute("update catalog_items set anim_url=?, updated_at=? where id=? and anim_url is null and state in ('new','queued')", (u, now, iid))
-                    for iid in seen - set(found):
-                        c.execute("update catalog_items set anim_url='', updated_at=? where id=? and anim_url is null and state in ('new','queued')", (now, iid))
+                    if len(found) * 2 >= len(seen):                           # klipy jsou na výpisu běžné: videa bez klipu ho opravdu nemají
+                        for iid in seen - set(found):                         # jinak je to nejspíš chyba párování: videa zůstanou pro hledání na jejich stránce
+                            c.execute("update catalog_items set anim_url='', updated_at=? where id=? and anim_url is null and state in ('new','queued')", (now, iid))
                 if not seen:
                     break                                               # na stránce není žádné naše video: další už nepomůže
                 if len(seen) >= len(items):

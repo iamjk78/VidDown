@@ -61,6 +61,7 @@ def create_app(app_state) -> FastAPI:
             return True
         return hmac.compare_digest(req.cookies.get("vd_session", ""), token())
 
+    thumbs.PROXY = S.settings.get("proxy") or None
     extra_hosts = {h.strip().lower() for h in os.environ.get("VIDDOWN_ALLOWED_HOSTS", "").split(",") if h.strip()}
 
     def host_ok(host_header: str) -> bool:
@@ -1015,6 +1016,8 @@ def create_app(app_state) -> FastAPI:
             S.settings.update(changes)
         except ValueError as e:
             raise HTTPException(400, str(e))
+        if "proxy" in changes:
+            thumbs.PROXY = S.settings.get("proxy") or None
         if "telegram_chat_id" in changes and S.bot:
             S.bot.reload()
         return settings_out()

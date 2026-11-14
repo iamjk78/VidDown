@@ -44,13 +44,14 @@ def referer_of(page_url: str | None) -> str | None:
 
 
 MAX_THUMB_BYTES = 15 * 1024 * 1024
+PROXY: str | None = None          # proxy z nastavení (nastavuje server při startu a při změně nastavení) pro miniatury z fronty
 
 
 def fetch(url: str, dest: Path, timeout=20, referer: str | None = None, proxy: str | None = None) -> bool:
     """Stáhne miniaturu (adresy pocházejí od cizích webů): jen veřejné adresy i po přesměrování, limit velikosti a celkového času."""
     headers = {"User-Agent": BROWSER_UA, "Referer": referer} if referer else {"User-Agent": UA}
     try:
-        got = netsafe.fetch_limited(url, headers, MAX_THUMB_BYTES, proxy, total_timeout=float(timeout))
+        got = netsafe.fetch_limited(url, headers, MAX_THUMB_BYTES, PROXY if proxy is None else proxy, total_timeout=float(timeout))
         if got is None or got[0] != 200 or not got[2]:
             return False
         dest.write_bytes(got[2])

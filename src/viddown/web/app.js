@@ -281,8 +281,14 @@ function morphKids(a, b) {
 }
 function morphNode(a, b) {
   if (a.nodeType !== 1) { if (a.data !== b.data) a.data = b.data; return; }
-  for (const at of [...a.attributes]) if (!b.hasAttribute(at.name)) a.removeAttribute(at.name);
-  for (const at of b.attributes) if (a.getAttribute(at.name) !== at.value) a.setAttribute(at.name, at.value);
+  // stav animace v kartě Katalogu (src klipu, data-want, třída anim-on) nastavuje skript při najetí a překreslení ho nesmí zrušit
+  const isTh = a.classList.contains('vth'), isAnim = a.classList.contains('vanim');
+  for (const at of [...a.attributes]) if (!b.hasAttribute(at.name) && !(isAnim && at.name === 'src') && !(isTh && at.name === 'data-want')) a.removeAttribute(at.name);
+  for (const at of b.attributes) {
+    let v = at.value;
+    if (isTh && at.name === 'class' && a.classList.contains('anim-on') && !/\banim-on\b/.test(v)) v += ' anim-on';
+    if (a.getAttribute(at.name) !== v) a.setAttribute(at.name, v);
+  }
   if (a.tagName === 'INPUT') {
     if (a.type === 'checkbox' || a.type === 'radio') a.checked = b.hasAttribute('checked');
     else if (a !== document.activeElement) a.value = b.getAttribute('value') || '';
@@ -981,6 +987,7 @@ const SECTIONS = () => [
   { icon: 'send', title: ['Telegram', 'Telegram'], col: 0, fields: [
     { type: 'tgtoken' },
     { k: 'telegram_chat_id', type: 'text', w: 160, label: ['Povolené chat ID', 'Allowed chat ID'], hint: ['Bot odpovídá jen tomuto chatu', 'The bot answers only this chat'] },
+    { k: 'telegram_user_ids', type: 'text', w: 220, label: ['ID uživatelů ve skupině', 'User IDs in a group'], hint: ['Jen pro skupinový chat: ID uživatelů (čárkami), kteří smějí bota ovládat. Prázdné = skupina se ignoruje.', 'Group chats only: IDs (comma separated) allowed to control the bot. Empty = the group is ignored.'] },
     { k: 'telegram_after_probe', type: 'seg', opts: [['download', ['Stáhnout hned', 'Download now']], ['ask', ['Zeptat se', 'Ask']]], label: ['Po kontrole URL', 'After URL check'] },
     { k: 'telegram_notify', type: 'seg', opts: [['errors', ['Jen chyby', 'Errors only']], ['all', ['Vše', 'All']]], label: ['Oznámení', 'Notifications'] },
   ] },
@@ -1042,7 +1049,7 @@ function fieldHtml(f, S) {
   const lab = (extra = '') => `<div class="lab"><div class="b5">${L(f.label)}${lock ? ` <span class="lock" title="${T('Nastaveno proměnnou prostředí', 'Set by environment variable')} ${esc(lock)}">${ic('lock', 12)}</span>` : ''}</div>${f.hint ? `<div class="hint">${L(f.hint)}</div>` : ''}${extra}</div>`;
   let ctrl = '';
   switch (f.type) {
-    case 'toggle': ctrl = `<button class="toggle ${v ? 'on' : ''}" data-k="${f.k}" data-t="toggle" ${dis}></button>`; break;
+    case 'toggle': ctrl = `<button class="toggle ${v ? 'on' : ''}" data-k="${f.k}" data-t="toggle" aria-label="${esc(L(f.label))}" ${dis}></button>`; break;
     case 'seg': { const cur = Array.isArray(v) ? v.join(',') : String(v);
       ctrl = `<span class="seg">${f.opts.map(([o, l]) => `<button data-k="${f.k}" data-t="seg" data-v="${o}" class="${String(o) === cur ? 'on' : ''}" ${dis}>${L(l)}</button>`).join('')}</span>`; break; }
     case 'chips': ctrl = `<span class="row gap4 wrap">${f.opts.map(([o, l]) => `<button class="chip ${v.includes(o) ? 'on' : ''}" data-k="${f.k}" data-t="chip" data-v="${o}" ${dis}>${L(l)}</button>`).join('')}</span>`; break;

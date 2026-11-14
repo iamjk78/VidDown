@@ -57,9 +57,10 @@ async def _fetch(url: str, settings: dict | None, timeout: float, public_only: b
             if not await asyncio.to_thread(netsafe.host_ok, str(request.url)):
                 raise PageError("adresa vede do vnitřní sítě")
         kw["event_hooks"] = {"request": [only_public]}
-    proxy = (settings or {}).get("proxy") or ""
-    if proxy.startswith("http"):
-        kw["proxy"] = proxy
+    try:
+        kw.update(netsafe.proxy_kw((settings or {}).get("proxy")))
+    except netsafe.ProxyError as e:
+        raise PageError(f"stránku se nepodařilo načíst: {e}") from e
     try:
         async with httpx.AsyncClient(follow_redirects=True, timeout=timeout, headers={"User-Agent": UA, "Accept-Language": "cs,sk,en;q=0.8"}, **kw) as c:
             async with c.stream("GET", url) as r:

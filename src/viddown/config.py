@@ -100,6 +100,7 @@ DEFAULTS: dict = {
     "port": 8765,
     # telegram
     "telegram_chat_id": "",
+    "telegram_user_ids": "",               # skupinový chat: ID uživatelů (čárkami), kteří smějí bota ovládat; prázdné = skupina se ignoruje
     "telegram_after_probe": "download",  # download | ask
     "telegram_notify": "errors",         # errors | all
     # enginy
