@@ -23,6 +23,16 @@ WEBP_STATIC = b"RIFF\x00\x00\x00\x00WEBPVP8X\x0a\x00\x00\x00\x10" + b"x" * 300
 JPEG = b"\xff\xd8\xff\xe0" + b"x" * 300
 
 
+from viddown import netsafe as _netsafe
+
+REAL_HOST_OK = _netsafe.host_ok                  # skutečná kontrola (testy ostatní kódu ji obcházejí, ať nepotřebují DNS)
+
+
+@pytest.fixture(autouse=True)
+def no_dns(monkeypatch):
+    monkeypatch.setattr(_netsafe, "host_ok", lambda url: _netsafe.literal_ok(url) or url.split("/")[2] in ("c", "img", "cdn.example", "web.example", "x.example", "cdn.x"))
+
+
 @pytest.fixture
 def st(data):
     s = DSt(data)
@@ -347,10 +357,10 @@ def test_refill_rechecks_only_visible_done_items_without_an_animation_url(st, fa
     assert cd.refill_anims(st.db) == {"details": 1, "retry": 1, "pages": 0}
     r = anim_rows(st)
     assert r["youtube a"]["detail_state"] == "pending"                                    # bez adresy animace: znovu zjistit podrobnosti
-    assert r["youtube b"]["anim_file"] is None and r["youtube b"]["detail_state"] == "done"   # nad limit: nový pokus o stažení
-    assert r["youtube c"]["anim_file"] == "7.anim.gif"                                    # hotovou nechá
+    assert (r["youtube b"]["anim_file"], r["youtube b"]["anim_url"], r["youtube b"]["detail_state"]) == (None, None, "pending")   # nepodařilo se: čerstvá adresa
+    assert r["youtube c"]["anim_file"] == "7.anim.gif" and r["youtube c"]["anim_url"] == "https://c/c.gif"                       # hotovou nechá
     assert r["youtube d"]["detail_state"] == "done" and r["youtube f"]["detail_state"] == "failed"
-    assert cd.refill_anims(st.db) == {"details": 0, "retry": 0, "pages": 0}              # podruhé nic: položka už čeká na podrobnosti
+    assert cd.refill_anims(st.db) == {"details": 0, "retry": 0, "pages": 0}              # podruhé nic: vše už čeká na podrobnosti
 
 
 def test_refill_can_be_limited_to_one_source(st, fake):
@@ -646,9 +656,9 @@ def test_refill_searches_the_video_pages_again_and_status_counts_pending_scans(s
         c.execute("update catalog_items set anim_file='7.anim.gif', anim_url='https://c/c.gif' where key='youtube c'")
     w = cd.DetailWorker(st)
     assert w.status()["anim_scan"] == 0 and w.status()["anim_pending"] == 0                         # '' není čekající animace
-    assert cd.refill_anims(st.db) == {"details": 0, "retry": 0, "pages": 2}
+    assert cd.refill_anims(st.db) == {"details": 2, "retry": 0, "pages": 2}              # hledání na stránce se vrátí a podrobnosti se zopakují (storyboard)
     assert {k: r["anim_url"] for k, r in anim_rows(st).items()} == {"youtube a": None, "youtube b": None, "youtube c": "https://c/c.gif"}
-    assert w.status()["anim_scan"] == 2
+    assert {k: r["detail_state"] for k, r in anim_rows(st).items()}["youtube a"] == "pending"
 
 
 def test_empty_animation_url_is_never_downloaded(st, fake, info, web):
@@ -724,3 +734,207 @@ def test_api_filters_by_animation(client):
         cx.execute("insert into catalog_items(id,source_id,key,url,state,detail_state,added_at,updated_at) values (2,1,'k2','https://s.example/v2','new','done',1,1)")
     ids = lambda q: sorted(i["id"] for i in c.get("/api/catalog/items" + q).json()["items"])      # noqa: E731
     assert ids("?anim=yes") == [1] and ids("?anim=no") == [2] and ids("?anim=yes,no") == [1, 2] and ids("") == [1, 2]
+
+
+# ------------------------------------------------------------ etapa 5: místo na disku a mazání animací
+def fill_folder(folder):
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "1.jpg").write_bytes(b"a" * 100)
+    (folder / "2.png").write_bytes(b"b" * 50)
+    (folder / "1.anim.mp4").write_bytes(b"c" * 1000)
+    (folder / "9.anim.gif").write_bytes(b"d" * 500)                  # osiřelý soubor (položka už není)
+    (folder / "x.txt").write_bytes(b"e" * 7)                         # cizí soubor se nepočítá ani nemaže
+    (folder / "3.anim.zzz").write_bytes(b"f" * 7)
+    (folder / "4.jpg.123.part").write_bytes(b"g" * 7)
+
+
+def test_disk_usage_counts_thumbnails_and_animations_separately(tmp_path):
+    f = tmp_path / "t"
+    assert catalog.disk_usage(f) == {"thumbs": {"count": 0, "bytes": 0}, "anims": {"count": 0, "bytes": 0}}      # složka ještě není
+    fill_folder(f)
+    assert catalog.disk_usage(f) == {"thumbs": {"count": 2, "bytes": 150}, "anims": {"count": 2, "bytes": 1500}}
+
+
+def test_delete_anims_removes_files_including_orphans_and_resets_items(st, fake):
+    make(st, fake, [e("a"), e("b")])
+    folder = catalog.thumbs_dir(st.data, st.settings)
+    fill_folder(folder)
+    with st.db.conn() as c:
+        c.execute("update catalog_items set anim_url='https://c/a.gif', anim_file='1.anim.mp4' where key='youtube a'")
+        c.execute("update catalog_items set anim_url='https://c/b.gif', anim_file='' where key='youtube b'")
+    res = catalog.delete_anims(st.db, folder)
+    assert res == {"files": 2, "bytes": 1500, "items": 2}
+    assert sorted(p.name for p in folder.iterdir()) == ["1.jpg", "2.png", "3.anim.zzz", "4.jpg.123.part", "x.txt"]       # miniatury a cizí soubory zůstaly
+    r = anim_rows(st)
+    assert r["youtube a"]["anim_file"] is None and r["youtube a"]["anim_url"] == "https://c/a.gif"                  # adresa zůstane
+    assert catalog.delete_anims(st.db, folder) == {"files": 0, "bytes": 0, "items": 0}
+
+
+def test_api_disk_and_delete(client):
+    c, s = client
+    folder = catalog.thumbs_dir(s.data, s.settings)
+    fill_folder(folder)
+    with s.db.conn() as cx:
+        cx.execute("insert into catalog_sources(id,url,status,added_at,title,folder) values (1,'https://s.example/p','done',1,'Z','Z')")
+        cx.execute("insert into catalog_items(id,source_id,key,url,state,detail_state,added_at,updated_at,anim_file) values (1,1,'k','https://s.example/v','new','done',1,1,'1.anim.mp4')")
+    assert c.get("/api/catalog/disk").json()["anims"] == {"count": 2, "bytes": 1500}
+    r = c.post("/api/catalog/anim/delete").json()
+    assert r["files"] == 2 and r["items"] == 1 and r["disk"]["anims"]["count"] == 0 and r["disk"]["thumbs"]["count"] == 2
+    assert c.get("/api/catalog/items").json()["items"][0]["anim"] is None
+
+
+# ------------------------------------------------------------ review: bezpečnost stahování (netsafe)
+@pytest.mark.parametrize("url,ok", [
+    ("https://a.example/x", True), ("http://8.8.8.8/x", True), ("http://localhost/x", False), ("http://localhost./x", False),
+    ("http://127.0.0.1/x", False), ("http://127.1/x", False), ("http://0177.0.0.1/x", False), ("http://0x7f.1/x", False), ("http://2130706433/x", False),
+    ("http://10.0.0.1/x", False), ("http://192.168.1.1/x", False), ("http://169.254.169.254/x", False), ("http://100.64.0.1/x", False),
+    ("http://[::1]/x", False), ("http://[fe80::1]/x", False), ("ftp://a.example/x", False), ("file:///etc/passwd", False),
+    ("https://intranet/x", False), ("http://host.docker.internal/x", False), ("http://nas.local/x", False), ("", False),
+])
+def test_literal_ok_rejects_local_and_tricky_addresses(url, ok):
+    assert _netsafe.literal_ok(url) is ok
+
+
+def test_host_ok_checks_every_resolved_address(monkeypatch):
+    def fake(addrs):
+        return lambda host, port, proto=0: [(2, 1, 6, "", (a, 0)) for a in addrs]
+    monkeypatch.setattr(_netsafe.socket, "getaddrinfo", fake(["93.184.216.34"]))
+    assert REAL_HOST_OK("https://cdn.example.com/x") is True
+    monkeypatch.setattr(_netsafe.socket, "getaddrinfo", fake(["93.184.216.34", "10.0.0.5"]))           # jedna z adres je privátní
+    assert REAL_HOST_OK("https://cdn.example.com/x") is False
+    monkeypatch.setattr(_netsafe.socket, "getaddrinfo", fake(["127.0.0.1"]))
+    assert REAL_HOST_OK("https://127.0.0.1.nip.example/x") is False                                         # jméno míří na localhost
+    monkeypatch.setattr(_netsafe.socket, "getaddrinfo", lambda *a, **k: (_ for _ in ()).throw(OSError("dns")))
+    assert REAL_HOST_OK("https://cdn.example.com/x") is False                                               # nejde přeložit: ne
+
+
+def test_private_preview_flag_allows_local_hosts_for_tests(monkeypatch):
+    monkeypatch.setenv("VIDDOWN_ALLOW_PRIVATE_PREVIEW", "1")
+    assert _netsafe.literal_ok("http://192.168.1.1/x") is True and REAL_HOST_OK("http://fakeweb.test:8000/x") is True
+    assert _netsafe.literal_ok("ftp://192.168.1.1/x") is False                                              # schéma se kontroluje vždy
+
+
+def test_fetch_limited_follows_redirects_manually_and_blocks_private_hops(monkeypatch):
+    real = REAL_HTTPX_CLIENT
+    seen = []
+
+    def handler(req):
+        seen.append(str(req.url))
+        if req.url.path == "/ok":
+            return httpx.Response(302, headers={"location": "https://cdn.example/final.gif"})
+        if req.url.path == "/evil":
+            return httpx.Response(302, headers={"location": "http://192.168.1.1/admin"})
+        if req.url.path == "/loop":
+            return httpx.Response(302, headers={"location": "/loop"})
+        if req.url.path == "/big":
+            return httpx.Response(200, content=b"x" * 5000)
+        return httpx.Response(200, content=GIF)
+    monkeypatch.setattr(_netsafe.httpx, "Client", lambda *a, **kw: real(*a, transport=httpx.MockTransport(handler), **kw))
+    st_, hdr, body = _netsafe.fetch_limited("https://cdn.example/ok", {}, 10_000)
+    assert st_ == 200 and body == GIF and seen[-1] == "https://cdn.example/final.gif"
+    seen.clear()
+    assert _netsafe.fetch_limited("https://cdn.example/evil", {}, 10_000) is None and not any("192.168" in u for u in seen)   # na LAN se nesahá
+    seen.clear()
+    assert _netsafe.fetch_limited("https://cdn.example/loop", {}, 10_000) is None and len(seen) == _netsafe.MAX_HOPS + 1
+    assert _netsafe.fetch_limited("https://cdn.example/big", {}, 1000) is None
+
+
+def test_fetch_limited_enforces_a_total_deadline(monkeypatch):
+    real = REAL_HTTPX_CLIENT
+    ticks = iter(range(0, 1000, 20))
+    monkeypatch.setattr(_netsafe.time, "monotonic", lambda: next(ticks))
+
+    def handler(req):
+        return httpx.Response(200, content=(b"z" * 10 for _ in range(50)))              # pomalý server: každé čtení „trvá“ 20 s
+    monkeypatch.setattr(_netsafe.httpx, "Client", lambda *a, **kw: real(*a, transport=httpx.MockTransport(handler), **kw))
+    assert _netsafe.fetch_limited("https://cdn.example/slow", {}, 10_000, total_timeout=60) is None
+
+
+def test_download_anim_refuses_a_redirect_into_the_local_network(tmp_path, monkeypatch):
+    real = REAL_HTTPX_CLIENT
+    monkeypatch.setattr(_netsafe.httpx, "Client", lambda *a, **kw: real(*a, transport=httpx.MockTransport(
+        lambda req: httpx.Response(302, headers={"location": "http://169.254.169.254/latest"})), **kw))
+    assert cd.download_anim(tmp_path / "t", 1, "https://cdn.example/a.gif", 10_000) is None
+
+
+def test_storyboard_parse_rejects_oversized_specs():
+    base = {"u": ["http://a/0"], "n": [4], "c": 2, "r": 2, "w": 160, "h": 90}
+    assert sbm.parse("sb:" + json.dumps(base)) is not None
+    for patch in ({"c": 21}, {"w": 5000}, {"h": 1001}, {"n": [5]}, {"u": ["http://a/%d" % i for i in range(9)], "n": [1] * 9}):
+        assert sbm.parse("sb:" + json.dumps({**base, **patch})) is None
+
+
+# ------------------------------------------------------------ review: heuristika, ffmpeg, souběh
+def test_find_preview_matches_the_whole_id_not_a_substring():
+    html_ = '<div data-preview="https://cdn.x/154321/p.mp4"></div><div data-preview="https://cdn.x/other/p.mp4"></div>'
+    assert cp.find_preview(html_, "https://w.example/video/54321") is None                  # 154321 není 54321
+    assert cp.find_preview(html_.replace("154321", "54321"), "https://w.example/video/54321") == "https://cdn.x/54321/p.mp4"
+    assert cp.find_preview(html_.replace("154321", "x"), "https://w.example/watch?index=10000&t=1") is None   # nesouvisející parametr není identifikátor
+
+
+def test_find_preview_is_fast_on_hostile_html():
+    import time as _t
+    for bad in ("<a>" + "//" * 40000, ("<div " + "a" * 50) * 20000, '<video src="' + "a" * 2_000_000):
+        t0 = _t.monotonic()
+        cp.find_preview(bad, "https://w.example/v/1")
+        assert _t.monotonic() - t0 < 3
+
+
+def test_page_scan_runs_the_parser_off_the_event_loop(st, fake, pages, monkeypatch):
+    scan_items(st, fake, ["a"])
+    pages.answers["https://example.com/watch/a"] = "<html></html>"
+    names = []
+    import threading
+    monkeypatch.setattr(cd.catalogpreview, "find_preview", lambda t, u: names.append(threading.current_thread().name) or None)
+    asyncio.run(cd.DetailWorker(st).process_page_scan(cd.DetailWorker(st).pick_page_scan(set())))
+    assert names and names[0] != threading.main_thread().name                              # v pracovním vlákně, ne ve smyčce událostí
+
+
+def test_missing_ffmpeg_does_not_mark_storyboards_as_failed(st, fake, monkeypatch):
+    scan_items(st, fake, ["a", "b"])
+    spec = sbm.candidate({"formats": [sb_format()]})
+    with st.db.conn() as c:
+        c.execute("update catalog_items set anim_url=? where key='youtube a'", (spec,))
+        c.execute("update catalog_items set anim_url='https://c/b.gif' where key='youtube b'")
+    w = cd.DetailWorker(st)
+    monkeypatch.setattr(w, "ffmpeg", lambda: None)
+    assert [r["id"] for r in w.pending_anims(5)] == [anim_rows(st)["youtube b"]["id"]]       # storyboard čeká, dokud ffmpeg není
+    monkeypatch.setattr(w, "ffmpeg", lambda: "/usr/bin/ffmpeg")
+    assert len(w.pending_anims(5)) == 2
+
+
+def test_ffmpeg_path_falls_back_when_the_engine_has_none(st, monkeypatch):
+    class Eng:
+        def get(self, name):
+            return type("E", (), {"bin_path": lambda self_: None})()
+    st.runner.ctx = lambda: type("C", (), {"settings": {}, "engines": Eng()})()
+    monkeypatch.setattr(cd.shutil, "which", lambda n: "/usr/bin/ffmpeg")
+    assert cd.DetailWorker(st).ffmpeg() == "/usr/bin/ffmpeg"
+    monkeypatch.setattr(cd.shutil, "which", lambda n: None)
+    assert cd.DetailWorker(st).ffmpeg() is None                                              # ne řetězec „None“
+
+
+def test_page_scan_blocks_the_site_for_the_details_worker(st, fake, pages, monkeypatch):
+    scan_items(st, fake, ["a"])
+    w = cd.DetailWorker(st)
+    seen = {}
+
+    async def slow_fetch(url, settings=None, timeout=30):
+        seen["excluded"] = set(w.excluded_hosts())
+        return "<html></html>", url
+    monkeypatch.setattr(cd.pagelist, "fetch", slow_fetch)
+    asyncio.run(w.process_page_scan(w.pick_page_scan(set())))
+    assert "example.com" in seen["excluded"] and "example.com" not in w.page_hosts
+
+
+def test_pages_ready_is_false_when_paused_even_without_pending_downloads(st, fake):
+    scan_items(st, fake, ["a"])
+    w = cd.DetailWorker(st)
+    assert w.pages_ready() is True
+    st.db.kv_set("catalog_paused", True)
+    assert w.pages_ready() is False
+    st.db.kv_set("catalog_paused", False)
+    st.settings.update({"schedule_enabled": True, "schedule_scope": ["catalog"], "schedule_rules": [{"days": [0, 1, 2, 3, 4, 5, 6], "windows": [["00:00", "00:01"]]}]})
+    import datetime as _dt
+    if _dt.datetime.now().strftime("%H:%M") > "00:01":                                        # mimo okno rozvrhu se hledání nespustí
+        assert w.pages_ready() is False

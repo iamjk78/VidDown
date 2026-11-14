@@ -15,7 +15,7 @@ from pathlib import Path
 
 import httpx
 
-from . import thumbs
+from . import netsafe, thumbs
 
 log = logging.getLogger("viddown.storyboard")
 
@@ -71,7 +71,9 @@ def parse(value: str) -> dict | None:
         spec = json.loads(value[len(PREFIX):])
         ok = (isinstance(spec, dict) and isinstance(spec["u"], list) and spec["u"] and len(spec["u"]) == len(spec["n"])
               and all(isinstance(u, str) and u.startswith("http") for u in spec["u"]) and all(isinstance(n, int) and n >= 1 for n in spec["n"])
-              and all(isinstance(spec[k], int) and spec[k] >= 1 for k in ("c", "r", "w", "h")))
+              and all(isinstance(spec[k], int) and spec[k] >= 1 for k in ("c", "r", "w", "h"))
+              and spec["c"] <= 20 and spec["r"] <= 20 and spec["w"] <= 1000 and spec["h"] <= 1000 and len(spec["u"]) <= MAX_SHEETS
+              and all(n <= spec["c"] * spec["r"] for n in spec["n"]))
     except (ValueError, KeyError, TypeError):
         return None
     return spec if ok else None
@@ -101,7 +103,7 @@ def _filter(spec: dict, frames: list[tuple[int, int, int]], used: list[int], wid
     return ";".join(parts) + ";" + "".join(labels) + f"concat=n={len(frames)}:v=1:a=0,setpts=N/({FPS}*TB)[v]"
 
 
-def build(folder: Path, item_id: int, value: str, ffmpeg: str | None, max_bytes: int, referer: str | None = None) -> str | None:
+def build(folder: Path, item_id: int, value: str, ffmpeg: str | None, max_bytes: int, referer: str | None = None, proxy: str | None = None) -> str | None:
     """Stáhne obrázky storyboardu a složí z nich `<id>.anim.mp4`. Vrací název souboru, nebo None (špatná specifikace, chybí
     ffmpeg, obrázek se nepodařilo stáhnout, výsledek nad limit)."""
     spec = parse(value)
@@ -115,15 +117,14 @@ def build(folder: Path, item_id: int, value: str, ffmpeg: str | None, max_bytes:
     out = folder / f"{item_id}.anim.{token}.mp4.part"
     try:
         headers = {"User-Agent": thumbs.BROWSER_UA, "Referer": referer} if referer else {"User-Agent": thumbs.UA}
-        with httpx.Client(follow_redirects=True, timeout=30, headers=headers) as c:
-            for s in used:
-                r = c.get(spec["u"][s])
-                if r.status_code != 200 or not r.content or len(r.content) > MAX_SHEET_BYTES or not _is_image(r.content[:16]):
-                    return None
-                sheets[s].write_bytes(r.content)
+        for s in used:                                                       # veřejné adresy, ruční přesměrování, limit velikosti a času
+            got = netsafe.fetch_limited(spec["u"][s], headers, MAX_SHEET_BYTES, proxy)
+            if got is None or got[0] != 200 or not got[2] or not _is_image(got[2][:16]):
+                return None
+            sheets[s].write_bytes(got[2])
         flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
         for crf, width in ((28, WIDTH), (36, 240)):                          # nad limit: druhý pokus s menším obrazem a vyšší kompresí
-            cmd = [ffmpeg, "-y", "-v", "error"]
+            cmd = [ffmpeg, "-y", "-v", "error", "-max_alloc", str(256 * 1024 * 1024)]      # obří obrázek (decompression bomb) nesmí vyčerpat paměť
             for s in used:
                 cmd += ["-framerate", str(FPS), "-i", str(sheets[s])]
             cmd += ["-filter_complex", _filter(spec, frames, used, width), "-map", "[v]", "-r", str(FPS), "-c:v", "libx264", "-preset", "veryfast",

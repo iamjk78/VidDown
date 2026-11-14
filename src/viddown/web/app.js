@@ -8,6 +8,8 @@ let LANG = 'cs';
 const T = (cs, en) => (LANG === 'en' && en !== undefined ? en : cs);
 
 const ICONS = {
+  external: '<path d="M14 4h6v6"/><path d="M20 4l-9 9"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>',
+  copy: '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/>',
   chart: '<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>',
   rss: '<path d="M4 11a9 9 0 0 1 9 9M4 4a16 16 0 0 1 16 16"/><circle cx="5" cy="19" r="1.2"/>',
   play: '<path d="M7 4v16l13-8z"/>', pause: '<path d="M8 5v14M16 5v14"/>', x: '<path d="M6 6l12 12M18 6L6 18"/>',
@@ -972,6 +974,7 @@ const SECTIONS = () => [
     { k: 'catalog_anim', type: 'toggle', label: ['Stahovat animované náhledy', 'Download animated previews'], hint: ['Když web nabízí krátkou animaci (GIF, WebP, MP4), uloží se vedle miniatury. Zabírá víc místa než obrázek.', 'When a site offers a short animation (GIF, WebP, MP4) it is saved next to the thumbnail. Uses more space than an image.'] },
     { k: 'catalog_anim_pages', type: 'toggle', label: ['Hledat animaci i na stránce videa', 'Also look for animations on the video page'], hint: ['U videí, ke kterým yt-dlp animaci nenabídl, se jednou stáhne stránka videa a zkusí se na ní najít náhledový klip (pomalu, po jednom videu na web). Znamená jeden dotaz navíc na video.', 'For videos where yt-dlp offered no animation, the video page is fetched once and searched for a preview clip (slowly, one video per site). Costs one extra request per video.'] },
     { k: 'catalog_anim_max_mb', type: 'number', min: 1, max: 20, suffix: 'MB', label: ['Největší velikost animace', 'Largest animation size'], hint: ['Větší animace se nestáhne a zůstane statická miniatura (výchozí 5 MB).', 'A larger animation is not downloaded and the static thumbnail stays (default 5 MB).'] },
+    { type: 'catdisk' },
     { k: 'catalog_gap', type: 'number', min: 0, max: 60, suffix: 's', label: ['Pauza mezi dotazy na stejný web', 'Pause between requests to the same site'], hint: ['Při zjišťování podrobností videí; režim výkonu ji prodlužuje (Vyvážený 2×, Šetrný 4×)', 'While checking video details; the performance mode lengthens it (Balanced 2×, Eco 4×)'] },
   ] },
   { icon: 'cpu', title: ['Enginy', 'Engines'], col: 0, fields: [
@@ -1037,6 +1040,7 @@ function fieldHtml(f, S) {
       <div class="row gap8" style="justify-content:flex-end"><label class="btn sm">${T('Vybrat zálohu…', 'Choose backup…')}<input type="file" id="rsf" accept=".dtb,.zip" hidden></label></div></div>
       <div id="rsbox"></div>`;
     case 'abstatus': return `<div id="abbox"></div>`;
+    case 'catdisk': return `<div id="cdbox"></div>`;
     case 'schedule': return schedHtml();
     case 'schstatus': return `<div class="fld"><div class="lab"><div class="b5">${T('Stav', 'Status')}</div><div class="hint">${T('Místní čas serveru', 'Server local time')}</div></div><div id="schstat" class="col gap8" style="align-items:flex-end;text-align:right"></div></div>`;
     case 'appstatus': return `<div id="apbox"></div>`;
@@ -1135,6 +1139,7 @@ function bindSettings(root, after) {
     const r = await act(() => api('/api/restore', { method: 'POST', body: fd }), T('Záloha ověřena', 'Backup verified')); e.target.value = ''; if (r) loadRestore($('#rsbox', root)); };
   const rb = $('#rsbox', root); if (rb) loadRestore(rb);
   const ab = $('#abbox', root); if (ab) loadAutoBackup(ab);
+  const cdb = $('#cdbox', root); if (cdb) loadCatDisk(cdb);
   const ap = $('#apbox', root); if (ap) loadAppStatus(ap);
   if ($('#schrules', root)) { bindSchedule(root); renderSchedStatus(); }
   const pw = $('#pwbtn', root); if (pw) pw.onclick = () => openPassword(rer);
@@ -1142,6 +1147,20 @@ function bindSettings(root, after) {
   const tt = $('#tgtest', root); if (tt) tt.onclick = () => act(() => api('/api/telegram/test', { method: 'POST' }), T('Testovací zpráva odeslána', 'Test message sent'));
 }
 
+async function loadCatDisk(box) {
+  const d = await api('/api/catalog/disk').catch(() => null); if (!d || !box.isConnected) return;
+  const sz = b => (b ? fmtBytes(b) : '0 B');
+  box.innerHTML = `<div class="fld"><div class="lab"><div class="b5">${T('Místo na disku', 'Disk space')}</div><div class="hint">${T('Miniatury a animace katalogu (animace jsou jen mezipaměť, do zálohy se nepřidávají a jdou znovu získat tlačítkem Doplnit animace).', 'Catalog thumbnails and animations (animations are only a cache, not included in backups and can be fetched again with Fill in animations).')}</div></div>
+    <div class="row gap10 wrap" style="justify-content:flex-end"><span class="t2">${T('Miniatury', 'Thumbnails')}: <b>${sz(d.thumbs.bytes)}</b> (${d.thumbs.count})</span><span class="t2">${T('Animace', 'Animations')}: <b>${sz(d.anims.bytes)}</b> (${d.anims.count})</span>
+    <button class="btn sm danger" id="cdanimdel" ${d.anims.count ? '' : 'disabled'}>${ic('trash', 12)} ${T('Smazat animace', 'Delete animations')}</button></div></div>`;
+  $('#cdanimdel', box).onclick = async () => {
+    const on = App.settings.values.catalog_anim;
+    if (!confirm(T(`Smazat ${d.anims.count} animací (${sz(d.anims.bytes)})? Statické miniatury zůstanou.${on ? ' Stahování animací je zapnuté, takže se stáhnou znovu; chcete-li to zabránit, nejdřív ho vypněte.' : ''}`,
+      `Delete ${d.anims.count} animations (${sz(d.anims.bytes)})? Static thumbnails stay.${on ? ' Animation downloads are on, so they will be downloaded again; turn them off first to prevent that.' : ''}`))) return;
+    const r = await act(() => api('/api/catalog/anim/delete', { method: 'POST' }), T('Animace smazány', 'Animations deleted'));
+    if (r) loadCatDisk(box);
+  };
+}
 async function restartApp() {
     if (!confirm(T('Restartovat celou aplikaci? Rozpracovaná stahování se přeruší a po startu začnou znovu od začátku; fronta zůstane zachována.', 'Restart the whole app? Downloads in progress are interrupted and restart from the beginning; the queue is kept.'))) return;
     if (!await act(() => api('/api/restart', { method: 'POST' }))) return;
@@ -1334,7 +1353,9 @@ function catCard(it) {
     <div class="vt"><a href="${esc(it.url)}" target="_blank" rel="noopener" title="${esc(it.title || it.url)}">${esc(it.title || it.url)}</a></div>
     <div class="vm ell" title="${esc(it.source_title || '')}">${esc(it.source_title || '')}${it.channel && it.channel !== it.source_title ? ' · ' + esc(it.channel) : ''}</div>
     <div class="vm2"><span>${meta}</span>${badges}</div>
-    <div class="vact"><button class="btn sm primary" data-cact="download" data-id="${it.id}" data-dl="${it.downloaded_before ? 1 : 0}" ${it.state === 'new' ? '' : 'disabled'}>${ic('download', 13)} ${T('Stáhnout', 'Download')}</button>
+    <div class="vact"><a class="btn sm ib" href="${esc(it.url)}" target="_blank" rel="noopener noreferrer" data-cact="open" title="${T('Otevřít stránku videa na webu', 'Open the video page on the site')}">${ic('external', 14)}</a>
+      <button class="btn sm ib" data-cact="copy" data-url="${esc(it.url)}" title="${T('Zkopírovat adresu stránky videa', 'Copy the video page address')}">${ic('copy', 14)}</button>
+      <button class="btn sm primary" data-cact="download" data-id="${it.id}" data-dl="${it.downloaded_before ? 1 : 0}" ${it.state === 'new' ? '' : 'disabled'}>${ic('download', 13)} ${T('Stáhnout', 'Download')}</button>
       <button class="btn sm" data-cact="remove" data-id="${it.id}" ${it.state === 'queued' ? 'disabled' : ''} title="${T('Odstranit z katalogu', 'Remove from the catalog')}">${ic('trash', 13)} ${T('Odstranit', 'Remove')}</button></div></div>`;
 }
 function catPaintGrid() {
@@ -1401,15 +1422,23 @@ async function catRemove(spec, count) {
 function catAnimOn(th, on) {
   const el = $('.vanim', th); if (!el) return;
   if (on) {
+    th.dataset.want = '1';
+    // animace překryje miniaturu až když skutečně hraje / se načetla; při chybě (nepodporovaný formát) zůstane miniatura
+    const video = el.tagName === 'VIDEO', ev = video ? 'playing' : 'load';
+    const shown = () => { if (th.dataset.want === '1') th.classList.add('anim-on'); };
+    el.addEventListener(ev, shown, { once: true });
+    el.addEventListener('error', () => { th.classList.remove('anim-on'); }, { once: true });
     if (!el.getAttribute('src')) el.src = el.dataset.asrc;
-    th.classList.add('anim-on');
-    if (el.tagName === 'VIDEO') { const p = el.play(); if (p && p.catch) p.catch(() => {}); }
+    if (video) { const p = el.play(); if (p && p.catch) p.catch(() => {}); if (!el.paused && el.readyState >= 3) shown(); }
+    else if (el.complete && el.naturalWidth) shown();
   } else {
+    th.dataset.want = '0';
     th.classList.remove('anim-on');
     if (el.tagName === 'VIDEO') el.pause(); else el.removeAttribute('src');            // obrázek: odpojením se animace zastaví a uvolní paměť
   }
 }
 function catAnimHover(e) {
+  if (matchMedia('(hover: none)').matches) return;                                    // dotyk: přepíná jen klepnutí (jinak by emulované najetí animaci hned vypnulo)
   const th = e.target.closest && e.target.closest('.vth.has-anim'); if (!th) return;
   const inside = th.contains(e.relatedTarget);
   if (e.type === 'mouseover' && !inside) catAnimOn(th, true);
@@ -1417,9 +1446,11 @@ function catAnimHover(e) {
 }
 function catGridClick(e) {
   const th = e.target.closest('.vth.has-anim');
-  if (th && !e.target.closest('.vck, a, button') && matchMedia('(hover: none)').matches) { catAnimOn(th, !th.classList.contains('anim-on')); return; }
+  if (th && !e.target.closest('.vck, a, button') && matchMedia('(hover: none)').matches) { catAnimOn(th, th.dataset.want !== '1'); return; }
   const b = e.target.closest('[data-cact]');
   if (!b || b.disabled) return;
+  if (b.dataset.cact === 'copy') { copyText(b.dataset.url).then(ok => toast(ok ? T('Adresa zkopírována', 'Address copied') : T('Kopírování se nepodařilo', 'Copy failed'), !ok)); return; }
+  if (b.dataset.cact === 'open') return;                                  // běžný odkaz, otevře se sám v nové záložce
   if (b.dataset.cact === 'remove') catRemove({ ids: [+b.dataset.id] }, 1);
   else if (b.dataset.cact === 'download') {
     const again = b.dataset.dl === '1';

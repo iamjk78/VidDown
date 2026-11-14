@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import threading
 import time
@@ -140,6 +141,43 @@ def remove_anim(folder: Path | None, name: str | None) -> None:
             (folder / name).unlink(missing_ok=True)
         except OSError as e:
             log.warning("animace %s se nepodařilo smazat: %s", name, e)
+
+
+def disk_usage(folder: Path) -> dict:
+    """Místo, které zabírají miniatury a animace katalogu: {thumbs: {count, bytes}, anims: {count, bytes}}."""
+    out = {"thumbs": {"count": 0, "bytes": 0}, "anims": {"count": 0, "bytes": 0}}
+    try:
+        with os.scandir(folder) as it:
+            for e in it:
+                kind = "anims" if ANIM_NAME.match(e.name) else "thumbs" if THUMB_NAME.match(e.name) else None
+                if kind and e.is_file(follow_symlinks=False):
+                    out[kind]["count"] += 1
+                    out[kind]["bytes"] += e.stat(follow_symlinks=False).st_size
+    except OSError:
+        pass
+    return out
+
+
+def delete_anims(db, folder: Path) -> dict:
+    """Smaže všechny soubory animací (i osiřelé) a položkám vrátí „animace čeká“ (adresa zůstane, takže se při zapnutém stahování
+    animací stáhnou znovu). Vrací {files, bytes, items}."""
+    files = size = 0
+    try:
+        with os.scandir(folder) as it:
+            for e in list(it):
+                if ANIM_NAME.match(e.name) and e.is_file(follow_symlinks=False):
+                    n = e.stat(follow_symlinks=False).st_size
+                    try:
+                        Path(e.path).unlink()
+                        files += 1
+                        size += n
+                    except OSError as ex:
+                        log.warning("animaci %s se nepodařilo smazat: %s", e.name, ex)
+    except OSError:
+        pass
+    with db.conn() as c:
+        items = c.execute("update catalog_items set anim_file=null, updated_at=? where anim_file is not null", (time.time(),)).rowcount
+    return {"files": files, "bytes": size, "items": items}
 
 
 def delete_source(db, sid: int, folder: Path | None = None) -> bool:

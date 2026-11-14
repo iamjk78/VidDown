@@ -625,6 +625,18 @@ def create_app(app_state) -> FastAPI:
         res = await asyncio.to_thread(catalogdetails.retry_failed, S.db, src)
         return {**res, "overview": await asyncio.to_thread(_overview)}
 
+    @app.get("/api/catalog/disk")
+    async def catalog_disk():
+        """Místo na disku: miniatury a animace katalogu (počet souborů a bajty)."""
+        return await asyncio.to_thread(catalog.disk_usage, catalog.thumbs_dir(S.data, S.settings))
+
+    @app.post("/api/catalog/anim/delete")
+    async def catalog_anim_delete():
+        """Smaže všechny animace katalogu (statické miniatury zůstanou). Při zapnutém stahování animací se stáhnou znovu."""
+        res = await asyncio.to_thread(catalog.delete_anims, S.db, catalog.thumbs_dir(S.data, S.settings))
+        return {**res, "disk": await asyncio.to_thread(catalog.disk_usage, catalog.thumbs_dir(S.data, S.settings)),
+                "overview": await asyncio.to_thread(_overview)}
+
     @app.post("/api/catalog/anim/refill")
     async def catalog_anim_refill(req: Request):
         """Doplní animace u už načtených videí: {source?: id}. Znovu zjistí podrobnosti videí bez adresy animace a dá další pokus

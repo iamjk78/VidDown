@@ -119,6 +119,8 @@ Menu **Katalog** slouží k třídění videí před stahováním: přidáte zdr
   najít náhledový klip přímo na stránce videa; použije ho jen tehdy, když prokazatelně patří k tomuto videu, ne k doporučeným. Podle animace jde
   **filtrovat** („s animací“ / „bez animace“). U už načtených videí tlačítko **Doplnit animace** znovu zjistí podrobnosti videí bez animace (po jednom
   na web s pauzou) a zkusí znovu ty, které byly nad limitem.
+- **Místo a mazání:** Nastavení › Katalog ukazuje velikost miniatur a animací; tlačítko **Smazat animace** je odstraní (statické miniatury zůstanou).
+  Animace jsou jen mezipaměť, do zálohy se nepřidávají. U každé karty je ikona **Otevřít stránku videa** na webu a **Zkopírovat adresu**.
 - **Podrobnosti** (rozlišení, velikost, délka, větší miniatura) se doplňují postupně, po jednom videu na web s nastavitelnou pauzou
   (Nastavení › Katalog), a až po dokončení seznamů všech zdrojů. U každého zdroje jde zdroj **Obnovit** (najde jen nová videa),
   **Načíst znovu vše** (nabídne znovu i odmítnutá a stažená) a **Odebrat** (smaže i paměť o jeho videích).

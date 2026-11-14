@@ -21,7 +21,7 @@ from pathlib import Path
 
 import httpx
 
-from . import catalog, catalogpreview, pagelist, schedule, storyboard, thumbs
+from . import catalog, catalogpreview, netsafe, pagelist, schedule, storyboard, thumbs
 from .resolvers import ResolveError, sniffer, ytdlp
 
 log = logging.getLogger("viddown.catalogdetails")
@@ -97,37 +97,32 @@ def anim_kind(head: bytes) -> str | None:
     return None
 
 
-def download_anim(folder: Path, item_id: int, url: str, max_bytes: int, referer: str | None = None) -> str | None:
-    """Stáhne animovaný náhled do složky miniatur jako `<id>.anim.<přípona>`. Soubor větší než `max_bytes` nebo s jiným
-    obsahem (statický obrázek, HTML) se zahodí. Vrací název souboru, nebo None."""
+def download_anim(folder: Path, item_id: int, url: str, max_bytes: int, referer: str | None = None, proxy: str | None = None) -> str | None:
+    """Stáhne animovaný náhled do složky miniatur jako `<id>.anim.<přípona>`. Adresa musí být veřejná (i po přesměrování), stahování
+    má limit velikosti i celkového času. Soubor větší než `max_bytes` nebo s jiným obsahem (statický obrázek, HTML) se zahodí.
+    Vrací název souboru, nebo None."""
+    headers = {"User-Agent": thumbs.BROWSER_UA, "Referer": referer} if referer else {"User-Agent": thumbs.UA}
+    try:
+        got = netsafe.fetch_limited(url, headers, max_bytes, proxy)
+    except (OSError, ValueError, httpx.HTTPError) as e:
+        log.debug("animace %s: %s", url, e)
+        return None
+    if got is None or got[0] != 200 or not got[2]:
+        return None
+    kind = anim_kind(got[2][:64])
+    if not kind:
+        return None
     folder.mkdir(parents=True, exist_ok=True)
     tmp = folder / f"{item_id}.anim.{uuid.uuid4().hex[:8]}.part"
     try:
-        headers = {"User-Agent": thumbs.BROWSER_UA, "Referer": referer} if referer else {"User-Agent": thumbs.UA}
-        with httpx.Client(follow_redirects=True, timeout=30, headers=headers) as c:
-            with c.stream("GET", url) as r:
-                if r.status_code != 200:
-                    return None
-                if int(r.headers.get("content-length") or 0) > max_bytes:
-                    return None
-                size = 0
-                with tmp.open("wb") as f:
-                    for chunk in r.iter_bytes():
-                        size += len(chunk)
-                        if size > max_bytes:                               # velikost se hlídá i bez hlavičky Content-Length
-                            return None
-                        f.write(chunk)
-        with tmp.open("rb") as f:
-            kind = anim_kind(f.read(64)) if size else None
-        if not kind:
-            return None
+        tmp.write_bytes(got[2])
         final = folder / f"{item_id}.anim.{kind}"
         tmp.replace(final)
         for other in ("mp4", "webm", "gif", "webp"):                       # jediný soubor na položku
             if other != kind:
                 (folder / f"{item_id}.anim.{other}").unlink(missing_ok=True)
         return final.name
-    except (OSError, ValueError, httpx.HTTPError) as e:
+    except OSError as e:
         log.debug("animace %s: %s", url, e)
         return None
     finally:
@@ -140,6 +135,7 @@ class DetailWorker:
         self.next_at: dict[str, float] = {}          # web -> čas (monotonic), kdy smí další dotaz
         self.backoff: dict[str, dict] = {}           # web -> {until, delay, reason}
         self.active: dict[str, asyncio.Task] = {}
+        self.page_hosts: set[str] = set()            # weby, na kterých právě běží sken stránky videa
         self.slow_task: asyncio.Task | None = None   # pomalá vrstva (prohlížeč): nejvýš jedno video najednou
 
     # --- nastavení a stav -------------------------------------------------------------------------
@@ -169,7 +165,7 @@ class DetailWorker:
     def excluded_hosts(self) -> set[str]:
         """Weby, na které se teď nesmí sahat: právě zpracovávané, ve vychlazení po dotazu nebo odložené po omezení."""
         now = time.monotonic()
-        return set(self.active) | {h for h, t in self.next_at.items() if t > now} | {h for h, b in self.backoff.items() if b["until"] > now}
+        return set(self.active) | self.page_hosts | {h for h, t in self.next_at.items() if t > now} | {h for h, b in self.backoff.items() if b["until"] > now}
 
     def pick(self, excluded: set[str] | None = None) -> dict | None:
         """Další video k zjištění podrobností (v pořadí zdrojů a videí) z webu, který je právě volný."""
@@ -356,20 +352,32 @@ class DetailWorker:
             c.execute("update catalog_items set thumb_file=?, updated_at=? where id=? and thumb_file is null",
                       (name if name else "", time.time(), row["id"]))
 
+    def pending_anims(self, limit: int) -> list[dict]:
+        """Animace čekající na stažení; storyboardy se přeskočí, dokud chybí ffmpeg (jinak by se natrvalo označily jako nepodařené)."""
+        sql = ("select id, url, anim_url from catalog_items where anim_file is null and anim_url is not null and anim_url != '' "
+               "and state in ('new','queued')")
+        if not self.ffmpeg():
+            sql += " and anim_url not like 'sb:%'"
+        return self.db.query(sql + " order by source_id, pos limit ?", (limit,))
+
+    def proxy(self) -> str | None:
+        return self.st.settings.get("proxy") or None
+
     def ffmpeg(self) -> str | None:
         """Cesta k ffmpeg ze správce enginů (jinak ffmpeg v PATH)."""
         try:
-            return str(self.st.runner.ctx().engines.get("ffmpeg").bin_path())
+            p = self.st.runner.ctx().engines.get("ffmpeg").bin_path()
         except Exception:  # noqa: BLE001
-            return shutil.which("ffmpeg")
+            p = None
+        return str(p) if p else shutil.which("ffmpeg")
 
     async def _anim_one(self, row: dict) -> None:
         max_bytes = int(float(self.st.settings.get("catalog_anim_max_mb") or 5) * 1024 * 1024)
         referer = thumbs.referer_of(row.get("url"))
         if storyboard.is_spec(row["anim_url"]):                       # storyboard: obrázky se složí ffmpegem do krátkého MP4
-            name = await asyncio.to_thread(storyboard.build, self.folder(), row["id"], row["anim_url"], self.ffmpeg(), max_bytes, referer)
+            name = await asyncio.to_thread(storyboard.build, self.folder(), row["id"], row["anim_url"], self.ffmpeg(), max_bytes, referer, self.proxy())
         else:
-            name = await asyncio.to_thread(download_anim, self.folder(), row["id"], row["anim_url"], max_bytes, referer)
+            name = await asyncio.to_thread(download_anim, self.folder(), row["id"], row["anim_url"], max_bytes, referer, self.proxy())
         with self.db.conn() as c:
             n = c.execute("update catalog_items set anim_file=?, updated_at=? where id=? and anim_file is null and state in ('new','queued')",
                           (name if name else "", time.time(), row["id"])).rowcount
@@ -383,8 +391,7 @@ class DetailWorker:
         s = self.st.settings
         if not (s.get("catalog_anim") and s.get("catalog_anim_pages")) or not self.allowed_now() or self.listing_busy() or self.fast_work_left():
             return False
-        return not self.db.query("select 1 from catalog_items where anim_file is null and anim_url is not null and anim_url != '' "
-                                 "and state in ('new','queued') limit 1")
+        return not self.pending_anims(1)
 
     def pick_page_scan(self, excluded: set[str] | None = None) -> dict | None:
         excluded = self.excluded_hosts() if excluded is None else excluded
@@ -404,6 +411,7 @@ class DetailWorker:
     async def process_page_scan(self, item: dict) -> None:
         """Stáhne stránku videa a najde na ní náhledový klip nebo animaci; nic nenalezeno = `anim_url=''` (znovu až „Doplnit“)."""
         host = item.get("host") or ""
+        self.page_hosts.add(host)                                      # během skenu na tento web nesmí sahat ani worker podrobností
         try:
             text, final = await pagelist.fetch(item["url"], self.st.settings.all())
         except pagelist.PageError as e:
@@ -418,9 +426,11 @@ class DetailWorker:
             log.exception("katalog: stránka videa %s", item["id"])
             self._mark_anim(item, "")
         else:
-            self._mark_anim(item, catalogpreview.find_preview(text, final) or "")
+            found = await asyncio.to_thread(catalogpreview.find_preview, text, final)      # regexy nad 1,5 MB HTML nesmí blokovat smyčku událostí
+            self._mark_anim(item, found or "")
             self.backoff.pop(host, None)
         finally:
+            self.page_hosts.discard(host)
             self.next_at[host] = time.monotonic() + self.gap()
 
     async def pages_loop(self, stop: asyncio.Event) -> None:
@@ -451,9 +461,7 @@ class DetailWorker:
                     await _sleep(stop, 0.2)
                     continue
                 if self.st.settings.get("catalog_anim") and self.allowed_now() and not self.paused():     # animace až po všech miniaturách
-                    arows = await asyncio.to_thread(
-                        self.db.query, "select id, url, anim_url from catalog_items where anim_file is null and anim_url is not null and anim_url != '' "
-                        "and state in ('new','queued') order by source_id, pos limit 2")
+                    arows = await asyncio.to_thread(self.pending_anims, 2)
                     if arows:
                         await asyncio.gather(*(self._anim_one(r) for r in arows))
                         await _sleep(stop, 0.5)
@@ -505,21 +513,21 @@ def retry_failed(db, source: int | None = None) -> dict:
 
 
 def refill_anims(db, source: int | None = None) -> dict:
-    """„Doplnit animace“: viditelným videím bez adresy animace znovu zjistí podrobnosti (adresa se dřív neukládala; zjistí se
-    spolu s ostatními podrobnostmi, po jednom na web s pauzou) a videím, kterým se animace nepodařilo stáhnout, dá další pokus
-    (třeba po zvýšení limitu velikosti) a znovu hledá náhled na stránkách videí, kde se dřív nic nenašlo.
-    Vrací počty {"details", "retry", "pages"}."""
+    """„Doplnit animace“ (viditelná videa): (1) videím, kde se na stránce videa nic nenašlo (`anim_url=''`), vrátí hledání na stránce;
+    (2) videím, kterým se animace nepodařilo stáhnout (nad limit, vypršelá adresa), zapomene adresu i pokus a znovu zjistí podrobnosti
+    (adresa se získá čerstvá); (3) videím bez adresy animace znovu zjistí podrobnosti (u starších se adresa neukládala; zjistí se
+    spolu s ostatními podrobnostmi, po jednom na web s pauzou). Vrací počty {"details", "retry", "pages"}."""
     where, args = "", []
     if source:
         where, args = " and source_id=?", [int(source)]
+    vis = " and state in ('new','queued')"
     with db.conn() as c:
         c.execute("begin immediate")
+        g = c.execute("update catalog_items set anim_url=null where anim_url='' and anim_file is null and detail_state='done'" + vis + where, args).rowcount
+        r = c.execute("update catalog_items set anim_file=null, anim_url=null, detail_state='pending', detail_error=null "
+                      "where anim_file='' and detail_state='done'" + vis + where, args).rowcount
         d = c.execute("update catalog_items set detail_state='pending', detail_error=null where detail_state='done' "
-                      "and anim_url is null and anim_file is null and state in ('new','queued')" + where, args).rowcount
-        r = c.execute("update catalog_items set anim_file=null where anim_file='' and anim_url is not null and anim_url != '' "
-                      "and state in ('new','queued')" + where, args).rowcount
-        g = c.execute("update catalog_items set anim_url=null where anim_url='' and anim_file is null and detail_state='done' "
-                      "and state in ('new','queued')" + where, args).rowcount            # hledání na stránkách videí znovu
+                      "and anim_url is null and anim_file is null" + vis + where, args).rowcount
         c.execute("commit")
     return {"details": d, "retry": r, "pages": g}
 
