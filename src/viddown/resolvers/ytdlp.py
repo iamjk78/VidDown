@@ -2,9 +2,13 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
+import os
+import re
 import shutil
+import tempfile
 import time
 from pathlib import Path
 
@@ -51,6 +55,51 @@ def base_cmd(ctx: Ctx) -> list[str]:
     return cmd
 
 
+def cookie_copy(ctx: Ctx) -> Path | None:
+    """Soukromá kopie cookies.txt pro jeden běh: yt-dlp si soubor po skončení přepisuje a souběžné procesy
+    by hlavní soubor poškodily nebo vrátily na starší hodnoty."""
+    src = ctx.cookies_file
+    if not src or ctx.cookies_override is not None:
+        return None
+    tmp = ctx.data / "ck"
+    tmp.mkdir(parents=True, exist_ok=True)
+    for old in tmp.glob("ck-*.txt"):                    # zbytky po násilně ukončeném běhu
+        try:
+            if time.time() - old.stat().st_mtime > 86400:
+                old.unlink()
+        except OSError:
+            pass
+    fd, name = tempfile.mkstemp(prefix="ck-", suffix=".txt", dir=str(tmp))        # práva 0600
+    try:
+        with os.fdopen(fd, "wb") as out, open(src, "rb") as f:
+            shutil.copyfileobj(f, out)
+    except OSError:
+        Path(name).unlink(missing_ok=True)
+        return None
+    return Path(name)
+
+
+def _drop(path: Path | None) -> None:
+    if path:
+        Path(path).unlink(missing_ok=True)
+
+
+def with_copy(ctx: Ctx) -> tuple[Ctx, Path | None]:
+    ck = cookie_copy(ctx)
+    return (dataclasses.replace(ctx, cookies_override=ck) if ck else ctx), ck
+
+
+AGE_RE = re.compile(r"confirm your age|confirm you.re not a bot|age[- ]restricted", re.I)
+
+
+def cookie_hint(msg: str, ctx: Ctx) -> str:
+    """YouTube s nahranými cookies pořád chce přihlášení: cookies přestala platit (zneplatnil je YouTube)."""
+    if msg and "[youtube" in msg and AGE_RE.search(msg) and (ctx.cookies_file or ctx.settings.get("cookies_mode") == "browser"):
+        return (msg.split(" Use --cookies")[0].rstrip(". ") + ". Nahrané cookies už YouTube neuznává: "
+                "exportujte je znovu z anonymního okna prohlížeče a nahrajte je v Nastavení.")
+    return msg
+
+
 def _error_from(out: str) -> str:
     errs = [l[6:].strip() for l in out.splitlines() if l.startswith("ERROR:")]
     if errs:
@@ -62,7 +111,14 @@ def _error_from(out: str) -> str:
 POST = "postprocess:VDPOST %(progress.status)s|%(progress.postprocessor)s"
 
 
-async def _run_json(cmd: list[str], timeout: float) -> dict:
+async def _run_json(cmd: list[str], timeout: float, ctx: Ctx | None = None, ck: Path | None = None) -> dict:
+    try:
+        return await _run_json_inner(cmd, timeout, ctx)
+    finally:
+        _drop(ck)
+
+
+async def _run_json_inner(cmd: list[str], timeout: float, ctx: Ctx | None) -> dict:
     proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                                                 **subprocess_kwargs())
     try:
@@ -77,21 +133,22 @@ async def _run_json(cmd: list[str], timeout: float) -> dict:
     etext = err.decode("utf-8", "replace")
     if proc.returncode != 0 and not text.strip().startswith("{"):
         msg = _error_from(etext + "\n" + text)
-        raise ResolveError(msg, classify_error(msg))
+        raise ResolveError(cookie_hint(msg, ctx) if ctx else msg, classify_error(msg))
     try:
         return json.loads(text)
     except json.JSONDecodeError:
         msg = _error_from(etext)
-        raise ResolveError(msg, classify_error(msg))
+        raise ResolveError(cookie_hint(msg, ctx) if ctx else msg, classify_error(msg))
 
 
 async def probe(url: str, ctx: Ctx, timeout: float = 300, playlist_end: int | None = None) -> dict:
     """Metadata bez stahování. Playlist/kanál vrací plochý seznam položek (volitelně jen prvních `playlist_end`)."""
-    cmd = base_cmd(ctx) + ["-J", "--flat-playlist"]
+    cctx, ck = with_copy(ctx)
+    cmd = base_cmd(cctx) + ["-J", "--flat-playlist"]
     if playlist_end:
         cmd += ["--playlist-end", str(int(playlist_end))]
     cmd.append(url)
-    return await _run_json(cmd, timeout)
+    return await _run_json(cmd, timeout, ctx, ck)
 
 
 def polite_args(url: str) -> list[str]:
@@ -100,8 +157,9 @@ def polite_args(url: str) -> list[str]:
 
 
 async def full_info(url: str, ctx: Ctx, timeout: float = 180) -> dict:
-    cmd = base_cmd(ctx) + ["-J", "--no-playlist", *polite_args(url), *format_args(ctx.settings), url]
-    return await _run_json(cmd, timeout)
+    cctx, ck = with_copy(ctx)
+    cmd = base_cmd(cctx) + ["-J", "--no-playlist", *polite_args(url), *format_args(ctx.settings), url]
+    return await _run_json(cmd, timeout, ctx, ck)
 
 
 def format_args(s: dict, audio_only: bool | None = None) -> list[str]:
@@ -136,6 +194,15 @@ from ..cpu import MODES  # noqa: E402
 async def download(url: str, info: dict | None, ctx: Ctx, staging: Path, name: str, rate_bps: int | None,
                    on_progress, holder: ProcHolder, audio_only: bool | None = None, no_subs: bool = False) -> dict:
     """Stáhne video do staging. Vrací {"file": Path, "thumb": Path|None} nebo {"skipped": důvod}."""
+    cctx, ck = with_copy(ctx)
+    try:
+        return await _download(url, info, cctx, staging, name, rate_bps, on_progress, holder, audio_only, no_subs, ctx)
+    finally:
+        _drop(ck)
+
+
+async def _download(url, info, ctx: Ctx, staging: Path, name: str, rate_bps, on_progress, holder: ProcHolder,
+                    audio_only, no_subs, orig: Ctx) -> dict:
     s = ctx.settings
     staging.mkdir(parents=True, exist_ok=True)
     cmd = base_cmd(ctx) + polite_args(url) + format_args(s, audio_only)
@@ -231,7 +298,7 @@ async def download(url: str, info: dict | None, ctx: Ctx, staging: Path, name: s
             # titulky jsou doplněk (YouTube je často omezuje – HTTP 429): video stáhneme i bez nich
             log.warning("titulky se nepodařilo stáhnout (%s), zkouším bez titulků", msg)
             return await download(url, info, ctx, staging, name, rate_bps, on_progress, holder, audio_only, no_subs=True)
-        raise ResolveError(msg, classify_error(msg))
+        raise ResolveError(cookie_hint(msg, orig), classify_error(msg))
     fp = Path(filepath)
     if s.get("mkv_to_mp4", True) and fp.suffix.lower() == ".mkv":       # jen změna kontejneru (kopie proudů), nic se nekóduje
         on_progress(progress=1.0, speed=None, eta=None, phase="post")
