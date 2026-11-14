@@ -32,6 +32,7 @@ BACKOFF_MAX = 7200.0
 BACKOFF_LOGIN = 3600.0              # web vyžaduje přihlášení/ověření: zkusit až za hodinu
 PERF_MULT = {"full": 1.0, "balanced": 2.0, "eco": 4.0}
 THUMB_BATCH = 4
+SRC_SCAN_PAGES = 30                 # nejvýš tolik stránek výpisu zdroje při hledání animací
 THUMB_CANDIDATES = 10               # kolik kandidátů miniatury se zkusí, než se vzdá (největší varianty starším videím chybějí)
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".gif")
 
@@ -135,6 +136,7 @@ class DetailWorker:
         self.next_at: dict[str, float] = {}          # web -> čas (monotonic), kdy smí další dotaz
         self.backoff: dict[str, dict] = {}           # web -> {until, delay, reason}
         self.active: dict[str, asyncio.Task] = {}
+        self.src_scanned: dict[int, int] = {}        # zdroj -> nejvyšší číslo videa bez animace při prohledání jeho stránek (nová videa = znovu)
         self.page_hosts: set[str] = set()            # weby, na kterých právě běží sken stránky videa
         self.slow_task: asyncio.Task | None = None   # pomalá vrstva (prohlížeč): nejvýš jedno video najednou
 
@@ -433,10 +435,79 @@ class DetailWorker:
             self.page_hosts.discard(host)
             self.next_at[host] = time.monotonic() + self.gap()
 
+    # --- animace ze stránek zdroje (výpis videí): jedna stránka = animace desítek videí, proto dřív než stránky videí ---------
+    def pick_source_scan(self, excluded: set[str]) -> dict | None:
+        for r in self.db.query(
+                "select s.id, s.url, (select max(i.id) from catalog_items i where i.source_id=s.id and i.anim_url is null and i.detail_state='done' "
+                "and i.state in ('new','queued')) top from catalog_sources s where s.status='done' and top is not null order by s.id"):
+            if self.src_scanned.get(r["id"], 0) >= r["top"]:
+                continue
+            if catalog.domain(r["url"]) in excluded:
+                continue
+            return r
+        return None
+
+    async def process_source_scan(self, src: dict) -> None:
+        """Projde stránku zdroje a jeho další stránky (nejvýš `SRC_SCAN_PAGES`, s pauzou mezi nimi), najde náhledové klipy a spáruje
+        je s videi podle společného čísla v adrese. Spárovaným videím uloží adresu animace (stáhne se hned po miniaturách, adresy bývají
+        podepsané a brzy vyprší), videím, která na prohlédnutých stránkách jsou, ale klip nemají, `''`. Ostatní zůstanou pro hledání na
+        stránkách videí."""
+        sid, host = src["id"], catalog.domain(src["url"])
+        self.src_scanned[sid] = src["top"]
+        self.page_hosts.add(host)
+        url, page_no, visited, failed = src["url"], 1, set(), False
+        try:
+            while url and url not in visited and page_no <= SRC_SCAN_PAGES:
+                visited.add(url)
+                try:
+                    text, final = await pagelist.fetch(url, self.st.settings.all())
+                except pagelist.PageError as e:
+                    msg = str(e)
+                    if "HTTP 429" in msg or "HTTP 5" in msg or "se nepodařilo načíst" in msg:
+                        self.src_scanned.pop(sid, None)                  # omezení nebo výpadek: zkusit později
+                        self._back_off(host, BACKOFF_FIRST, "stránka zdroje: " + msg[:120])
+                        failed = True
+                    break
+                items = await asyncio.to_thread(
+                    self.db.query, "select id, url, thumb_url from catalog_items where source_id=? and anim_url is null and detail_state='done' "
+                    "and state in ('new','queued')", (sid,))
+                if not items:
+                    break
+                found, seen, ncand = await asyncio.to_thread(catalogpreview.match_listing, text, final, items)
+                if not ncand and page_no == 1:
+                    break                                               # stránka žádné náhledy nenabízí (např. YouTube): nic neznačit
+                now = time.time()
+                with self.db.conn() as c:
+                    for iid, u in found.items():
+                        c.execute("update catalog_items set anim_url=?, updated_at=? where id=? and anim_url is null and state in ('new','queued')", (u, now, iid))
+                    for iid in seen - set(found):
+                        c.execute("update catalog_items set anim_url='', updated_at=? where id=? and anim_url is null and state in ('new','queued')", (now, iid))
+                if not seen:
+                    break                                               # na stránce není žádné naše video: další už nepomůže
+                if len(seen) >= len(items):
+                    break                                               # všechna videa vyřízena
+                url = await asyncio.to_thread(catalogpreview.next_page_url, text, final, page_no)
+                page_no += 1
+                if url:
+                    await asyncio.sleep(self.gap())
+            if not failed:
+                self.backoff.pop(host, None)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            log.exception("katalog: stránky zdroje %s", sid)
+        finally:
+            self.page_hosts.discard(host)
+            self.next_at[host] = time.monotonic() + self.gap()
+
     async def pages_loop(self, stop: asyncio.Event) -> None:
         while not stop.is_set():
             try:
                 if await asyncio.to_thread(self.pages_ready):
+                    src = await asyncio.to_thread(self.pick_source_scan, self.excluded_hosts())
+                    if src is not None:
+                        await self.process_source_scan(src)
+                        continue
                     item = await asyncio.to_thread(self.pick_page_scan, self.excluded_hosts())
                     if item is not None:
                         await self.process_page_scan(item)

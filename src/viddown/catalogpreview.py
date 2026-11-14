@@ -78,8 +78,27 @@ def find_preview(text: str, page_url: str) -> str | None:
     Stránka videa obvykle obsahuje i doporučená videa s vlastními náhledy, proto se klip přijme jen tehdy, když je jednoznačný
     (mezi nejlepšími kandidáty je jediná adresa) nebo když obsahuje identifikátor tohoto videa z adresy stránky. Jinak by se
     ke videu přiřadila animace jiného videa; raději zůstane statická miniatura."""
+    cands = _collect(text, page_url)
+    if not cands:
+        return None
+    ids = _id_tokens(page_url)
+    if ids:                                                               # klip s identifikátorem tohoto videa má přednost
+        own = [c for c in cands if _has_id(c[3], ids)]
+        if own:
+            best_rank = min(c[0] for c in own)
+            urls = {c[3] for c in own if c[0] == best_rank}
+            return min(c for c in own if c[0] == best_rank)[3] if len(urls) == 1 else None
+    top_rank = min(c[0] for c in cands)
+    top = {c[3] for c in cands if c[0] == top_rank}
+    if len(top) == 1:
+        return next(iter(top))
+    return None                                                           # víc různých kandidátů a žádný nepatří prokazatelně k tomuto videu
+
+
+def _collect(text: str, page_url: str) -> list[tuple[int, int, int, str]]:
+    """Všichni kandidáti na náhled ve stránce: (pořadí zdroje, pořadí formátu, pozice, adresa)."""
     text = text[:MAX_TEXT]
-    cands: list[tuple[int, int, int, str]] = []                          # (pořadí zdroje, pořadí formátu, pozice, adresa)
+    cands: list[tuple[int, int, int, str]] = []
 
     def add(rank: int, raw: str, pos: int) -> None:
         u = _clean(raw, page_url)
@@ -106,17 +125,103 @@ def find_preview(text: str, page_url: str) -> str | None:
         raw = m.group(0)
         if _has_keyword(raw):
             add(1, raw, m.start())
+    return cands
+
+
+# --- stránka zdroje (výpis videí): animace všech videí najednou ------------------------------------------
+_TOK_RE = re.compile(r"[0-9a-z]{6,}")
+LISTING_MAX_RANK = 2                                                      # na výpisu nepoužít og:video (to je hlavní video stránky, ne náhled)
+
+
+def _tokens(text: str) -> set[str]:
+    return {t for t in _TOK_RE.findall(text.lower()) if re.search(r"\d", t)}
+
+
+def url_tokens(url: str | None) -> set[str]:
+    """Identifikátory z adresy: slova z cesty a hodnoty typických parametrů (aspoň 6 znaků, s číslicí)."""
+    if not url:
+        return set()
+    try:
+        u = urlsplit(url)
+    except ValueError:
+        return set()
+    out = _tokens(u.path)
+    for pair in u.query.split("&"):
+        k, _, v = pair.partition("=")
+        if k.lower() in ID_KEYS:
+            out |= _tokens(v)
+    return out
+
+
+def _nokey(url: str) -> str:
+    return url.split("?", 1)[0].split("#", 1)[0]
+
+
+def match_listing(text: str, page_url: str, items: list[dict]) -> tuple[dict[int, str], set[int], int]:
+    """Na stránce zdroje (výpisu) spáruje náhledové klipy s videi podle společného identifikátoru: číslo nebo slovo z adresy klipu,
+    které je i v adrese miniatury nebo stránky videa a identifikuje právě jedno video (a právě jeden klip). Nejednoznačné se
+    nepřiřadí. Vrací ({id položky: adresa klipu}, {id položek, které na stránce jsou}, počet nalezených klipů)."""
+    cands = [c for c in _collect(text, page_url) if c[0] <= LISTING_MAX_RANK]
     if not cands:
-        return None
-    ids = _id_tokens(page_url)
-    if ids:                                                               # klip s identifikátorem tohoto videa má přednost
-        own = [c for c in cands if _has_id(c[3], ids)]
-        if own:
-            best_rank = min(c[0] for c in own)
-            urls = {c[3] for c in own if c[0] == best_rank}
-            return min(c for c in own if c[0] == best_rank)[3] if len(urls) == 1 else None
-    top_rank = min(c[0] for c in cands)
-    top = {c[3] for c in cands if c[0] == top_rank}
-    if len(top) == 1:
-        return next(iter(top))
-    return None                                                           # víc různých kandidátů a žádný nepatří prokazatelně k tomuto videu
+        return {}, set(), 0
+    by_tok: dict[str, list[tuple[int, int, int, str]]] = {}
+    for c in cands:
+        for t in url_tokens(c[3]):
+            by_tok.setdefault(t, []).append(c)
+    tok_items: dict[str, int] = {}
+    toks = {it["id"]: url_tokens(it.get("thumb_url")) | url_tokens(it.get("url")) for it in items}
+    for ts in toks.values():
+        for t in ts:
+            tok_items[t] = tok_items.get(t, 0) + 1
+    page_tokens = _tokens(text[:MAX_TEXT])
+    found: dict[int, str] = {}
+    seen: set[int] = set()
+    for it in items:
+        mine = {t for t in toks[it["id"]] if tok_items[t] == 1}               # jen identifikátory patřící jedinému videu
+        if mine & page_tokens:
+            seen.add(it["id"])
+        keys: dict[str, tuple] = {}
+        for t in mine:
+            group = by_tok.get(t)
+            if not group:
+                continue
+            best = min(group)[:2]
+            top = {_nokey(c[3]) for c in group if c[:2] == best}
+            if len(top) == 1:                                                  # víc formátů téhož klipu: vybere se nejmenší
+                c = min(group)
+                keys[_nokey(c[3])] = c
+            else:
+                keys["?" + t] = ()                                             # nejednoznačné: tento identifikátor nerozhoduje, ale přiřazení znemožní
+        if len(keys) == 1 and not next(iter(keys)).startswith("?"):
+            found[it["id"]] = next(iter(keys.values()))[3]
+    claimed: dict[str, list[int]] = {}
+    for iid, u in found.items():
+        claimed.setdefault(_nokey(u), []).append(iid)
+    for ids in claimed.values():                                              # jeden klip pro víc videí: nepřiřadit nikomu
+        if len(ids) > 1:
+            for iid in ids:
+                del found[iid]
+    return found, seen, len(cands)
+
+
+_NEXT_RE = re.compile(r"""<(?:a|link)\b[^>]{0,500}?\brel\s*=\s*["']?next["']?[^>]{0,500}?>""", re.I)
+_HREF_RE = re.compile(r"""\bhref\s*=\s*["']([^"']+)["']""", re.I)
+
+
+def next_page_url(text: str, page_url: str, page_no: int) -> str | None:
+    """Adresa další stránky výpisu: odkaz `rel="next"`, jinak ze stejné adresy s `page=<další číslo>`, když ho stránka nabízí."""
+    text = text[:MAX_TEXT]
+    m = _NEXT_RE.search(text)
+    if m:
+        h = _HREF_RE.search(m.group(0))
+        if h:
+            u = urljoin(page_url, html.unescape(h.group(1)))
+            if u != page_url and netsafe.literal_ok(u):
+                return u
+    nxt = page_no + 1
+    if re.search(rf"""[?&;]page={nxt}(?![0-9])""", text):
+        sp = urlsplit(page_url)
+        q = [kv for kv in sp.query.split("&") if kv and not kv.lower().startswith("page=")] + [f"page={nxt}"]
+        u = sp._replace(query="&".join(q), fragment="").geturl()
+        return u if netsafe.literal_ok(u) else None
+    return None

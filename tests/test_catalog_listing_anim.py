@@ -1,0 +1,137 @@
+"""Katalog: animace ze stránky zdroje (výpisu videí) – spárování podle čísla v adrese, stránkování, napojení na smyčku."""
+import asyncio
+
+from tests.test_catalog import client, e, fake, playlist, rt, scan  # noqa: F401
+from tests.test_catalog_anim import anim_rows, no_dns, pages, st, web  # noqa: F401
+from tests.test_catalog_details import make  # noqa: F401
+from viddown import catalog, catalogdetails as cd, catalogpreview as cp, pagelist
+
+SRC = "https://x.example/pl"
+
+
+def card(num, key, signed="a"):
+    """Karta videa na výpisu: odkaz na video a náhledový klip s číslem videa v cestě (podepsaná adresa)."""
+    return (f'<li><a href="/watch?viewkey={key}">video</a>'
+            f'<img data-mediabook="https://cdn.x/v/{num}/180P_{num}.webm?sig={signed}&to=1"></li>')
+
+
+def items_of(nums):
+    return [{"id": i + 1, "url": f"https://x.example/watch?viewkey=k{n}abcdef", "thumb_url": f"https://img.x/videos/202607/01/{n}/thumb.jpg"}
+            for i, n in enumerate(nums)]
+
+
+# --- spárování ---------------------------------------------------------------------------------------
+def test_match_listing_pairs_by_number_ignores_signature_and_reports_seen():
+    html_ = "<ul>" + card(11111111, "k11111111abcdef") + card(22222222, "k22222222abcdef", "b") + "</ul>"
+    found, seen, n = cp.match_listing(html_, "https://x.example/pl", items_of([11111111, 22222222, 33333333]))
+    assert found == {1: "https://cdn.x/v/11111111/180P_11111111.webm?sig=a&to=1", 2: "https://cdn.x/v/22222222/180P_22222222.webm?sig=b&to=1"}
+    assert seen == {1, 2} and n == 2                                     # třetí video na stránce není: zůstane pro další hledání
+
+
+def test_match_listing_does_not_use_shared_date_tokens_or_ambiguous_clips():
+    # obě videa sdílejí datum 202607 v cestě miniatury i klipu: samo o sobě nic neznamená
+    html_ = ('<li data-mediabook="https://cdn.x/v/202607/55555555/p.webm"></li><li data-mediabook="https://cdn.x/v/202607/66666666/p.webm"></li>')
+    found, seen, n = cp.match_listing(html_, "https://x.example/pl", items_of([55555555, 66666666]))
+    assert found == {1: "https://cdn.x/v/202607/55555555/p.webm", 2: "https://cdn.x/v/202607/66666666/p.webm"}
+    # jeden klip pro dvě videa se sdíleným číslem → nikomu
+    two = [{"id": 1, "url": "https://x.example/a?viewkey=aaaaaa111", "thumb_url": "https://img.x/9999999/t.jpg"},
+           {"id": 2, "url": "https://x.example/b?viewkey=bbbbbb222", "thumb_url": "https://img.x/9999999/u.jpg"}]
+    found, _, _ = cp.match_listing('<li data-mediabook="https://cdn.x/v/9999999/p.webm"></li>', "https://x.example/pl", two)
+    assert found == {}                                                   # číslo patří dvěma videím: neidentifikuje žádné
+
+
+def test_match_listing_prefers_smallest_format_of_the_same_clip_and_skips_og_video():
+    html_ = ('<li data-mediabook="https://cdn.x/v/11111111/p.mp4"></li><li data-preview="https://cdn.x/v/11111111/p.gif"></li>'
+             '<meta property="og:video" content="https://cdn.x/main/11111111.mp4">')
+    found, _, n = cp.match_listing(html_, "https://x.example/pl", items_of([11111111]))
+    assert found == {1: "https://cdn.x/v/11111111/p.mp4"} and n == 2     # mp4 před gif, og:video se nepočítá
+
+
+def test_match_listing_without_any_preview_reports_nothing():
+    assert cp.match_listing("<a href='/watch?viewkey=k11111111abcdef'>x</a>", "https://x.example/pl", items_of([11111111])) == ({}, set(), 0)
+
+
+def test_next_page_url_from_rel_next_or_page_parameter():
+    assert cp.next_page_url('<link rel="next" href="/pl?p=2">', "https://x.example/pl", 1) == "https://x.example/pl?p=2"
+    assert cp.next_page_url('<a href="/pl?page=2">2</a>', "https://x.example/pl", 1) == "https://x.example/pl?page=2"
+    assert cp.next_page_url('<a href="/pl?x=1&amp;page=3">3</a>', "https://x.example/pl?x=1&page=2", 2) == "https://x.example/pl?x=1&page=3"
+    assert cp.next_page_url('<a href="/pl?page=7">7</a>', "https://x.example/pl", 1) is None        # není hned další stránka
+    assert cp.next_page_url("<html></html>", "https://x.example/pl", 1) is None
+    assert cp.next_page_url('<link rel="next" href="http://localhost/x">', "https://x.example/pl", 1) is None   # jen veřejné adresy
+
+
+# --- smyčka --------------------------------------------------------------------------------------------
+def seed(st, fake, nums):
+    make(st, fake, [e(f"k{n}abcdef") for n in nums], url=SRC)
+    with st.db.conn() as c:
+        c.execute("update catalog_items set detail_state='done'")
+        for n in nums:
+            c.execute("update catalog_items set url=?, thumb_url=? where key=?",
+                      (f"https://x.example/watch?viewkey=k{n}abcdef", f"https://img.x/videos/202607/01/{n}/t.jpg", f"youtube k{n}abcdef"))
+
+
+def anims(st):
+    return {r["key"]: r["anim_url"] for r in st.db.query("select key, anim_url from catalog_items")}
+
+
+def run_scan(w, st):
+    src = w.pick_source_scan(set())
+    assert src is not None
+    asyncio.run(w.process_source_scan(src))
+
+
+def test_source_scan_walks_pages_and_assigns_found_clips(st, fake, pages, monkeypatch):
+    async def nosleep(_):
+        return None
+    monkeypatch.setattr(cd.asyncio, "sleep", nosleep)
+    seed(st, fake, [11111111, 22222222, 33333333, 44444444])
+    pages.answers[SRC] = card(11111111, "k11111111abcdef") + '<a href="/pl?page=2">2</a>'
+    pages.answers[SRC + "?page=2"] = card(22222222, "k22222222abcdef") + '<li><a href="/watch?viewkey=k33333333abcdef">x</a></li>'
+    w = cd.DetailWorker(st)
+    run_scan(w, st)
+    got = anims(st)
+    assert got["youtube k11111111abcdef"].startswith("https://cdn.x/v/11111111/")
+    assert got["youtube k22222222abcdef"].startswith("https://cdn.x/v/22222222/")
+    assert got["youtube k33333333abcdef"] == ""                          # na výpisu je, ale klip nemá
+    assert got["youtube k44444444abcdef"] is None                        # na prohlédnutých stránkách není: zbývá hledání na stránce videa
+    assert pages.calls == [SRC, SRC + "?page=2"]                         # druhá stránka je poslední (třetí odkaz není)
+    assert w.pick_source_scan(set()) is None                             # znovu se nehledá, dokud nepřibudou nová videa
+
+
+def test_source_scan_stops_when_page_has_no_known_video_and_when_site_has_no_previews(st, fake, pages):
+    seed(st, fake, [11111111])
+    pages.answers[SRC] = card(99999999, "kxxxxxxxxabcdef") + '<a href="/pl?page=2">2</a>'      # jen cizí videa
+    w = cd.DetailWorker(st)
+    run_scan(w, st)
+    assert pages.calls == [SRC] and anims(st)["youtube k11111111abcdef"] is None
+
+    st2_calls = len(pages.calls)
+    pages.answers[SRC] = "<html>bez náhledů</html>"
+    w2 = cd.DetailWorker(st)
+    run_scan(w2, st)
+    assert len(pages.calls) == st2_calls + 1 and anims(st)["youtube k11111111abcdef"] is None   # nic se neoznačí
+
+
+def test_source_scan_retries_after_transient_error_and_new_videos_trigger_a_rescan(st, fake, pages):
+    seed(st, fake, [11111111])
+    pages.answers[SRC] = pagelist.PageError("stránka vrací chybu HTTP 429")
+    w = cd.DetailWorker(st)
+    run_scan(w, st)
+    assert w.src_scanned == {} and anims(st)["youtube k11111111abcdef"] is None and "x.example" in w.backoff   # web odložen, zdroj zůstane čekat
+    w.backoff.clear()
+    pages.answers[SRC] = card(11111111, "k11111111abcdef")
+    run_scan(w, st)
+    assert anims(st)["youtube k11111111abcdef"].startswith("https://cdn.x/v/11111111/")
+    # nové video ve zdroji (vyšší číslo) → další průchod
+    with st.db.conn() as c:
+        c.execute("insert into catalog_items(source_id, key, url, host, title, pos, state, detail_state, added_at, updated_at, thumb_url) "
+                  "select source_id, 'youtube knew', 'https://x.example/watch?viewkey=knew', host, 'Nové', 9, 'new', 'done', 1, 1, 'https://img.x/55555555/t.jpg' "
+                  "from catalog_items limit 1")
+    assert w.pick_source_scan(set()) is not None
+
+
+def test_source_scan_respects_excluded_hosts_and_runs_before_video_pages(st, fake, pages):
+    seed(st, fake, [11111111])
+    w = cd.DetailWorker(st)
+    assert w.pick_source_scan({"x.example"}) is None
+    assert w.pick_source_scan(set()) is not None and w.pick_page_scan(set()) is not None     # obojí čeká; smyčka bere nejdřív zdroj
