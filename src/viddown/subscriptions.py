@@ -151,7 +151,7 @@ async def check(runner, sid: int) -> dict:
         return {"error": str(e)}
 
     since = sub["since"]
-    seen_old = set(json.loads(sub["seen_old"] or "[]"))
+    seen_old = dict.fromkeys(json.loads(sub["seen_old"] or "[]"))          # slovník kvůli pořadí: při překročení limitu se zahodí nejstarší, ne abecedně první
     known = archive_ids(runner.data) | {r["url"] for r in db.query("select url from jobs where sub_id=?", (sid,))}
     is_channel = sub["kind"] == "channel"
     new: list[dict] = []
@@ -183,7 +183,7 @@ async def check(runner, sid: int) -> dict:
                 e["duration"] = e.get("duration") or info.get("duration")
                 e["channel"] = e.get("channel") or info.get("channel") or info.get("uploader")
             if since and d and d < since:
-                seen_old.add(vid)
+                seen_old[vid] = None
                 if is_channel:
                     break
                 continue
@@ -191,8 +191,8 @@ async def check(runner, sid: int) -> dict:
             new.append(e)
 
     if sub["kind"] == "page":      # už zařazené díly se znovu nenabídnou, ani když se záznam z historie smaže
-        seen_old |= {str(e.get("id") or e["url"]) for e in new}
-    seen_json = json.dumps(sorted(seen_old)[-SEEN_OLD_CAP:])
+        seen_old.update(dict.fromkeys(str(e.get("id") or e["url"]) for e in new))
+    seen_json = json.dumps(list(seen_old)[-SEEN_OLD_CAP:])
     if first and len(new) > threshold:
         pending = [{k: e.get(k) for k in ("url", "id", "title", "thumb_url", "duration", "channel", "date")} for e in new]
         db.sub_update(sid, last_check=now, last_error=None, seen_old=seen_json, pending=pending)
@@ -232,6 +232,7 @@ def reject_pending(db, sid: int) -> int:
     if not sub or not sub["pending"]:
         return 0
     items = json.loads(sub["pending"])
-    seen = set(json.loads(sub["seen_old"] or "[]")) | {str(i.get("id") or i["url"]) for i in items}
-    db.sub_update(sid, pending=None, seen_old=sorted(seen)[-SEEN_OLD_CAP:])
+    seen = dict.fromkeys(json.loads(sub["seen_old"] or "[]"))
+    seen.update(dict.fromkeys(str(i.get("id") or i["url"]) for i in items))
+    db.sub_update(sid, pending=None, seen_old=list(seen)[-SEEN_OLD_CAP:])
     return len(items)

@@ -326,7 +326,7 @@ def test_telegram_app_command_buttons_and_actions(st, gh, tmp_path, monkeypatch)
     asyncio.run(b.handle(msg("/aplikace")))
     last = [p for m, p in b.sent if m == "sendMessage"][-1]
     assert "9.9.9" in last["text"] and last["reply_markup"]["inline_keyboard"][0][0]["callback_data"] == "app:update"
-    cb = lambda d: {"update_id": 2, "callback_query": {"id": "q", "data": d, "message": {"message_id": 5, "chat": {"id": 42}, "text": "x"}}}
+    cb = lambda d: {"update_id": 2, "callback_query": {"id": "q", "data": d, "message": {"message_id": 5, "chat": {"id": 42, "type": "private"}, "text": "x"}}}
     asyncio.run(b.handle(cb("app:update")))
     assert updater.status(st)["prepared"] is True
     last = [p for m, p in b.sent if m == "sendMessage"][-1]

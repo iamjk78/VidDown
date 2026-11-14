@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import logging
 import os
 import re
 import subprocess
@@ -22,10 +23,12 @@ from fastapi.staticfiles import StaticFiles
 from . import __version__, appupdate, autobackup, backup, catalog, catalogdetails, pagelist, schedule, subscriptions, thumbs, updater
 from .config import DEFAULTS, CHOICES, cookies_path
 from .probe import probe_url
-from .util import check_dir_writable, extract_urls, in_docker, in_schedule, sanitize_filename
+from .util import check_dir_writable, env_flag, extract_urls, in_docker, in_schedule, sanitize_filename
 
 WEB = Path(__file__).parent / "web"
 
+log = logging.getLogger("viddown.server")
+MAX_RESTORE_BYTES = 8 * 1024 ** 3                  # největší povolená nahraná záloha
 JOB_FIELDS = ("id", "url", "title", "status", "kind", "method", "parent_id", "pos", "paused", "source", "channel",
               "duration", "height", "size_est", "approx", "progress", "downloaded", "total", "speed", "eta", "filepath",
               "filesize", "error", "error_kind", "attempts", "not_before", "created_at", "finished_at", "thumb_url", "subdir",
@@ -109,6 +112,13 @@ def create_app(app_state) -> FastAPI:
             resp.headers["Cache-Control"] = "no-cache"   # vždy ověřit (ETag), ať se po aktualizaci nenačte stará verze GUI
         return resp
 
+    async def bad_request(req: Request, exc: Exception):
+        """Chybné tělo požadavku (špatný typ, chybějící klíč, neplatné číslo) je chyba klienta (400), ne serveru (500)."""
+        log.warning("neplatný požadavek %s %s: %s: %s", req.method, req.url.path, type(exc).__name__, exc, exc_info=exc)
+        return JSONResponse({"error": "Neplatný požadavek."}, status_code=400)
+    for exc_type in (json.JSONDecodeError, KeyError, TypeError, AttributeError, ValueError):
+        app.add_exception_handler(exc_type, bad_request)
+
     @app.get("/api/session")
     async def session(req: Request):
         return {"auth_required": S.secrets.has_password(), "authed": authed(req), "version": __version__,
@@ -118,6 +128,9 @@ def create_app(app_state) -> FastAPI:
     async def login(req: Request):
         ip = req.client.host if req.client else "?"
         now = time.time()
+        if len(fails) > 1000:                                           # slovník neomezeně neroste
+            for k in [k for k, v in fails.items() if not v or now - max(v) >= 300]:
+                fails.pop(k, None)
         recent = [t for t in fails.get(ip, []) if now - t < 300]
         if len(recent) >= 5:
             raise HTTPException(429, "too many attempts, wait 5 minutes")
@@ -591,10 +604,16 @@ def create_app(app_state) -> FastAPI:
         """Nahraje zálohu a ověří ji. Samotná obnova se provede až po potvrzení a restartu."""
         import shutil
         import tempfile
-        tmp = Path(tempfile.mkstemp(suffix=".zip", prefix="vd-restore-")[1])
+        fd, name = tempfile.mkstemp(suffix=".zip", prefix="vd-restore-")
+        tmp = Path(name)
         try:
-            with open(tmp, "wb") as out:
-                shutil.copyfileobj(file.file, out, 1 << 20)
+            with os.fdopen(fd, "wb") as out:                                   # fdopen převezme (a zavře) deskriptor z mkstemp
+                total = 0
+                while chunk := file.file.read(1 << 20):
+                    total += len(chunk)
+                    if total > MAX_RESTORE_BYTES:
+                        raise HTTPException(413, "Záloha je příliš velká.")
+                    out.write(chunk)
             man = await asyncio.to_thread(backup.stage, S.data, tmp)
         except backup.BackupError as e:
             raise HTTPException(400, str(e))
@@ -694,7 +713,7 @@ def create_app(app_state) -> FastAPI:
         urls = body.get("urls") if isinstance(body, dict) else None
         if not isinstance(urls, list) or not all(isinstance(u, str) for u in urls):
             raise HTTPException(400, "Chybí seznam adres playlistů.")
-        res = await asyncio.to_thread(catalog.expand_source, S.db, sid, urls)
+        res = await asyncio.to_thread(catalog.expand_source, S.db, sid, urls, catalog.thumbs_dir(S.data, S.settings))
         if res is None:
             raise HTTPException(404, "Zdroj nenalezen nebo už není ve stavu výběru playlistů.")
         return {**res, "overview": await asyncio.to_thread(_overview)}
@@ -849,7 +868,7 @@ def create_app(app_state) -> FastAPI:
             raise HTTPException(409, "Žádná nová verze není připravená k restartu.")
         if st["applying"]:
             return st
-        asyncio.get_running_loop().create_task(updater.apply_when_idle(S))
+        updater.spawn_apply(S)
         await asyncio.sleep(0.05)
         return await asyncio.to_thread(updater.status, S)
 
@@ -1006,7 +1025,9 @@ def create_app(app_state) -> FastAPI:
         pw = str(body.get("password") or "")
         if pw and len(pw) < 6:
             raise HTTPException(400, "Heslo musí mít alespoň 6 znaků.")
-        if not pw and S.settings.get("network_access"):
+        host_env = os.environ.get("VIDDOWN_HOST", "")
+        exposed = S.settings.get("network_access") or (host_env not in ("", "127.0.0.1", "localhost", "::1") and not env_flag("VIDDOWN_ALLOW_NO_PASSWORD"))
+        if not pw and exposed:
             raise HTTPException(400, "Při přístupu ze sítě je heslo povinné.")
         S.secrets.set_password(pw)
         r = JSONResponse(settings_out())
@@ -1056,7 +1077,12 @@ def create_app(app_state) -> FastAPI:
         except (json.JSONDecodeError, UnicodeDecodeError):
             raise HTTPException(400, "Neplatný soubor nastavení.")
         locked = S.settings.locked_keys()
-        changes = {k: v for k, v in d.items() if k in DEFAULTS and k not in locked and k != "network_access"}
+        if not isinstance(d, dict):
+            raise HTTPException(400, "Neplatný soubor nastavení.")
+        skip = {"network_access", "app_update_repo", "app_update_mode"}          # cizí soubor nesmí změnit zdroj aktualizací ani dostupnost ze sítě
+        if in_docker():
+            skip |= {"port", "host"}                                           # mapování portů a healthcheck kontejneru mají pevný port
+        changes = {k: v for k, v in d.items() if k in DEFAULTS and k not in locked and k not in skip}
         await validate_dirs(changes)
         try:
             S.settings.update(changes)

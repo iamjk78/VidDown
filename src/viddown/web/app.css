@@ -242,3 +242,5 @@ button.chip{cursor:pointer}
 .vact{display:flex;gap:6px;padding:0 11px 11px;margin-top:auto}.vact .btn{flex:1}.vact .btn.ib{flex:none;width:34px;padding:0;justify-content:center}
 @media (max-width:760px){.catgrid{grid-template-columns:repeat(auto-fill,minmax(150px,1fr))}}
 .cattools select.input,.cattools .input.sm{width:auto;min-width:0}
+.helpgrid{display:grid;grid-template-columns:200px minmax(0,1fr);gap:20px;align-items:start}
+@media (max-width:640px){.helpgrid{grid-template-columns:minmax(0,1fr)}#hlist{overflow-x:auto}.hr{min-width:560px}}

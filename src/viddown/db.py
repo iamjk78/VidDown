@@ -288,6 +288,9 @@ class DB:
             for ver, step in pending:
                 try:
                     c.execute("begin immediate")
+                    if c.execute("pragma user_version").fetchone()[0] >= ver:      # tutéž migraci mezitím provedl jiný proces (CLI a démon)
+                        c.execute("rollback")
+                        continue
                     if callable(step):
                         step(c)
                     else:

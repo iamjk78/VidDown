@@ -153,6 +153,9 @@ class TelegramBot:
                 return
             action, _, jid = (cq.get("data") or "").partition(":")
             if action == "app":
+                if cq["message"]["chat"].get("type") != "private":         # aktualizace a restart jen z osobního chatu (ve skupině by je mohl spustit kdokoli)
+                    await self.call("answerCallbackQuery", callback_query_id=cq["id"], text="—", show_alert=True)
+                    return
                 await self.call("answerCallbackQuery", callback_query_id=cq["id"])
                 await self._app_action(jid)
                 return
@@ -247,7 +250,7 @@ class TelegramBot:
                 await self._app_status(check=False)
             elif what == "apply":
                 await self.send(t(L, "app_apply_started"))
-                asyncio.get_running_loop().create_task(updater.apply_when_idle(st))
+                updater.spawn_apply(st)
             elif what == "restart":
                 await self.send(t(L, "app_restarting"))
                 updater.request_restart(st)

@@ -33,6 +33,7 @@ log = logging.getLogger("viddown.catalog")
 
 LIST_TIMEOUT = 3600           # načtení seznamu velkého kanálu může trvat dlouho
 MAX_URLS = 2000
+BLOCKED_RE = re.compile(r"HTTP (401|403|406|410|451)\b")        # odpovědi, kdy web odmítá program, ale prohlížeč nejspíš pustí
 MAX_QUERY_TOKENS = 10
 MAX_QUERY_CHARS = 200
 MAX_OFFSET = 10_000_000
@@ -361,17 +362,21 @@ async def list_page(url: str, ctx, cause: Exception | None = None) -> dict:
     Vyhodí ResolveError."""
     slow = bool(ctx.settings.get("catalog_slow_browser"))
     try:
+        final, cfg, renderer = url, None, None
         try:
             text, final = await pagelist.fetch(url, ctx.settings)
         except pagelist.PageError as e:                                 # výpadek, 403, 5xx: není to „nepodporovaný web“
-            raise ResolveError(str(e), "network") from e
-        try:
-            cfg = pagelist.detect(text, final)
-            renderer = None
-        except pagelist.PageError:
-            if not slow:
-                raise
-            renderer = sniffer.Renderer(ctx)
+            if slow and BLOCKED_RE.search(str(e)):                      # web odmítá prostý dotaz (otisk spojení), prohlížeč ho nejspíš pustí
+                renderer = sniffer.Renderer(ctx)
+            else:
+                raise ResolveError(str(e), "network") from e
+        if renderer is None:
+            try:
+                cfg = pagelist.detect(text, final)
+            except pagelist.PageError:
+                if not slow:
+                    raise
+                renderer = sniffer.Renderer(ctx)
     except pagelist.PageError as e:
         why = f"web není podporovaný a seznam videí se na stránce nenašel ({e})"
         raise ResolveError(why + ("" if slow else "; zapněte v Nastavení › Katalog prohlížeč pro pomalé weby"), "unsupported") from cause or e
@@ -870,7 +875,7 @@ def store_choose(db, sid: int, listing: dict) -> None:
                   "where id=? and status='scanning'", (title, norm(title or ""), json.dumps(listing["playlists"], ensure_ascii=False), time.time(), sid))
 
 
-def expand_source(db, sid: int, urls: list[str]) -> dict | None:
+def expand_source(db, sid: int, urls: list[str], folder: Path | None = None) -> dict | None:
     """Zdroj se seznamem playlistů (`choose`): vybrané playlisty přidá jako samostatné zdroje a původní zdroj odebere.
     Vrací {"added", "reloaded", "skipped"} z `add_sources`, nebo None, když zdroj není ve stavu výběru."""
     r = db.query("select status, children from catalog_sources where id=?", (sid,))
@@ -881,8 +886,10 @@ def expand_source(db, sid: int, urls: list[str]) -> dict | None:
     except ValueError:
         known = []
     want = [u for u in dict.fromkeys(urls) if u in set(known)][:nested.MAX_LISTS]
-    res = add_sources(db, want) if want else {"added": [], "reloaded": [], "skipped": []}
-    delete_source(db, sid)
+    if not want:                                                  # nic platného nevybráno: seznam zůstane, ať o něj uživatel nepřijde
+        return {"added": [], "reloaded": [], "skipped": [{"url": u, "reason": "není v seznamu playlistů zdroje"} for u in urls[:20]]}
+    res = add_sources(db, want)
+    delete_source(db, sid, folder)                                # složka kvůli miniaturám a animacím, které zdroj dřív mohl mít
     return res
 
 

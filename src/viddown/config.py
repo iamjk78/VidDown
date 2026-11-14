@@ -9,9 +9,11 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import logging
 import os
 import re
 import secrets as pysecrets
+import shutil
 import sys
 import threading
 from pathlib import Path
@@ -196,7 +198,10 @@ class Settings:
             return self._cache
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
+            if not isinstance(raw, dict):
+                raise ValueError("nastavení nejsou objekt")
+        except (ValueError, OSError):
+            _keep_corrupt(self.path)
             raw = {}
         self._cache, self._mtime = raw, st.st_mtime_ns
         return raw
@@ -280,6 +285,18 @@ class Settings:
         return {k: v for k, v in self.all().items()}
 
 
+def _keep_corrupt(path: Path) -> None:
+    """Poškozený soubor (ruční úprava, přerušený zápis) se jednou uloží vedle jako `<název>.corrupt`, ať první uložení výchozích hodnot
+    nesmaže všechno ostatní navždy."""
+    try:
+        bak = path.with_name(path.name + ".corrupt")
+        if path.exists() and not bak.exists():
+            shutil.copy2(path, bak)
+            logging.getLogger("viddown.config").error("Soubor %s je poškozený, kopie je v %s; používají se výchozí hodnoty.", path, bak)
+    except OSError:
+        pass
+
+
 class Secrets:
     """Citlivé údaje mimo běžné nastavení. Soubor má práva 600."""
 
@@ -288,8 +305,14 @@ class Secrets:
 
     def _load(self) -> dict:
         try:
-            return json.loads(self.path.read_text(encoding="utf-8"))
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            d = json.loads(self.path.read_text(encoding="utf-8"))
+            if not isinstance(d, dict):
+                raise ValueError("tajemství nejsou objekt")
+            return d
+        except FileNotFoundError:
+            return {}
+        except (ValueError, OSError):
+            _keep_corrupt(self.path)
             return {}
 
     def _save(self, d: dict) -> None:

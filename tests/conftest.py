@@ -17,3 +17,11 @@ def data(tmp_path, monkeypatch):
         if k.startswith("VIDDOWN_") and k != "VIDDOWN_DATA":
             monkeypatch.delenv(k, raising=False)
     return d
+
+
+@pytest.fixture(autouse=True)
+def _clean_viddown_env(monkeypatch):
+    """Proměnné VIDDOWN_* exportované v shellu (např. VIDDOWN_ALLOW_PRIVATE_PREVIEW) se nesmí dostat do žádného testu."""
+    for k in list(os.environ):
+        if k.startswith("VIDDOWN_"):
+            monkeypatch.delenv(k, raising=False)

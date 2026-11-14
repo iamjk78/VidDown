@@ -1,5 +1,6 @@
 """Deep review (dávka 1): bezpečnost serveru, SSRF, odolnost smyček a malé chyby."""
 import asyncio
+import json
 
 import httpx
 import pytest
@@ -149,3 +150,37 @@ def test_one_bad_animation_or_thumbnail_is_marked_failed_instead_of_stopping_the
     got = st.db.query("select anim_file, thumb_file from catalog_items")
     assert all(g["anim_file"] == "" and g["thumb_file"] == "" for g in got)      # označeno jako nepodařené, takže se nezkouší pořád dokola
     assert not w.pending_anims(5)
+
+
+# --- dávka 3: server ------------------------------------------------------------------------------------
+def test_malformed_request_bodies_return_400_not_500(client):
+    c, st = client
+    h = {"host": "127.0.0.1:8765"}
+    cases = [("PUT", "/api/settings", ["x"]), ("POST", "/api/queue/bulk-cancel", "text"), ("POST", "/api/settings/password", [1]),
+             ("POST", "/api/engines/yt-dlp/remove", {}), ("POST", "/api/queue/dismiss", {"ids": "a"})]
+    for method, url, body in cases:
+        r = c.request(method, url, json=body, headers=h)
+        assert r.status_code in (400, 404, 422), (method, url, r.status_code)
+    r = c.post("/api/settings/password", content=b"not json", headers={**h, "content-type": "application/json"})
+    assert r.status_code == 400
+
+
+def test_settings_import_cannot_change_update_source_or_port_in_docker(client, monkeypatch, tmp_path):
+    c, st = client
+    monkeypatch.setattr("viddown.server.in_docker", lambda: True)
+    body = json.dumps({"app_update_repo": "utocnik/x", "app_update_mode": "auto", "port": 9000, "language": "en"})
+    r = c.post("/api/settings/import", files={"file": ("s.json", body, "application/json")})
+    assert r.status_code == 200
+    assert st.settings.get("language") == "en"                                     # běžné nastavení se přenese
+    assert st.settings.get("app_update_repo") != "utocnik/x" and st.settings.get("app_update_mode") != "auto" and st.settings.get("port") != 9000
+    assert c.post("/api/settings/import", files={"file": ("s.json", "[1]", "application/json")}).status_code == 400
+
+
+def test_password_cannot_be_removed_when_listening_beyond_loopback(client, monkeypatch):
+    c, st = client
+    c.post("/api/settings/password", json={"password": "dlouhe-heslo"})
+    monkeypatch.setenv("VIDDOWN_HOST", "0.0.0.0")
+    monkeypatch.delenv("VIDDOWN_ALLOW_NO_PASSWORD", raising=False)
+    assert c.post("/api/settings/password", json={"password": ""}).status_code == 400
+    monkeypatch.setenv("VIDDOWN_ALLOW_NO_PASSWORD", "1")                          # vědomé rozhodnutí o provozu bez hesla
+    assert c.post("/api/settings/password", json={"password": ""}).status_code == 200

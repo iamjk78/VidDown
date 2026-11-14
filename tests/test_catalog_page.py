@@ -53,7 +53,7 @@ def web(monkeypatch):
     """Podvržený web: pagelist.fetch podle adresy, vykreslení prohlížečem a sniffer."""
     pages, rendered, fetched = {}, {}, []
 
-    async def fetch(url, settings=None, timeout=30):
+    async def fetch(url, settings=None, timeout=30, **kw):
         fetched.append(url)
         a = pages[url]
         if isinstance(a, Exception):
@@ -162,10 +162,32 @@ def test_page_without_list_fails_when_browser_disabled_or_list_missing(data, fak
 
 
 def test_fetch_error_is_reported_on_the_source(pst, fake, web):
+    pst.settings.update({"catalog_slow_browser": False})                  # s prohlížečem se 403 zkusí obejít (viz test níže)
     web.pages[BASE] = pagelist.PageError("stránka vrací chybu HTTP 403")
     add_page(pst, fake)
     err = pst.db.query("select status, error from catalog_sources")[0]
     assert err["status"] == "error" and "403" in err["error"]
+
+
+def test_blocked_page_source_is_read_with_the_browser_when_enabled(pst, fake, web, monkeypatch):
+    class Browser:
+        def __init__(self, ctx):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def render(self, url, scrolls=6):
+            return page_html(["a", "b", "c"]), url
+    monkeypatch.setattr(catalog.sniffer, "Renderer", Browser)
+    pst.settings.update({"catalog_slow_browser": True})
+    web.pages[BASE] = pagelist.PageError("stránka vrací chybu HTTP 410")           # prostý dotaz web odmítá, prohlížeč ho pustí
+    add_page(pst, fake)
+    src = pst.db.query("select status, error from catalog_sources")[0]
+    assert src["status"] == "done" and pst.db.query("select count(*) n from catalog_items")[0]["n"] == 3
 
 
 # ------------------------------------------------------------ pomalé podrobnosti

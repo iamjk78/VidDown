@@ -266,7 +266,7 @@ function morphHtml(host, html) {
   morphKids(host, tmp);
 }
 function morphKids(a, b) {
-  const keyOf = n => n.nodeType === 1 ? (n.dataset.row || n.id || '') : '';
+  const keyOf = n => n.nodeType === 1 ? (n.dataset.row || n.id || (n.dataset.cid ? 'c' + n.dataset.cid : '')) : '';        // karty Katalogu podle id videa (ne podle pozice)
   const keyed = new Map(), loose = [];
   for (const n of a.childNodes) { const k = keyOf(n); if (k) keyed.set(k, n); else loose.push(n); }
   let li = 0; const out = [];
@@ -1388,6 +1388,7 @@ function catPaintSources() {
   box.classList.toggle('rounds', round);
   box.innerHTML = ov.sources.map(x => catBadge(x, round)).join('') || `<div class="t2 fs13" style="padding:6px 2px">${T('Zatím žádný zdroj. Přidejte kanály, playlisty nebo stránky tlačítkem Přidat zdroje.', 'No sources yet. Add channels, playlists or pages with the Add sources button.')}</div>`;
   catPaintSrcTools();
+  if (!box.matches(':hover')) catTipHide();                              // přepsaný odznak, nad kterým byl tooltip, už neodešle mouseout
   const bits = [];
   if (d.paused) bits.push(`<span class="badge b-warn">${T('pozastaveno', 'paused')}</span>`);
   else if (d.waiting_for_lists) bits.push(`<span class="t2">${T('Nejdřív se dokončí seznamy všech zdrojů…', 'Finishing the lists of all sources first…')}</span>`);
@@ -1854,8 +1855,10 @@ async function saveSetting(k, v, after) {
 
 /* ------------------------------------------------------------ modální okna */
 function modal(html, cls = '') {
-  const root = $('#modal-root'); root.innerHTML = `<div class="overlay"><div class="modal ${cls}">${html}</div></div>`;
-  const close = () => { root.innerHTML = ''; };
+  const root = $('#modal-root'); root.innerHTML = `<div class="overlay"><div class="modal ${cls}" role="dialog" aria-modal="true">${html}</div></div>`;
+  const onKey = e => { if (e.key === 'Escape' && !cls.includes('nodismiss')) close(); };
+  const close = () => { document.removeEventListener('keydown', onKey); root.innerHTML = ''; };
+  document.addEventListener('keydown', onKey);
   $('.overlay', root).addEventListener('mousedown', e => { if (e.target.classList.contains('overlay') && !cls.includes('nodismiss')) close(); });
   return { el: $('.modal', root), close };
 }
@@ -2143,7 +2146,7 @@ function renderHelp() {
   ];
   $('#main').innerHTML = `<div class="row gap16 wrap"><div><h1>${T('Nápověda', 'Help')}</h1><div class="t2" style="margin-top:3px">${T('Jak VidDown používat a co umí', 'How to use VidDown and what it can do')}</div></div><div class="grow"></div>
    <button class="btn primary" id="hwiz">${ic('sparkle', 14)} ${T('Spustit průvodce', 'Run setup guide')}</button></div>
-   <div style="display:grid;grid-template-columns:200px minmax(0,1fr);gap:20px;align-items:start"><nav class="toc card" style="padding:8px">${H.map(([id, t]) => `<a href="#help" data-sc="${id}">${t}</a>`).join('')}</nav>
+   <div class="helpgrid"><nav class="toc card" style="padding:8px">${H.map(([id, t]) => `<a href="#help" data-sc="${id}">${t}</a>`).join('')}</nav>
    <div class="col gap14" style="gap:14px">${H.map(([id, t, body]) => `<section class="card help" style="padding:18px 22px" id="h-${id}"><h2>${t}</h2>${body}</section>`).join('')}</div></div>`;
   $('#hwiz').onclick = openWizard;
   $$('[data-sc]').forEach(a => a.onclick = e => { e.preventDefault(); $('#h-' + a.dataset.sc).scrollIntoView({ behavior: 'smooth', block: 'start' }); });

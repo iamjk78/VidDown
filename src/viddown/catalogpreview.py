@@ -157,10 +157,12 @@ def _nokey(url: str) -> str:
     return url.split("?", 1)[0].split("#", 1)[0]
 
 
-def match_listing(text: str, page_url: str, items: list[dict]) -> tuple[dict[int, str], set[int], int]:
+def match_listing(text: str, page_url: str, items: list[dict], context: list[dict] | None = None) -> tuple[dict[int, str], set[int], int]:
     """Na stránce zdroje (výpisu) spáruje náhledové klipy s videi podle společného identifikátoru: číslo nebo slovo z adresy klipu,
     které je i v adrese miniatury nebo stránky videa a identifikuje právě jedno video (a právě jeden klip). Nejednoznačné se
-    nepřiřadí. Vrací ({id položky: adresa klipu}, {id položek, které na stránce jsou}, počet nalezených klipů)."""
+    nepřiřadí. `context` jsou další videa téhož zdroje (už vyřízená): počítají se do jedinečnosti identifikátorů (společné datum nesmí
+    „zjedinečnět“ jen proto, že zbylo poslední nevyřízené video z toho měsíce), ale klip se jim nepřiřazuje. Vrací
+    ({id položky: adresa klipu}, {id položek, které na stránce jsou}, počet nalezených klipů)."""
     cands = [c for c in _collect(text, page_url) if c[0] <= LISTING_MAX_RANK]
     if not cands:
         return {}, set(), 0
@@ -170,6 +172,11 @@ def match_listing(text: str, page_url: str, items: list[dict]) -> tuple[dict[int
             by_tok.setdefault(t, []).append(c)
     tok_items: dict[str, int] = {}
     toks = {it["id"]: url_tokens(it.get("thumb_url")) | url_tokens(it.get("url")) for it in items}
+    for it in context or []:
+        if it["id"] not in toks:
+            toks_ctx = url_tokens(it.get("thumb_url")) | url_tokens(it.get("url"))
+            for t in toks_ctx:
+                tok_items[t] = tok_items.get(t, 0) + 1
     for ts in toks.values():
         for t in ts:
             tok_items[t] = tok_items.get(t, 0) + 1

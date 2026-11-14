@@ -107,8 +107,12 @@ def do_update(st, force: bool = False, skip_engines: bool = False) -> dict:
 
 
 def do_rollback(st, restore_db: bool = False) -> dict:
-    store(st).rollback("ruční návrat", restore_db=restore_db)
-    _BANNER_CACHE["t"] = 0.0
+    _guard()                                                      # návrat nesmí běžet souběžně s kontrolou nebo aktualizací (přepsal by jejich stav)
+    try:
+        store(st).rollback("ruční návrat", restore_db=restore_db)
+    finally:
+        _BUSY.release()
+        _BANNER_CACHE["t"] = 0.0
     return status(st)
 
 
@@ -144,6 +148,22 @@ def startup(st) -> None:
     if st.db.kv_get("update_resume", False):
         _resume(st)
         log.info("po aktualizaci obnovuji frontu")
+
+
+_TASKS: set[asyncio.Task] = set()
+
+
+def spawn_apply(st) -> asyncio.Task:
+    """Spustí `apply_when_idle` na pozadí a drží si odkaz na úlohu (jinak ji může uklidit GC) i její případnou výjimku v logu."""
+    task = asyncio.get_running_loop().create_task(apply_when_idle(st))
+    _TASKS.add(task)
+
+    def done(t: asyncio.Task) -> None:
+        _TASKS.discard(t)
+        if not t.cancelled() and t.exception() is not None:
+            log.error("použití aktualizace selhalo", exc_info=t.exception())
+    task.add_done_callback(done)
+    return task
 
 
 async def apply_when_idle(st) -> str:

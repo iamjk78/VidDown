@@ -94,11 +94,19 @@ def is_junk_direct(url: str, length: int) -> bool:
     return 0 < length < JUNK_BYTES
 
 
+EVAL_TIMEOUT = 15.0     # stránka s nekonečnou smyčkou v JS nesmí zastavit sniff ani katalog navždy
+
+
+async def _ev(target, js: str, timeout: float = EVAL_TIMEOUT):
+    """`evaluate` s časovým limitem (stránka nebo rámec)."""
+    return await asyncio.wait_for(target.evaluate(js), timeout)
+
+
 async def _in_frames(page, js: str):
     """Spustí JS ve všech rámcích stránky, vrátí první pravdivý výsledek."""
     for fr in page.frames:
         try:
-            r = await fr.evaluate(js)
+            r = await _ev(fr, js)
         except Exception:  # noqa: BLE001
             continue
         if r:
@@ -203,9 +211,13 @@ class Renderer:
         except Exception as e:  # noqa: BLE001
             await self._pw.stop()
             raise ResolveError(f"Chromium nelze spustit ({e}). Nainstalujte ho v Enginy.", "engine")
-        self._context = await self._browser.new_context(user_agent=UA, viewport={"width": 1280, "height": 900}, locale="cs-CZ")
-        if self.ctx.cookies_file:
-            await add_cookies(self._context, self.ctx.cookies_file)
+        try:
+            self._context = await self._browser.new_context(user_agent=UA, viewport={"width": 1280, "height": 900}, locale="cs-CZ")
+            if self.ctx.cookies_file:
+                await add_cookies(self._context, self.ctx.cookies_file)
+        except BaseException:                                       # `__aexit__` se po neúspěšném vstupu nevolá: prohlížeč i ovladač se zavřou tady
+            await self.__aexit__(None, None, None)
+            raise
         return self
 
     async def __aexit__(self, *exc):
@@ -224,18 +236,20 @@ class Renderer:
         page = await self._context.new_page()
         try:
             try:
-                await page.goto(url, wait_until="domcontentloaded", timeout=timeout * 1000)
+                resp = await page.goto(url, wait_until="domcontentloaded", timeout=timeout * 1000)
             except PWTimeout:
-                pass
+                resp = None
             except Exception as e:  # noqa: BLE001
                 msg = str(e).splitlines()[0]
                 raise ResolveError(f"stránku nelze načíst: {msg}", classify_error(msg))
+            if resp is not None and resp.status >= 400:             # chybová stránka nebo captcha není seznam: ať se nevyhodnotí jako „úplný seznam bez videí“
+                raise ResolveError(f"stránka vrací chybu HTTP {resp.status}", "network")
             await page.wait_for_timeout(2000)
             await _in_frames(page, CONSENT_JS)
             last = 0
             for _ in range(scrolls):
                 try:
-                    h = await page.evaluate("() => { window.scrollTo(0, document.body.scrollHeight); return document.body.scrollHeight; }")
+                    h = await _ev(page, "() => { window.scrollTo(0, document.body.scrollHeight); return document.body.scrollHeight; }")
                 except Exception:  # noqa: BLE001
                     break
                 await page.wait_for_timeout(1000)
@@ -336,7 +350,7 @@ async def sniff(url: str, ctx: Ctx) -> dict:
                     clicks += 1
                     last_click = now
                     try:
-                        n = await page.evaluate(PLAY_JS)
+                        n = await _ev(page, PLAY_JS)
                         if not n:
                             # klik doprostřed největšího přehrávače / iframu (po odrolování do zorného pole)
                             box = await page.evaluate("""() => {
@@ -353,7 +367,7 @@ async def sniff(url: str, ctx: Ctx) -> dict:
                     except Exception:  # noqa: BLE001
                         pass
             try:
-                meta = await page.evaluate(META_JS)
+                meta = await _ev(page, META_JS)
             except Exception:  # noqa: BLE001
                 meta = {"title": "", "image": None, "poster": None, "drm": None, "srcs": []}
             for src in meta.get("srcs") or []:
@@ -376,8 +390,17 @@ async def sniff(url: str, ctx: Ctx) -> dict:
                     drm = True
                     continue
                 if pl["master"]:
+                    best = pl.get("best")
+                    if not best:                                                       # master bez použitelné varianty nesmí shodit celý sniff
+                        continue
                     variant_urls.update(v["uri"] for v in pl["variants"])
-                    best = pl["best"]
+                    try:                                                               # šifrování bývá až v playlistu vybrané varianty, ne v master playlistu
+                        vr = await context.request.get(best["uri"], headers={"Referer": url}, timeout=20000)
+                        if parse_m3u8(await vr.text(), best["uri"])["drm"]:
+                            drm = True
+                            continue
+                    except Exception:  # noqa: BLE001
+                        pass
                     candidates.append({"kind": "hls", "url": best["uri"], "audio": pl.get("best_audio"),
                                        "height": best["height"], "master": u, "rank": 0})
                 else:
@@ -419,12 +442,19 @@ async def _duration(ctx: Ctx, url: str, headers: str) -> float | None:
     if headers:
         cmd += ["-headers", headers]
     cmd += ["-show_entries", "format=duration", "-of", "csv=p=0", url]
+    proc = None
     try:
         proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
                                                     **subprocess_kwargs())
         out, _ = await asyncio.wait_for(proc.communicate(), 45)
         return float(out.decode().strip())
     except Exception:  # noqa: BLE001
+        if proc is not None and proc.returncode is None:               # zaseknutý ffprobe by jinak zůstal běžet jako sirotek
+            try:
+                proc.kill()
+                await proc.wait()
+            except (ProcessLookupError, OSError):
+                pass
         return None
 
 
@@ -448,9 +478,9 @@ async def download(sn: dict, ctx: Ctx, staging: Path, name: str, on_progress, ho
         for ext in ([".mp4", ".mkv"] if is_mp4 else [".mkv"]):
             out = staging / f"{name}{ext}"
             cmd = [ff, "-y", "-hide_banner", "-nostdin", "-loglevel", "error", "-user_agent", UA, "-headers", headers,
-                   "-i", cand["url"]]
+                   "-rw_timeout", "30000000", "-i", cand["url"]]                    # server, který přestane posílat data, nezdrží stahování navždy
             if cand.get("audio"):
-                cmd += ["-user_agent", UA, "-headers", headers, "-i", cand["audio"], "-map", "0:v:0?", "-map", "1:a:0?"]
+                cmd += ["-user_agent", UA, "-headers", headers, "-rw_timeout", "30000000", "-i", cand["audio"], "-map", "0:v:0?", "-map", "1:a:0?"]
             else:
                 cmd += ["-map", "0:v:0?", "-map", "0:a:0?"]
             cmd += ["-c", "copy"]

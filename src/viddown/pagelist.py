@@ -9,6 +9,7 @@ Funguje jen pro weby, jejichž seznam je v běžném HTML (ne vykreslovaný Java
 """
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import html
 import json
@@ -19,6 +20,8 @@ from html.parser import HTMLParser
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 import httpx
+
+from . import netsafe
 
 log = logging.getLogger("viddown.pagelist")
 
@@ -37,9 +40,23 @@ class PageError(Exception):
 
 
 # ------------------------------------------------------------ stahování a rozbor HTML
-async def fetch(url: str, settings: dict | None = None, timeout: float = 30) -> tuple[str, str]:
-    """Stáhne HTML. Vrací (text, konečná URL)."""
+async def fetch(url: str, settings: dict | None = None, timeout: float = 30, public_only: bool = False,
+                total_timeout: float = 90.0) -> tuple[str, str]:
+    """Stáhne HTML. Vrací (text, konečná URL). `public_only`: adresa pochází z cizí stránky, takže každý požadavek včetně přesměrování
+    musí mířit na veřejnou adresu (nic z vnitřní sítě). `total_timeout`: server posílající data po kapkách nezdrží volajícího navždy."""
+    try:
+        return await asyncio.wait_for(_fetch(url, settings, timeout, public_only), total_timeout)
+    except asyncio.TimeoutError:
+        raise PageError("stránku se nepodařilo načíst: vypršel celkový čas") from None
+
+
+async def _fetch(url: str, settings: dict | None, timeout: float, public_only: bool) -> tuple[str, str]:
     kw: dict = {}
+    if public_only:
+        async def only_public(request):
+            if not await asyncio.to_thread(netsafe.host_ok, str(request.url)):
+                raise PageError("adresa vede do vnitřní sítě")
+        kw["event_hooks"] = {"request": [only_public]}
     proxy = (settings or {}).get("proxy") or ""
     if proxy.startswith("http"):
         kw["proxy"] = proxy

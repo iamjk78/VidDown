@@ -34,7 +34,7 @@ BACKOFF_MAX = 7200.0
 BACKOFF_LOGIN = 3600.0              # web vyžaduje přihlášení/ověření: zkusit až za hodinu
 PERF_MULT = {"full": 1.0, "balanced": 2.0, "eco": 4.0}
 THUMB_BATCH = 4
-BLOCKED_RE = re.compile(r"HTTP (401|403|406|410|451)\b")     # odpovědi, kdy web odmítá program, ale prohlížeč nejspíš pustí
+BLOCKED_RE = catalog.BLOCKED_RE
 SRC_SCAN_PAGES = 30                 # nejvýš tolik stránek výpisu zdroje při hledání animací
 THUMB_CANDIDATES = 10               # kolik kandidátů miniatury se zkusí, než se vzdá (největší varianty starším videím chybějí)
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".gif")
@@ -139,6 +139,7 @@ class DetailWorker:
         self.next_at: dict[str, float] = {}          # web -> čas (monotonic), kdy smí další dotaz
         self.backoff: dict[str, dict] = {}           # web -> {until, delay, reason}
         self.active: dict[str, asyncio.Task] = {}
+        self._thumb_locks: dict[int, asyncio.Lock] = {}
         self.src_scanned: dict[int, int] = {}        # zdroj -> nejvyšší číslo videa bez animace při prohledání jeho stránek (nová videa = znovu)
         self.page_hosts: set[str] = set()            # weby, na kterých právě běží sken stránky videa
         self.slow_task: asyncio.Task | None = None   # pomalá vrstva (prohlížeč): nejvýš jedno video najednou
@@ -216,15 +217,16 @@ class DetailWorker:
                  json.dumps(urls[1:1 + catalog.THUMB_ALTS_MAX]) if len(urls) > 1 else None, catalog.anim_source(info), catalog.published_ts(info),
                  catalog.norm(f"{title or item['title'] or ''} {channel or item['channel'] or ''}"), time.time(), item["id"], expect)).rowcount
         if n and urls and urls[0] != item.get("thumb_url"):      # jiná (obvykle lepší) miniatura než ze seznamu: nahradit
-            name = await asyncio.to_thread(download_thumb, self.folder(), item["id"], urls, thumbs.referer_of(item.get("url")), self.proxy())
+            async with self._thumb_lock(item["id"]):
+                name = await asyncio.to_thread(download_thumb, self.folder(), item["id"], urls, thumbs.referer_of(item.get("url")), self.proxy())
             if name:
                 with self.db.conn() as c:
                     c.execute("update catalog_items set thumb_file=?, updated_at=? where id=? and state in ('new','queued')", (name, time.time(), item["id"]))
 
     def _finish(self, item: dict, state: str, error: str | None, item_state: str | None = None) -> None:
         with self.db.conn() as c:
-            c.execute("update catalog_items set detail_state=?, detail_error=?, state=coalesce(?, state), updated_at=? "
-                      "where id=? and detail_state='pending'", (state, error, item_state, time.time(), item["id"]))
+            c.execute("update catalog_items set detail_state=?, detail_error=?, state=case when ? is not null and state='new' then ? else state end, updated_at=? "
+                      "where id=? and detail_state='pending'", (state, error, item_state, item_state, time.time(), item["id"]))
 
     def _on_error(self, item: dict, kind: str, msg: str) -> None:
         host = item.get("host") or ""
@@ -355,14 +357,23 @@ class DetailWorker:
         except ValueError:
             alts = []
         try:
-            name = await asyncio.to_thread(download_thumb, self.folder(), row["id"], [row["thumb_url"], *[a for a in alts if isinstance(a, str)]],
-                                           thumbs.referer_of(row.get("url")), self.proxy())
+            async with self._thumb_lock(row["id"]):                    # souběh se `_store` (lepší miniatura z podrobností) by smazal soubor druhého
+                cur = self.db.query("select thumb_file from catalog_items where id=?", (row["id"],))
+                if not cur or cur[0]["thumb_file"] is not None:         # mezitím ji uložil `_store` nebo položka zmizela
+                    return
+                name = await asyncio.to_thread(download_thumb, self.folder(), row["id"], [row["thumb_url"], *[a for a in alts if isinstance(a, str)]],
+                                               thumbs.referer_of(row.get("url")), self.proxy())
         except Exception:  # noqa: BLE001 - chyba jedné miniatury nesmí zastavit smyčku (jinak by se pokaždé zkoušela znovu ta samá)
             log.exception("katalog: miniatura %s", row["id"])
             name = None
         with self.db.conn() as c:
             c.execute("update catalog_items set thumb_file=?, updated_at=? where id=? and thumb_file is null",
                       (name if name else "", time.time(), row["id"]))
+
+    def _thumb_lock(self, item_id: int) -> asyncio.Lock:
+        if len(self._thumb_locks) > 2000:                              # nepoužívané zámky se uklidí
+            self._thumb_locks = {k: v for k, v in self._thumb_locks.items() if v.locked()}
+        return self._thumb_locks.setdefault(item_id, asyncio.Lock())
 
     def pending_anims(self, limit: int) -> list[dict]:
         """Animace čekající na stažení; storyboardy se přeskočí, dokud chybí ffmpeg (jinak by se natrvalo označily jako nepodařené)."""
@@ -431,8 +442,9 @@ class DetailWorker:
             self._mark_anim(item, "")
             return
         self.page_hosts.add(host)                                      # během skenu na tento web nesmí sahat ani worker podrobností
+        backoff_before = self.backoff.get(host)
         try:
-            text, final = await pagelist.fetch(item["url"], self.st.settings.all())
+            text, final = await pagelist.fetch(item["url"], self.st.settings.all(), public_only=True)
         except pagelist.PageError as e:
             msg = str(e)
             if "HTTP 429" in msg or "HTTP 5" in msg or "se nepodařilo načíst" in msg:       # omezení nebo výpadek: web odložit, video zůstane čekat
@@ -447,7 +459,8 @@ class DetailWorker:
         else:
             found = await asyncio.to_thread(catalogpreview.find_preview, text, final)      # regexy nad 1,5 MB HTML nesmí blokovat smyčku událostí
             self._mark_anim(item, found or "")
-            self.backoff.pop(host, None)
+            if self.backoff.get(host) is backoff_before:                # odklad, který mezitím nastavil jiný worker, se nemaže
+                self.backoff.pop(host, None)
         finally:
             self.page_hosts.discard(host)
             self.next_at[host] = time.monotonic() + self.gap()
@@ -485,6 +498,7 @@ class DetailWorker:
         self.src_scanned[sid] = src["top"]
         self.page_hosts.add(host)
         url, page_no, visited, failed, rd = src["url"], 1, set(), False, None
+        backoff_before = self.backoff.get(host)
         stack = contextlib.AsyncExitStack()
         try:
             while url and url not in visited and page_no <= SRC_SCAN_PAGES:
@@ -495,7 +509,7 @@ class DetailWorker:
                     if rd is not None:                                  # web už jednou odmítl prostý dotaz: dál jen prohlížečem
                         text, final = await rd.render(url, scrolls=1)
                     else:
-                        text, final = await pagelist.fetch(url, self.st.settings.all())
+                        text, final = await pagelist.fetch(url, self.st.settings.all(), public_only=page_no > 1)
                 except pagelist.PageError as e:
                     msg = str(e)
                     if "HTTP 429" in msg or "HTTP 5" in msg or "se nepodařilo načíst" in msg:
@@ -520,7 +534,10 @@ class DetailWorker:
                     "and state in ('new','queued')", (sid,))
                 if not items:
                     break
-                found, seen, ncand = await asyncio.to_thread(catalogpreview.match_listing, text, final, items)
+                others = await asyncio.to_thread(
+                    self.db.query, "select id, url, thumb_url from catalog_items where source_id=? and anim_url is not null "
+                    "and state in ('new','queued')", (sid,))
+                found, seen, ncand = await asyncio.to_thread(catalogpreview.match_listing, text, final, items, others)
                 if not ncand and page_no == 1:
                     break                                               # stránka žádné náhledy nenabízí (např. YouTube): nic neznačit
                 now = time.time()
@@ -537,7 +554,7 @@ class DetailWorker:
                 page_no += 1
                 if url:
                     await asyncio.sleep(self.gap())
-            if not failed:
+            if not failed and self.backoff.get(host) is backoff_before:   # odklad, který mezitím nastavil worker podrobností, se nemaže
                 self.backoff.pop(host, None)
         except asyncio.CancelledError:
             raise

@@ -566,7 +566,7 @@ def pages(monkeypatch):
     """Falešné stránky videí: adresa -> HTML nebo PageError; eviduje dotazy."""
     answers, calls = {}, []
 
-    async def fetch(url, settings=None, timeout=30):
+    async def fetch(url, settings=None, timeout=30, **kw):
         calls.append(url)
         a = answers.get(url, pagelist.PageError("stránka vrací chybu HTTP 404"))
         if isinstance(a, Exception):
@@ -919,7 +919,7 @@ def test_page_scan_blocks_the_site_for_the_details_worker(st, fake, pages, monke
     w = cd.DetailWorker(st)
     seen = {}
 
-    async def slow_fetch(url, settings=None, timeout=30):
+    async def slow_fetch(url, settings=None, timeout=30, **kw):
         seen["excluded"] = set(w.excluded_hosts())
         return "<html></html>", url
     monkeypatch.setattr(cd.pagelist, "fetch", slow_fetch)

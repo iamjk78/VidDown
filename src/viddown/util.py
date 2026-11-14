@@ -251,7 +251,7 @@ def fallback_allowed(kind: str) -> bool:
 
 
 def retry_allowed(kind: str) -> bool:
-    return kind in ("network", "other")
+    return kind in ("network", "other", "engine")                     # chybějící engine (první start) se po chvíli zkusí znovu
 
 
 def in_schedule(settings: dict, now: float | None = None) -> bool:

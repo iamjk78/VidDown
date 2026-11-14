@@ -463,7 +463,7 @@ PAGES = {
 def fake_pages(monkeypatch):
     calls = []
 
-    async def fetch(url, settings=None, timeout=30):
+    async def fetch(url, settings=None, timeout=30, **kw):
         calls.append(url)
         if url not in PAGES:
             raise subs.pagelist.PageError("404")

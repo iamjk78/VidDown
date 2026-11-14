@@ -43,7 +43,8 @@ def encrypt_file(src: Path, dst: Path) -> None:
     salt, prefix = os.urandom(16), os.urandom(4)
     header = MAGIC + salt + prefix
     aes = AESGCM(_key(salt))
-    with open(src, "rb") as f, open(dst, "wb") as out:
+    fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)        # záloha obsahuje tajemství: jen pro vlastníka
+    with open(src, "rb") as f, os.fdopen(fd, "wb") as out:
         out.write(header)
         buf, idx = f.read(CHUNK), 0
         while True:

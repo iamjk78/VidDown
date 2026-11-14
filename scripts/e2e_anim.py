@@ -127,7 +127,7 @@ def main() -> int:
         wait(lambda: api("/api/catalog")["sources"][0]["status"] == "done", 90, "zdroj se nezjistil")
         check(api("/api/catalog")["sources"][0]["kind"] == "page" and len(items()) == 3, "zdroj typu Stránka má 3 videa")
         wait(lambda: all(i["detail_state"] == "done" for i in items()), 120, "podrobnosti")
-        check(True, "yt-dlp zjistil podrobnosti všech tří stránek videí")
+        check(all(i["detail_state"] == "done" for i in items()), "yt-dlp zjistil podrobnosti všech tří stránek videí")
 
         say("B) hledání náhledu na stránce videa a stažení animace")
         wait(lambda: len(items("?anim=yes")) == 2, 120, "animace se nestáhly")
@@ -150,7 +150,7 @@ def main() -> int:
         check(len(items("?anim=yes")) == 0, "při vypnutém stahování se animace znovu nestáhly")
         api("/api/settings", "PUT", {"catalog_anim": True})
         wait(lambda: len(items("?anim=yes")) == 2, 90, "po zapnutí se animace nestáhly znovu")
-        check(True, "po zapnutí se animace stáhly znovu (adresy zůstaly)")
+        check(len(items("?anim=yes")) == 2, "po zapnutí se animace stáhly znovu (adresy zůstaly)")
         wait(lambda: api("/api/catalog")["details"]["anim_scan"] == 0, 60, "hledání na stránkách neskončilo")     # i třetí video musí být prohledané
         rf = api("/api/catalog/anim/refill", "POST")
         check(rf["pages"] == 1, f"Doplnit animace zopakuje hledání na stránce u 1 videa bez animace (pages={rf['pages']})")

@@ -33,7 +33,7 @@ def target_available(path: str) -> tuple[bool, str]:
     """Lehká průběžná kontrola cílové složky (bez zkušebního zápisu)."""
     p = Path(path)
     try:
-        p.mkdir(parents=True, exist_ok=True)
+        p.mkdir(exist_ok=True)                    # jen poslední složka: chybějící rodič je většinou odpojený NAS, jeho cesta se zakládat nemá
     except OSError as e:
         return False, f"{p}: {e.strerror or e}"
     if not p.is_dir():
@@ -670,6 +670,9 @@ class Runner:
         target_dir = Path(job["target_dir"]) if job.get("target_dir") else Path(s["download_dir"]) / (job["subdir"] or "")
         part = None
         try:
+            root = Path(job["target_dir"]) if job.get("target_dir") else Path(s["download_dir"])
+            if not root.is_dir():                                           # odpojený NAS: kořen cíle se nezakládá (video by skončilo v kontejneru)
+                root.mkdir(exist_ok=True)
             target_dir.mkdir(parents=True, exist_ok=True)
             dest = unique_target(target_dir, src.stem, src.suffix)
             part = dest.with_name(dest.name + ".viddown-part")
@@ -697,7 +700,19 @@ class Runner:
             log.warning("miniaturu k %s se nepodařilo vytvořit: %s", dest.name, e)
         return dest
 
+    def _scrub_sniff(self, jid: int) -> None:
+        """Cookies ze sniffu (všechny domény z cookies.txt) se po skončení úlohy z databáze mažou: platí jen pro stahování."""
+        job = self.db.get(jid)
+        try:
+            info = json.loads(job["info"]) if job and job["info"] else {}
+        except ValueError:
+            return
+        sn = info.get("sniff")
+        if isinstance(sn, dict) and sn.pop("cookies", None) is not None:
+            self.db.update(jid, info=info)
+
     def _complete(self, jid: int, dest: Path, result: dict, method: str, staging: Path) -> None:
+        self._scrub_sniff(jid)
         try:
             size = dest.stat().st_size
         except OSError:
@@ -769,6 +784,7 @@ class Runner:
         shutil.rmtree(staging, ignore_errors=True)
         self.db.update(jid, status="failed", attempts=attempts, error=msg, error_kind=kind,
                        finished_at=time.time(), speed=None, eta=None)
+        self._scrub_sniff(jid)
         job = self.db.get(jid)
         self.db.record_download(job, False)
         if not job["parent_id"]:

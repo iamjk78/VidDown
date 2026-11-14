@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import math
 import re
 import time
 from urllib.parse import parse_qsl, urlencode, urlparse
@@ -71,6 +72,11 @@ def story_author(text: str) -> str | None:
         if i > 0 and AGE.match(l):
             return lines[i - 1][:80]
     return None
+
+
+def _finite(v):
+    """Délka videa: Infinity (přehrávač s neznámou délkou) nebo nesmysl znamená „neznámá“."""
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v > 0 else None
 
 
 async def open_story(url: str, ctx) -> dict:
@@ -148,7 +154,7 @@ async def open_story(url: str, ctx) -> dict:
                 except Exception:  # noqa: BLE001
                     info, author = {}, None
                 cand = {"kind": "direct", "url": vids[0], "audio": auds[0] if auds else None,
-                        "height": int(info.get("h") or 0) or None, "duration": info.get("d") or None, "rank": 3}
+                        "height": int(info.get("h") or 0) or None, "duration": _finite(info.get("d")), "rank": 3}
                 log.info("story %s má vlastní video (%s)", url, cand["height"])
                 return {"sniff": {"title": f"{author} – story" if author else "Facebook story", "thumbnail": None,
                                   "candidates": [cand], "drm": False, "referer": "https://www.facebook.com/",
