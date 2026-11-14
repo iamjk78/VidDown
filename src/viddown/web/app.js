@@ -132,6 +132,8 @@ function render() {
   const freshSettings = async () => { const r = await act(() => api('/api/settings')); if (r) App.settings = r; if (App.view === 'settings') renderSettings(); };
   const views = { queue: renderQueue, history: () => renderHistory(), subs: () => (App.args[0] === 'new' ? renderSubNew() : renderSubs()), sub: renderSub, stats: renderStats,
     settings: freshSettings, engines: renderEngines, help: renderHelp, catalog: renderCatalog };
+  const wide = App.view === 'catalog';                                      // Katalog využije celou šířku okna (ostatní obrazovky zůstávají vystředěné)
+  $('#main').classList.toggle('wide', wide); $('#appbn').classList.toggle('wide', wide);
   (views[App.view] || renderQueue)();
   $('#mainwrap').scrollTop = 0;
 }

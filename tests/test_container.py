@@ -16,7 +16,7 @@ needs_ffmpeg = pytest.mark.skipif(not FF, reason="ffmpeg není nainstalován")
 
 def probe(path):
     out = subprocess.run([FF.replace("ffmpeg", "ffprobe"), "-v", "error", "-show_entries", "stream=codec_type,codec_name,width,height", "-of", "csv=p=0", str(path)],
-                         capture_output=True, text=True).stdout
+                         capture_output=True, text=True, stdin=subprocess.DEVNULL).stdout
     return [x for x in out.split() if x]
 
 
@@ -26,9 +26,9 @@ def make_mkv(tmp_path, name="v.mkv", subs=True, audio="libopus", video="libx264"
     cmd = [FF, "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=duration=2:size=640x360:rate=10", "-f", "lavfi", "-i", "sine=duration=2"]
     if subs:
         cmd += ["-i", str(srt)]
-    cmd += ["-map", "0:v", "-map", "1:a", *(["-map", "2:s"] if subs else []), "-c:v", video, "-c:a", audio, *(["-c:s", "webvtt"] if subs else []), "-shortest",
+    cmd += ["-map", "0:v", "-map", "1:a", *(["-map", "2:s"] if subs else []), "-c:v", video, "-c:a", audio, *(["-c:s", "webvtt"] if subs else []), "-shortest", "-t", "2",
             str(tmp_path / name)]
-    subprocess.run(cmd, check=True)
+    subprocess.run(cmd, check=True, stdin=subprocess.DEVNULL, timeout=60)
     return tmp_path / name
 
 
@@ -47,7 +47,7 @@ def test_remux_copies_every_stream_without_encoding(tmp_path):
 def test_remux_is_a_pure_copy_of_the_video_and_audio_packets(tmp_path):
     src = make_mkv(tmp_path, subs=False)
     def md5(p, kind):
-        r = subprocess.run([FF, "-v", "error", "-i", str(p), "-map", f"0:{kind}:0", "-c", "copy", "-f", "md5", "-"], capture_output=True, text=True)
+        r = subprocess.run([FF, "-v", "error", "-i", str(p), "-map", f"0:{kind}:0", "-c", "copy", "-f", "md5", "-"], capture_output=True, text=True, stdin=subprocess.DEVNULL)
         return r.stdout.strip()
     v, a = md5(src, "v"), md5(src, "a")
     out = asyncio.run(container.remux_mkv_to_mp4(FF, src))

@@ -101,6 +101,8 @@ starší verze odmítne otevřít (chrání před poškozením při downgradu). 
 Menu **Katalog** slouží k třídění videí před stahováním: přidáte zdroje (kanály, playlisty, jednotlivá videa), aplikace je **jen prozkoumá**
 (nic nestahuje) a videa si pak projdete jako mřížku karet s miniaturou, rozlišením, velikostí a délkou.
 
+- **Šířka:** Katalog využije celou šířku okna (ostatní obrazovky zůstávají vystředěné); mřížka karet přidává sloupce podle šířky (na 4K monitoru
+  zhruba 10 karet na řádku při velikosti M) a pruh zdrojů se s oknem také rozšiřuje. Počet karet na řádku ovlivní i velikost miniatur S, M, L.
 - **Zdroje vlevo:** zdroje jsou malé odznáčky ve svislém pruhu vlevo od seznamu videí (zkrácený název, počet videí, tečka stavu: zeleně hotovo,
   žlutě čeká nebo se zjišťuje, červeně chyba; od 16 zdrojů se zmenší na kulaté odznáčky s písmenem). **Při najetí** se ukážou podrobnosti
   zdroje. **Kliknutím** se zdroj zvolí (seznam videí se vyfiltruje na něj; druhý klik výběr zruší). Nad odznáčky je jedna sada tlačítek pro zvolený

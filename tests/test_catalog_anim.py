@@ -468,7 +468,7 @@ def sheet_bytes(tmp_path, n=2):
     for i in range(1, n + 1):
         p = tmp_path / f"s{i}.jpg"
         subprocess.run([FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i", f"testsrc=duration=25:size=320x180:rate=1,hue=h={i * 50}",
-                        "-vf", "scale=160:90,tile=5x5", "-frames:v", "1", str(p)], check=True)
+                        "-vf", "scale=160:90,tile=5x5", "-frames:v", "1", str(p)], check=True, stdin=subprocess.DEVNULL)
         out.append(p.read_bytes())
     return out
 
@@ -497,7 +497,7 @@ def test_storyboard_build_makes_a_looping_mp4_within_the_limit(tmp_path, monkeyp
     name = sbm.build(folder, 5, value, FFMPEG, 5 * 1024 * 1024, "https://web.example/")
     assert name == "5.anim.mp4" and cd.anim_kind((folder / name).read_bytes()[:64]) == "mp4"
     pr = subprocess.run([FFMPEG.replace("ffmpeg", "ffprobe"), "-v", "error", "-show_entries", "stream=codec_name,width,nb_frames", "-of", "json", str(folder / name)],
-                        capture_output=True, text=True)
+                        capture_output=True, text=True, stdin=subprocess.DEVNULL)
     st_ = json.loads(pr.stdout)["streams"][0] if pr.returncode == 0 else {"codec_name": "h264", "width": 320, "nb_frames": "24"}
     assert st_["codec_name"] == "h264" and st_["width"] == sbm.WIDTH and int(st_["nb_frames"]) == sbm.MAX_FRAMES
     assert (folder / name).stat().st_size < 200_000

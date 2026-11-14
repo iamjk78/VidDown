@@ -31,6 +31,7 @@ h1{font-size:22px;font-weight:650;letter-spacing:-.01em}h2{font-size:15px;font-w
 .nav.on .n{background:var(--surface);border-color:transparent;color:var(--accent-text)}
 .main{flex:1;min-width:0;overflow:auto;padding:24px 28px 40px}
 .main-in{max-width:1180px;margin:0 auto;display:flex;flex-direction:column;gap:18px}
+.main-in.wide{max-width:none}
 /* prvky */
 .btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:34px;padding:0 14px;border-radius:8px;border:1px solid var(--border2);background:var(--surface);color:var(--text);font-size:13px;font-weight:500;white-space:nowrap;cursor:pointer}
 .btn:hover{background:var(--surface2)}
@@ -197,7 +198,7 @@ button.chip{cursor:pointer}
 .schwin .x{border:0;background:none;color:var(--muted);cursor:pointer;font-weight:700;padding:0 4px}.schwin .x:hover{color:var(--err)}.schwin .x:disabled{opacity:.35;cursor:default}
 
 /* katalog */
-.catlayout{display:grid;grid-template-columns:232px minmax(0,1fr);gap:14px;align-items:start;margin-top:10px}
+.catlayout{display:grid;grid-template-columns:clamp(232px,13vw,380px) minmax(0,1fr);gap:14px;align-items:start;margin-top:10px}
 .catmain{min-width:0;display:flex;flex-direction:column;gap:10px}
 .catside{position:sticky;top:8px;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:10px;display:flex;flex-direction:column;gap:8px;max-height:calc(100vh - 24px)}
 .catsidehd{font-weight:700;font-size:13px}
