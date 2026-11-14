@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 from .. import container
-from ..util import classify_error
+from ..util import classify_error, host_key
 from . import Cancelled, Ctx, ProcHolder, ResolveError, subprocess_kwargs
 
 PENDING = ".viddown-pending.json"      # hotové stažení čekající na přesun do cílové složky (nebo přerušené po zápisu do archivu yt-dlp)
@@ -94,8 +94,13 @@ async def probe(url: str, ctx: Ctx, timeout: float = 300, playlist_end: int | No
     return await _run_json(cmd, timeout)
 
 
+def polite_args(url: str) -> list[str]:
+    """YouTube omezuje relace, které posílají dotazy příliš rychle: yt-dlp mezi svými dotazy krátce počká."""
+    return ["--sleep-requests", "1.5"] if host_key(url) == "youtube.com" else []
+
+
 async def full_info(url: str, ctx: Ctx, timeout: float = 180) -> dict:
-    cmd = base_cmd(ctx) + ["-J", "--no-playlist", *format_args(ctx.settings), url]
+    cmd = base_cmd(ctx) + ["-J", "--no-playlist", *polite_args(url), *format_args(ctx.settings), url]
     return await _run_json(cmd, timeout)
 
 
@@ -133,7 +138,7 @@ async def download(url: str, info: dict | None, ctx: Ctx, staging: Path, name: s
     """Stáhne video do staging. Vrací {"file": Path, "thumb": Path|None} nebo {"skipped": důvod}."""
     s = ctx.settings
     staging.mkdir(parents=True, exist_ok=True)
-    cmd = base_cmd(ctx) + format_args(s, audio_only)
+    cmd = base_cmd(ctx) + polite_args(url) + format_args(s, audio_only)
     cmd += ["-P", str(staging), "-o", name.replace("%", "%%") + ".%(ext)s",
             "--no-playlist", "--no-mtime", "--newline", "--progress", "--progress-template", PROG,
             "--no-simulate", "--print", "after_move:VDFILE %(filepath)s",

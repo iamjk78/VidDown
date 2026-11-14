@@ -23,8 +23,8 @@ from .i18n import t
 from .probe import probe_url, trim_info
 from .resolvers import Cancelled, Ctx, ProcHolder, ResolveError
 from .resolvers import pages, sniffer, ytdlp
-from .util import (classify_error, fallback_allowed, free_space, in_schedule, render_template, retry_allowed,
-                   sanitize_filename, unique_target)
+from .util import (classify_error, fallback_allowed, free_space, host_key, in_schedule, is_rate_limited, render_template,
+                   retry_allowed, sanitize_filename, unique_target)
 
 PENDING = ytdlp.PENDING  # hotové stažení čekající na přesun do cílové složky
 
@@ -63,7 +63,8 @@ class Runner:
         self.running: dict[int, tuple[asyncio.Task, ProcHolder]] = {}
         self.probing: dict[int, asyncio.Task] = {}
         self.stop_reason: dict[int, str] = {}
-        self.sibling_gate: dict[int, list[float]] = {}
+        self.host_gates: dict[str, list[float]] = {}        # web -> časy, do kdy jednotlivé sloty čekají před dalším videem
+        self.host_pause: dict[str, dict] = {}               # web -> {until, delay, n, reason}: pozastavení po omezení ze strany webu
         self.listeners: list = []
         self._engine_task: asyncio.Task | None = None
         self._sub_task: asyncio.Task | None = None
@@ -236,27 +237,64 @@ class Runner:
         slots = self.eff_concurrency(s) - len(self.running)
         if slots <= 0:
             return
-        for job in self.db.query(
-                "select * from jobs where status='queued' and paused=0 and (not_before is null or not_before<=?) "
-                "order by pos limit 50", (now,)):
+        self.host_pause = {k: v for k, v in self.host_pause.items() if v["until"] > now or v.get("n")}
+        for offset in range(0, 4000, 200):                                    # po stránkách: pozastavený web nesmí zablokovat frontu ostatním
             if slots <= 0:
                 break
-            if job["id"] in self.running:
-                continue
-            pid = job["parent_id"]
-            if pid:
-                # Pauza mezi videi z playlistu (ochrana proti zablokování) platí pro každý souběžný slot zvlášť:
-                # najednou se rozjede až `concurrency` videí a každý slot pak před dalším videem počká 5–15 s.
-                gates = [g for g in self.sibling_gate.get(pid, []) if g > now]
-                if len(gates) >= self.eff_concurrency(s):
-                    self.sibling_gate[pid] = gates
+            rows = self.db.query(
+                "select * from jobs where status='queued' and paused=0 and (not_before is null or not_before<=?) "
+                "order by pos limit 200 offset ?", (now, offset))
+            if not rows:
+                break
+            for job in rows:
+                if slots <= 0:
+                    break
+                if job["id"] in self.running:
                     continue
-                gates.append(now + random.uniform(float(s.get("sleep_min", 5)), float(s.get("sleep_max", 15))))
-                self.sibling_gate[pid] = gates
-            holder = ProcHolder()
-            self.db.update(job["id"], status="running", started_at=now, error=None, speed=None, eta=None)
-            self.running[job["id"]] = (asyncio.create_task(self._execute(job["id"], holder)), holder)
-            slots -= 1
+                key = host_key(job["url"])
+                pause = self.host_pause.get(key)
+                if pause and pause["until"] > now:                            # web nás omezil: počká se (viz `_rate_limited`)
+                    continue
+                # Pauza mezi videi ze stejného webu (ochrana proti zablokování) platí pro každý souběžný slot zvlášť:
+                # najednou se rozjede až `concurrency` videí a každý slot pak před dalším videem počká (u YouTube déle).
+                gates = [g for g in self.host_gates.get(key, []) if g > now]
+                if len(gates) >= self.eff_concurrency(s):
+                    self.host_gates[key] = gates
+                    continue
+                gates.append(now + self._sleep_for(key, s))
+                self.host_gates[key] = gates
+                holder = ProcHolder()
+                self.db.update(job["id"], status="running", started_at=now, error=None, speed=None, eta=None)
+                self.running[job["id"]] = (asyncio.create_task(self._execute(job["id"], holder)), holder)
+                slots -= 1
+
+    @staticmethod
+    def _sleep_for(key: str, s: dict) -> float:
+        """Pauza před dalším videem z webu: u YouTube `sleep_youtube_min–max`, jinak `sleep_min–max`."""
+        lo, hi = ((s.get("sleep_youtube_min", 30), s.get("sleep_youtube_max", 60)) if key == "youtube.com" else (s.get("sleep_min", 5), s.get("sleep_max", 15)))
+        lo, hi = float(lo or 0), float(hi or 0)
+        return random.uniform(lo, max(lo, hi))
+
+    def host_pauses(self) -> list[dict]:
+        """Pozastavené weby (omezení ze strany webu) pro GUI."""
+        now = time.time()
+        return [{"host": h, "until": v["until"], "reason": v.get("reason")} for h, v in self.host_pause.items() if v["until"] > now]
+
+    def _rate_limited(self, job: dict, msg: str) -> None:
+        """Web omezil počet dotazů: úloha se vrací do fronty bez započtení pokusu a celý web se pozastaví na 15, 30, nakonec 60 minut
+        (YouTube hlásí omezení až na hodinu; zkoušet znovu za minutu by jen prodlužovalo omezení)."""
+        key = host_key(job["url"])
+        now = time.time()
+        cur = self.host_pause.get(key)
+        if cur and cur["until"] > now:                                      # souběžné úlohy téhož webu nezvyšují odklad vícekrát
+            until = cur["until"]
+        else:
+            n = int(cur["n"]) if cur else 0
+            delay = (900, 1800, 3600)[min(n, 2)]
+            until = now + delay
+            self.host_pause[key] = {"until": until, "delay": delay, "n": n + 1, "reason": msg[:160]}
+            log.warning("%s: web omezil dotazy, stahování se pozastavilo o %d min (%s)", key, delay // 60, msg[:120])
+        self.db.update(job["id"], status="queued", not_before=until, error=msg, error_kind="ratelimit", speed=None, eta=None)
 
     def temp_usage(self) -> int:
         """Velikost rozpracovaných stahování v dočasné složce (počítá se nejvýše jednou za 30 s – na síťovém disku je to pomalé)."""
@@ -578,7 +616,7 @@ class Runner:
                 except ResolveError as e:
                     errors.append((m, e))
                     log.info("úloha %s metoda %s: %s (%s)", jid, m, e, e.kind)
-                    if not fallback_allowed(e.kind):
+                    if not fallback_allowed(e.kind) or is_rate_limited(str(e)):         # při omezení webu další metoda (prohlížeč) jen zatěžuje web
                         break
                     shutil.rmtree(staging, ignore_errors=True)  # pravidlo: smazat polotovary předchozí metody
             if result is None:
@@ -612,6 +650,8 @@ class Runner:
             self.running.pop(jid, None)
             self.phases.pop(jid, None)
             self.db.update(jid, stage=None)
+            key = host_key(job["url"])                                          # pauza se počítá i od konce videa, ne jen od jeho začátku
+            self.host_gates.setdefault(key, []).append(time.time() + self._sleep_for(key, s))
             self._check_parent(jid)
 
     async def _dl_ytdlp(self, job, info, ctx, staging, holder, on_progress):
@@ -713,6 +753,7 @@ class Runner:
 
     def _complete(self, jid: int, dest: Path, result: dict, method: str, staging: Path) -> None:
         self._scrub_sniff(jid)
+        self.host_pause.pop(host_key((self.db.get(jid) or {}).get("url") or ""), None)           # úspěch: web nás už neomezuje
         try:
             size = dest.stat().st_size
         except OSError:
@@ -774,6 +815,9 @@ class Runner:
             self.db.record_download(failed_job, False)
             if not failed_job["parent_id"]:
                 self.emit("on_error", failed_job, msg)
+            return
+        if is_rate_limited(msg):
+            self._rate_limited(job, msg)
             return
         attempts = (job["attempts"] or 0) + 1
         if retry_allowed(kind) and attempts <= int(s.get("auto_retry_attempts", 2)):

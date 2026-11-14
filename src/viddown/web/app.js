@@ -355,6 +355,7 @@ function renderQueueDyn() {
   const kidsOf = j => q.filter(c => c.parent_id === j.id && c.status !== 'running');
   const waiting = f ? waitingAll.filter(j => hit(j) || (j.kind !== 'video' && kidsOf(j).some(hit))) : waitingAll;
   let html = '';
+  (st.host_pauses || []).forEach(p => { html += `<div class="banner">${ic('clock', 18)}<span class="grow">${esc(p.host)}: ${T('web omezil dotazy, stahování z něj čeká do', 'the site limited requests, downloads from it wait until')} <b>${new Date(p.until * 1000).toLocaleTimeString(LANG === 'cs' ? 'cs-CZ' : 'en-GB', { hour: '2-digit', minute: '2-digit' })}</b><span class="t2" title="${esc(p.reason || '')}"> (${T('opakované omezení čeká déle: 15, 30, 60 min', 'repeated limits wait longer: 15, 30, 60 min')})</span></span></div>`; });
   if (st.queue_paused) {
     const disk = st.pause_reason === 'disk';
     const target = st.pause_reason === 'target', cook = st.pause_reason === 'cookies';
@@ -962,6 +963,8 @@ const SECTIONS = () => [
     { k: 'rate_limit_mbps', type: 'number', step: 0.5, min: 0.1, suffix: 'MB/s', label: ['Limit', 'Limit'] },
     { k: 'sleep_min', type: 'number', min: 0, suffix: 's', label: ['Pauza mezi videi playlistu od', 'Pause between playlist videos from'] },
     { k: 'sleep_max', type: 'number', min: 0, suffix: 's', label: ['do', 'to'] },
+    { k: 'sleep_youtube_min', type: 'number', min: 0, max: 600, suffix: 's', label: ['Pauza mezi videi z YouTube od', 'Pause between YouTube videos from'], hint: ['YouTube omezuje relace, které stahují příliš rychle; pauza platí mezi videi z YouTube i když nejsou z playlistu. Ostatní weby: pole výše.', 'YouTube limits sessions that download too fast; the pause applies between YouTube videos even outside playlists. Other sites: the fields above.'] },
+    { k: 'sleep_youtube_max', type: 'number', min: 0, max: 600, suffix: 's', label: ['do', 'to'] },
   ] },
   { icon: 'clock', title: ['Časový rozvrh', 'Schedule'], col: 0, fields: [
     { k: 'schedule_enabled', type: 'toggle', label: ['Pracovat jen v časových oknech', 'Work only in time windows'], hint: ['Mimo okna aplikace nezačne novou automatickou práci', 'Outside the windows the app starts no new automatic work'] },

@@ -237,6 +237,23 @@ ERROR_PATTERNS = [
 ]
 
 
+RATE_LIMIT_RE = re.compile(r"rate.?limited|rate limit|too many requests|http error 429|\b429\b", re.I)
+
+
+def is_rate_limited(message: str) -> bool:
+    """Web omezil počet dotazů (např. „The current session has been rate-limited by YouTube“, HTTP 429): je třeba počkat, ne zkoušet znovu."""
+    return bool(RATE_LIMIT_RE.search(message or ""))
+
+
+def host_key(url: str) -> str:
+    """Web, pro který platí společná pauza mezi stahováním: všechny adresy YouTube (youtu.be, m., music.) jsou jeden web."""
+    d = domain(url or "")
+    d = d.split(":")[0]
+    if d == "youtu.be" or d == "youtube.com" or d.endswith(".youtube.com"):
+        return "youtube.com"
+    return d
+
+
 def classify_error(message: str) -> str:
     m = (message or "").lower()
     for kind, pat in ERROR_PATTERNS:

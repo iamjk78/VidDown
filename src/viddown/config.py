@@ -90,6 +90,8 @@ DEFAULTS: dict = {
     "schedule_finish_running": False,      # na konci okna nechat rozpracovaná stahování doběhnout (jinak se přeruší)
     "sleep_min": 5,
     "sleep_max": 15,
+    "sleep_youtube_min": 30,               # pauza mezi stahováním videí z YouTube (s); YouTube omezuje relace, které stahují příliš rychle
+    "sleep_youtube_max": 60,
     "retries": 5,
     "auto_retry_attempts": 2,
     # přístup a síť
@@ -264,6 +266,8 @@ class Settings:
                     raise ValueError("catalog_anim_max_mb must be 1-20")
                 if k == "catalog_gap" and not 0 <= val <= 60:
                     raise ValueError("catalog_gap must be 0-60")
+                if k in ("sleep_youtube_min", "sleep_youtube_max") and not 0 <= val <= 600:
+                    raise ValueError(f"{k} must be 0-600")
                 if k == "catalog_hour_limit" and not (val == 0 or 60 <= val <= 5000):
                     raise ValueError("catalog_hour_limit must be 0 or 60-5000")
                 if k == "catalog_proxy_fallback":

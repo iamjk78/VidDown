@@ -177,6 +177,7 @@ def create_app(app_state) -> FastAPI:
             "cpu": S.runner.cpu.out(),
             "app": updater.banner_cached(S),
             "queue_paused": bool(S.db.kv_get("queue_paused", False)),
+            "host_pauses": S.runner.host_pauses(),
             "pause_reason": S.db.kv_get("queue_pause_reason"),
             "pause_hard": S.runner.pause_is_hard(),
             "target_error": S.db.kv_get("target_error"),
