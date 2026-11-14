@@ -26,6 +26,7 @@ from urllib.parse import urlsplit, urlunsplit
 from . import schedule
 from . import pagelist, storyboard
 from .resolvers import ResolveError, sniffer, ytdlp
+from . import nested
 from .util import domain, sanitize_filename, url_list_name, youtube_channel_base
 
 log = logging.getLogger("viddown.catalog")
@@ -313,6 +314,8 @@ def _flatten(entries) -> list[dict]:
         if e.get("_type") == "playlist" and e.get("entries"):
             out += _flatten(e["entries"])
             continue
+        if nested.is_list_entry(e):                                   # odkaz na další playlist, ne video (viz nested.py)
+            continue
         u = _entry_url(e)
         if not u or not u.startswith("http"):
             continue
@@ -432,6 +435,10 @@ async def list_source(url: str, ctx) -> dict:
     if info.get("_type") in ("playlist", "multi_video") or "entries" in info:
         entries = _dedupe(_flatten(info.get("entries")))
         if not entries:
+            lists = nested.list_infos(info.get("entries"))[:nested.MAX_LISTS]
+            if lists:                                                 # např. záložka „Playlisty“: zdroj je seznam playlistů k výběru
+                return {"kind": "playlists", "title": info.get("title") or info.get("channel") or info.get("uploader") or domain(url),
+                        "thumb_url": _thumb(info), "entries": [], "playlists": lists, "complete": True}
             raise ResolveError("zdroj je prázdný", "unsupported")
         slug, slug_channel = url_list_name(url)
         is_channel = bool(info.get("channel_id") and info.get("id") == info.get("channel_id")) or slug_channel
@@ -758,6 +765,13 @@ def item_out(r: dict) -> dict:
             "download_error": r["detail_error"] if (r["detail_error"] or "").startswith(DL_NOTE) else None}
 
 
+def _children(s: dict) -> list[dict]:
+    try:
+        return json.loads(s["children"] or "[]")
+    except ValueError:
+        return []
+
+
 def sources_out(db) -> dict:
     """Zdroje se stavem zjišťování a počty videí, plus celkové počty."""
     counts = {r["source_id"]: r for r in db.query(
@@ -779,6 +793,7 @@ def sources_out(db) -> dict:
                     "rejected_before": c.get("rejected_before") or 0,
                     # vyřízený zdroj: sken dokončen, žádné video k vybrání ani ve frontě, ale zdroj nějaká videa měl; po volbě „Ponechat“
                     # se znovu hlásí až když přibudou nová videa (změní se celkový počet)
+                    "playlists": _children(s) if s["status"] == "choose" else None,
                     "exhausted": s["status"] == "done" and not c.get("items") and (c.get("total") or 0) > 0 and s["keep_total"] != c.get("total")})
     return {"sources": out, "detached": detached, "items": sum(x["items"] for x in out) + sum(x["items"] for x in detached),
             "scanning": sum(1 for x in out if x["status"] in ("queued", "scanning"))}
@@ -828,6 +843,30 @@ def _fail(db, sid: int, msg: str) -> None:
         c.execute("update catalog_sources set status='error', error=?, last_scan=? where id=?", (msg, time.time(), sid))
 
 
+def store_choose(db, sid: int, listing: dict) -> None:
+    """Zdroj je seznam playlistů: uloží je k výběru (stav `choose`); videa se do katalogu přidají až z playlistů jako samostatných zdrojů."""
+    title = listing.get("title")
+    with db.conn() as c:
+        c.execute("update catalog_sources set kind='playlists', title=?, title_search=?, status='choose', error=null, children=?, last_scan=? "
+                  "where id=? and status='scanning'", (title, norm(title or ""), json.dumps(listing["playlists"], ensure_ascii=False), time.time(), sid))
+
+
+def expand_source(db, sid: int, urls: list[str]) -> dict | None:
+    """Zdroj se seznamem playlistů (`choose`): vybrané playlisty přidá jako samostatné zdroje a původní zdroj odebere.
+    Vrací {"added", "reloaded", "skipped"} z `add_sources`, nebo None, když zdroj není ve stavu výběru."""
+    r = db.query("select status, children from catalog_sources where id=?", (sid,))
+    if not r or r[0]["status"] != "choose":
+        return None
+    try:
+        known = [x["url"] for x in json.loads(r[0]["children"] or "[]")]
+    except ValueError:
+        known = []
+    want = [u for u in dict.fromkeys(urls) if u in set(known)][:nested.MAX_LISTS]
+    res = add_sources(db, want) if want else {"added": [], "reloaded": [], "skipped": []}
+    delete_source(db, sid)
+    return res
+
+
 async def scan_one(st, src: dict) -> dict:
     """Zjistí seznam jednoho zdroje a uloží ho. Chyba se zapíše ke zdroji (a zdroj zůstane k ručnímu opakování)."""
     db, sid = st.db, src["id"]
@@ -837,6 +876,10 @@ async def scan_one(st, src: dict) -> dict:
         return {}
     try:
         listing = await list_source(src["url"], st.runner.ctx())
+        if listing.get("kind") == "playlists":
+            await asyncio.to_thread(store_choose, db, sid, listing)
+            log.info("katalog: %s – seznam %d playlistů k výběru", listing.get("title"), len(listing["playlists"]))
+            return {}
         keys, ids, urls = await asyncio.to_thread(downloaded_sets, db, st.data)
         res = await asyncio.to_thread(apply_listing, db, sid, listing, src["scan_mode"], keys, ids, urls)
         if res is not None:

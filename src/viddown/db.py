@@ -209,6 +209,10 @@ alter table catalog_sources add column keep_total integer;  -- počet videí zdr
 create index catalog_items_published on catalog_items(published_at);
 """
 
+CATALOG_CHOOSE_V11 = """
+alter table catalog_sources add column children text;       -- zdroj je seznam playlistů: JSON [{url, title, id}] k výběru (stav 'choose')
+"""
+
 MIGRATIONS: list[tuple[int, object]] = [
     (1, SCHEMA),   # základní schéma (VidDown 0.1.0)
     (2, SUBSCRIPTIONS_V2),   # odběry
@@ -220,6 +224,7 @@ MIGRATIONS: list[tuple[int, object]] = [
     (8, CATALOG_V8),         # katalog: zdroje a videa k výběru
     (9, CATALOG_ANIM_V9),    # katalog: animované náhledy
     (10, CATALOG_DATE_V10),  # katalog: datum zveřejnění videí, volba u vyřízeného zdroje
+    (11, CATALOG_CHOOSE_V11),  # katalog: zdroj se seznamem playlistů
 ]
 
 
@@ -342,7 +347,7 @@ class DB:
                 jid = c.execute(
                     "insert into jobs(url,title,status,kind,parent_id,pos,source,subdir,thumb_url,channel,duration,info,created_at,updated_at)"
                     " values(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (e["url"], e.get("title"), "queued", "video", parent_id, pos, source, subdir,
+                    (e["url"], e.get("title"), "queued", "video", parent_id, pos, source, e.get("subdir") or subdir,
                      e.get("thumb_url"), e.get("channel"), e.get("duration"),
                      json.dumps(info, ensure_ascii=False) if info else None, now, now)).lastrowid
                 ids.append(jid)

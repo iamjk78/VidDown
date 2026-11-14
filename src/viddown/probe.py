@@ -4,9 +4,11 @@ Běží pro každou nově přidanou položku v samostatném vlákně (asyncio ú
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 
+from . import nested
 from .resolvers import Ctx, ResolveError
 from .resolvers import pages, sniffer, ytdlp
 from .util import url_list_name, domain, fallback_allowed, youtube_channel_base
@@ -55,6 +57,8 @@ def _flatten(entries) -> list[dict]:
         if e.get("_type") == "playlist" and e.get("entries"):
             out += _flatten(e["entries"])
             continue
+        if nested.is_list_entry(e):                                   # odkaz na další playlist, ne video (viz nested.py)
+            continue
         u = _entry_url(e)
         if not u:
             continue
@@ -94,6 +98,8 @@ async def _probe_ytdlp(url: str, ctx: Ctx) -> dict:
     info = await ytdlp.probe(url, ctx)
     if info.get("_type") in ("playlist", "multi_video") or "entries" in info:
         entries = _flatten(info.get("entries"))
+        if not entries:                                                # např. záložka „Playlisty“: videa všech playlistů, každý do své podsložky
+            entries = await _expand_lists(nested.list_infos(info.get("entries")), ctx)
         is_channel = bool(info.get("channel_id") and info.get("id") == info.get("channel_id"))
         slug, slug_channel = url_list_name(url)
         is_channel = is_channel or slug_channel
@@ -111,6 +117,34 @@ async def _probe_ytdlp(url: str, ctx: Ctx) -> dict:
             "height": ytdlp.best_height(info), "count": 1, "approx": False, "info": ti,
             "duration": info.get("duration"), "channel": info.get("channel") or info.get("uploader"),
             "size_est": ytdlp.size_estimate(info), "live": bool(info.get("is_live"))}
+
+
+async def _expand_lists(lists: list[dict], ctx: Ctx) -> list[dict]:
+    """Videa ze seznamu playlistů (nejvýš `nested.MAX_LISTS`, po třech najednou). Každé video nese `group` = název playlistu
+    (podsložka při stahování). Playlist, který se nepodaří načíst, se přeskočí; stejné video ve více playlistech se bere jednou."""
+    lists = lists[:nested.MAX_LISTS]
+    sem = asyncio.Semaphore(3)
+
+    async def one(item: dict) -> list[dict]:
+        async with sem:
+            try:
+                info = await ytdlp.probe(item["url"], ctx)
+            except ResolveError as e:
+                log.info("playlist %s nelze načíst: %s", item["url"], e)
+                return []
+        group = item.get("title") or info.get("title") or "playlist"
+        es = _flatten(info.get("entries"))
+        for e in es:
+            e["group"] = group
+        return es
+
+    out, seen = [], set()
+    for es in await asyncio.gather(*(one(i) for i in lists)):
+        for e in es:
+            if e["url"] not in seen:
+                seen.add(e["url"])
+                out.append(e)
+    return out
 
 
 async def _list_result(kind: str, title: str, thumb: str | None, entries: list[dict], ctx: Ctx) -> dict:

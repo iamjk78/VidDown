@@ -1329,7 +1329,7 @@ function catPaintTools() {
   const p = $('#catpause'); if (p && ov) p.innerHTML = ov.details.paused ? `${ic('play', 14)} ${T('Pokračovat ve zjišťování', 'Resume scanning')}` : `${ic('pause', 14)} ${T('Pozastavit zjišťování', 'Pause scanning')}`;
 }
 const CAT_ROUND_FROM = 16;                                                  // od tolika zdrojů se odznáčky zmenší na kulaté
-const catStatusDot = s => (s.status === 'error' ? 'r' : s.status === 'queued' || s.status === 'scanning' ? 'y' : 'g');
+const catStatusDot = s => (s.status === 'error' ? 'r' : s.status === 'queued' || s.status === 'scanning' || s.status === 'choose' ? 'y' : 'g');
 function catBadge(s, round) {
   const name = s.title || s.url, initial = ([...name.replace(/^https?:\/\/(www\.)?/, '')][0] || '?').toUpperCase();
   const hue = Math.round((([...name].reduce((a, c) => (a * 31 + c.charCodeAt(0)) | 0, 7) >>> 0) % 997) * 137.508) % 360;      // zlatý úhel: i podobné názvy dostanou různé barvy
@@ -1337,8 +1337,8 @@ function catBadge(s, round) {
     <span class="dot ${catStatusDot(s)}"></span>${round ? `<span class="srcl">${esc(initial)}</span>` : `<span class="ell grow">${esc(name)}</span><span class="srcn">${s.items}</span>`}</button>`;
 }
 function catSourceDetail(s) {
-  const st = { queued: T('čeká ve frontě', 'waiting'), scanning: T('zjišťuje se…', 'scanning…'), error: T('chyba', 'error'), done: '' }[s.status] || '';
-  const kind = { channel: T('kanál', 'channel'), playlist: 'playlist', video: T('video', 'video'), page: T('stránka', 'page') }[s.kind] || '';
+  const st = { queued: T('čeká ve frontě', 'waiting'), scanning: T('zjišťuje se…', 'scanning…'), choose: T('čeká na výběr playlistů', 'choose playlists'), error: T('chyba', 'error'), done: '' }[s.status] || '';
+  const kind = { channel: T('kanál', 'channel'), playlist: 'playlist', playlists: T('seznam playlistů', 'list of playlists'), video: T('video', 'video'), page: T('stránka', 'page') }[s.kind] || '';
   const pct = s.items ? Math.round(100 * s.details_done / s.items) : 0;
   const when = s.last_scan ? new Date(s.last_scan * 1000).toLocaleString(LANG === 'cs' ? 'cs-CZ' : 'en-GB') : '—';
   return `<div class="row gap6"><b class="ell grow">${esc(s.title || s.url)}</b>${st ? `<span class="badge ${s.status === 'error' ? 'b-err' : 'b-warn'}">${st}</span>` : ''}</div>
@@ -1384,9 +1384,31 @@ function catPaintSources() {
   $('#catinfo').innerHTML = bits.length ? `<div class="row gap10 wrap fs12" style="padding:2px 4px">${bits.join('')}</div>` : '';
   $('#catinfo').onclick = catSrcClick;
 }
+/* Zdroj je seznam playlistů (např. záložka „Playlisty“ kanálu): nabídne je k výběru, vybrané se přidají jako samostatné zdroje */
+function catChoosePrompt() {
+  const src = CAT.ov.sources.find(x => x.status === 'choose' && x.playlists && x.playlists.length && !CAT.done.has('c' + x.id)); if (!src) return false;
+  CAT.done.add('c' + src.id);                                                            // v této relaci se na zdroj zeptá jednou (Později ho nechá čekat)
+  const m = modal(`<div class="mh">${ic('list', 18)}<h2>${T('Zdroj obsahuje playlisty', 'The source contains playlists')}</h2></div>
+    <div class="mb col gap10"><div class="fs13"><b>${esc(src.title || src.url)}</b> · ${src.playlists.length} playlistů</div>
+      <div class="fs13 t2">${T('Každý vybraný playlist se přidá jako samostatný zdroj (s vlastním názvem a složkou) a tento seznam se odebere.', 'Each selected playlist is added as a separate source (with its own name and folder) and this list is removed.')}</div>
+      <label class="row gap6 fs13"><input type="checkbox" id="catpl-all" checked> ${T('Vybrat vše', 'Select all')}</label>
+      <div class="col gap4" style="max-height:44vh;overflow:auto">${src.playlists.map((p, i) => `<label class="row gap6 fs13"><input type="checkbox" class="catpl" data-i="${i}" checked> <span class="ell">${esc(p.title || p.url)}</span></label>`).join('')}</div></div>
+    <div class="mf"><button class="btn" id="catpl-later">${T('Později', 'Later')}</button><button class="btn primary" id="catpl-go">${T('Přidat vybrané', 'Add selected')}</button></div>`);
+  $('#catpl-all', m.el).onchange = e => $$('.catpl', m.el).forEach(c => { c.checked = e.target.checked; });
+  $('#catpl-later', m.el).onclick = m.close;
+  $('#catpl-go', m.el).onclick = async () => {
+    const urls = $$('.catpl', m.el).filter(c => c.checked).map(c => src.playlists[+c.dataset.i].url);
+    if (!urls.length) return toast(T('Vyberte aspoň jeden playlist', 'Select at least one playlist'), true);
+    m.close();
+    const r = await act(() => api(`/api/catalog/sources/${src.id}/expand`, { method: 'POST', body: { urls } }), T(`Přidáno zdrojů: ${urls.length}`, `Sources added: ${urls.length}`));
+    if (r) { CAT.ov = r.overview; if (CAT.source === src.id) { CAT.source = 0; $('#catsrcsel').value = '0'; } catLoad(); }
+  };
+  return true;
+}
 /* Vyřízený zdroj (nezbylo v něm žádné video k vybrání ani ve frontě): zeptá se, jestli ho odebrat, nebo ponechat pro budoucí videa */
 function catDonePrompt() {
   if (App.view !== 'catalog' || CAT.busy || $('#modal-root .overlay') || !CAT.ov) return;
+  if (catChoosePrompt()) return;
   const src = CAT.ov.sources.find(x => x.exhausted && !CAT.done.has(x.id)); if (!src) return;
   CAT.done.add(src.id);                                                                  // v této relaci se na zdroj zeptá jen jednou
   const m = modal(`<div class="mh">${ic('check', 18)}<h2>${T('Zdroj je zpracován', 'Source finished')}</h2></div>

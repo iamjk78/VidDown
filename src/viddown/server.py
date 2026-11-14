@@ -648,6 +648,18 @@ def create_app(app_state) -> FastAPI:
         res = await asyncio.to_thread(catalogdetails.refill_dates, S.db, src)
         return {**res, "overview": await asyncio.to_thread(_overview)}
 
+    @app.post("/api/catalog/sources/{sid}/expand")
+    async def catalog_expand(sid: int, req: Request):
+        """Zdroj se seznamem playlistů: {urls: [...]} přidá vybrané playlisty jako samostatné zdroje a původní zdroj odebere."""
+        body = await req.json()
+        urls = body.get("urls") if isinstance(body, dict) else None
+        if not isinstance(urls, list) or not all(isinstance(u, str) for u in urls):
+            raise HTTPException(400, "Chybí seznam adres playlistů.")
+        res = await asyncio.to_thread(catalog.expand_source, S.db, sid, urls)
+        if res is None:
+            raise HTTPException(404, "Zdroj nenalezen nebo už není ve stavu výběru playlistů.")
+        return {**res, "overview": await asyncio.to_thread(_overview)}
+
     @app.post("/api/catalog/sources/{sid}/keep")
     async def catalog_keep(sid: int):
         """Vyřízený zdroj (už v něm nic nezbývá) zůstane a dál se zjišťuje; na dotaz se znovu zeptá až po nových videích."""

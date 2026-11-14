@@ -449,6 +449,9 @@ class Runner:
             log.info("playlist %s: %d videí už je ve frontě, přeskočeno", job["id"], len(entries) - len(kept))
         total = len(entries)
         entries = kept
+        for e in entries:                                           # seznam playlistů: každý playlist do podsložky podle svého názvu
+            if e.get("group"):
+                e["subdir"] = "/".join(p for p in (subdir, sanitize_filename(e["group"])) if p)
         for i, e in enumerate(entries, 1):
             e.setdefault("info", {})
             if e["info"] is not None:
