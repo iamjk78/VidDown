@@ -89,13 +89,14 @@ def with_copy(ctx: Ctx) -> tuple[Ctx, Path | None]:
     return (dataclasses.replace(ctx, cookies_override=ck) if ck else ctx), ck
 
 
+COOKIES_STALE = "Nahrané cookies už YouTube neuznává"
 AGE_RE = re.compile(r"confirm your age|confirm you.re not a bot|age[- ]restricted", re.I)
 
 
 def cookie_hint(msg: str, ctx: Ctx) -> str:
     """YouTube s nahranými cookies pořád chce přihlášení: cookies přestala platit (zneplatnil je YouTube)."""
     if msg and "[youtube" in msg and AGE_RE.search(msg) and (ctx.cookies_file or ctx.settings.get("cookies_mode") == "browser"):
-        return (msg.split(" Use --cookies")[0].rstrip(". ") + ". Nahrané cookies už YouTube neuznává: "
+        return (msg.split(" Use --cookies")[0].rstrip(". ") + f". {COOKIES_STALE}: "
                 "exportujte je znovu z anonymního okna prohlížeče a nahrajte je v Nastavení.")
     return msg
 

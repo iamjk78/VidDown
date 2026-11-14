@@ -356,6 +356,8 @@ function renderQueueDyn() {
   const waiting = f ? waitingAll.filter(j => hit(j) || (j.kind !== 'video' && kidsOf(j).some(hit))) : waitingAll;
   let html = '';
   (st.host_pauses || []).forEach(p => { html += `<div class="banner">${ic('clock', 18)}<span class="grow">${esc(p.host)}: ${T('web omezil dotazy, stahování z něj čeká do', 'the site limited requests, downloads from it wait until')} <b>${new Date(p.until * 1000).toLocaleTimeString(LANG === 'cs' ? 'cs-CZ' : 'en-GB', { hour: '2-digit', minute: '2-digit' })}</b><span class="t2" title="${esc(p.reason || '')}"> (${T('opakované omezení čeká déle: 15, 30, 60 min', 'repeated limits wait longer: 15, 30, 60 min')})</span></span></div>`; });
+  if (st.yt_cookies_bad) html += `<div class="banner">${ic('cookie', 18)}<span class="grow">${T('YouTube přestal uznávat nahrané cookies: věkově omezená videa se nestáhnou, dokud je neobnovíte.', 'YouTube no longer accepts the uploaded cookies: age-restricted videos will fail until you refresh them.')}</span>
+      <button class="btn sm" data-go="settings">${T('Nastavení', 'Settings')}</button></div>`;
   if (st.queue_paused) {
     const disk = st.pause_reason === 'disk';
     const target = st.pause_reason === 'target', cook = st.pause_reason === 'cookies';

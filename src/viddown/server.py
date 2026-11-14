@@ -182,6 +182,7 @@ def create_app(app_state) -> FastAPI:
             "pause_hard": S.runner.pause_is_hard(),
             "target_error": S.db.kv_get("target_error"),
             "cookies_error": S.db.kv_get("cookies_error"),
+            "yt_cookies_bad": bool(S.db.kv_get("yt_cookies_bad")) and S.settings.get("cookies_mode") != "none",
             "schedule": {"start": s["schedule_start"], "end": s["schedule_end"], **schedule.describe(s, S.db)},
             "in_window": schedule.allowed(s, "queue", db=S.db),
             "disk": dict(S.runner.disk_cached(s), dir=s["download_dir"], min_gb=s["min_free_gb"],
@@ -1060,6 +1061,8 @@ def create_app(app_state) -> FastAPI:
         except OSError:
             pass
         S.settings.update({"cookies_mode": "file"})
+        S.db.kv_set("yt_cookies_bad", None)
+        S.db.kv_set("yt_cookies_notice_at", None)       # nové cookies: příští neplatnost se oznámí hned
         return settings_out()
 
     @app.delete("/api/settings/cookies")

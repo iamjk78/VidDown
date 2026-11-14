@@ -23,6 +23,7 @@ from .i18n import t
 from .probe import probe_url, trim_info
 from .resolvers import Cancelled, Ctx, ProcHolder, ResolveError
 from .resolvers import pages, sniffer, ytdlp
+from .resolvers.ytdlp import COOKIES_STALE
 from .util import (classify_error, fallback_allowed, free_space, host_key, in_schedule, is_rate_limited, render_template,
                    retry_allowed, sanitize_filename, unique_target)
 
@@ -361,6 +362,18 @@ class Runner:
             low = "temp"
         return {"target_free": target_free, "target_reliable": target_ok, "temp_free": temp_free, "temp_dir": str(temp_dir),
                 "same_disk": same, "low": low, "temp_used": self.temp_usage()}
+
+    YT_COOKIES_NOTICE_GAP = 24 * 3600
+
+    def _yt_cookies_bad(self, msg: str) -> None:
+        """YouTube s nahranými cookies pořád chce přihlášení: poznačit (banner v GUI) a nejvýš jednou za 24 h upozornit."""
+        now = time.time()
+        self.db.kv_set("yt_cookies_bad", now)
+        last = float(self.db.kv_get("yt_cookies_notice_at") or 0)
+        if now - last >= self.YT_COOKIES_NOTICE_GAP:
+            self.db.kv_set("yt_cookies_notice_at", now)
+            log.warning("YouTube neuznává nahrané cookies: %s", msg)
+            self.emit("on_notice", "yt_cookies", error=msg)
 
     def _pause_for_cookies(self, msg: str) -> None:
         if self.db.kv_get("queue_pause_reason") == "cookies":
@@ -751,9 +764,21 @@ class Runner:
         if isinstance(sn, dict) and sn.pop("cookies", None) is not None:
             self.db.update(jid, info=info)
 
+    def _yt_cookies_ok(self, job: dict) -> None:
+        """Úspěšné stažení věkově omezeného videa z YouTube dokazuje, že cookies zase platí (běžné video nic nedokazuje)."""
+        if not self.db.kv_get("yt_cookies_bad") or host_key(job.get("url") or "") != "youtube.com":
+            return
+        try:
+            info = json.loads(job.get("info") or "{}")
+        except ValueError:
+            return
+        if isinstance(info, dict) and int(info.get("age_limit") or 0) >= 18:
+            self.db.kv_set("yt_cookies_bad", None)
+
     def _complete(self, jid: int, dest: Path, result: dict, method: str, staging: Path) -> None:
         self._scrub_sniff(jid)
         self.host_pause.pop(host_key((self.db.get(jid) or {}).get("url") or ""), None)           # úspěch: web nás už neomezuje
+        self._yt_cookies_ok(self.db.get(jid) or {})
         try:
             size = dest.stat().st_size
         except OSError:
@@ -819,6 +844,8 @@ class Runner:
         if is_rate_limited(msg):
             self._rate_limited(job, msg)
             return
+        if kind == "login" and COOKIES_STALE in msg:
+            self._yt_cookies_bad(msg)
         attempts = (job["attempts"] or 0) + 1
         if retry_allowed(kind) and attempts <= int(s.get("auto_retry_attempts", 2)):
             delay = RETRY_DELAYS[min(attempts - 1, len(RETRY_DELAYS) - 1)]

@@ -16,7 +16,7 @@ from .util import url_list_name, domain, fallback_allowed, youtube_channel_base
 log = logging.getLogger("viddown.probe")
 
 KEEP = ("id", "title", "channel", "uploader", "upload_date", "height", "duration", "thumbnail", "extractor_key",
-        "webpage_url", "is_live", "live_status", "playlist_title", "playlist_index", "filesize_approx")
+        "webpage_url", "is_live", "live_status", "playlist_title", "playlist_index", "filesize_approx", "age_limit")
 
 
 def trim_info(info: dict) -> dict:

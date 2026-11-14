@@ -350,6 +350,11 @@ class TelegramBot:
                              if self.lang() == "cs" else "⚠️ Queue paused: cookies can't be loaded ({e}). Fix the cookie settings and resume the queue in the GUI.")
                             .format(e=kw.get("error", "")[:200]))
             return
+        if kind == "yt_cookies":
+            await self.send("⚠️ YouTube přestal uznávat nahrané cookies. Věkově omezená videa se nestáhnou, dokud je neobnovíte (Nastavení › cookies.txt)."
+                            if self.lang() == "cs" else
+                            "⚠️ YouTube no longer accepts the uploaded cookies. Age-restricted videos will fail until you refresh them (Settings › cookies.txt).")
+            return
         if kind == "target":
             await self.send(("⚠️ Fronta pozastavena: cílová složka není dostupná ({e}). Po obnovení přístupu bude pokračovat."
                              if self.lang() == "cs" else "⚠️ Queue paused: download folder unavailable ({e}). It resumes when the folder is back.")
