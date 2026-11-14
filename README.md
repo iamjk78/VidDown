@@ -134,7 +134,7 @@ Menu **Katalog** slouží k třídění videí před stahováním: přidáte zdr
   **Načíst znovu vše** (nabídne znovu i odmítnutá a stažená) a **Odebrat** (smaže i paměť o jeho videích).
 - **Procházení:** hledání v názvu videa, kanálu i zdroje (bez ohledu na diakritiku, tlačítko × a klávesa Esc), filtr podle zdroje,
   rozlišení (2160p až ≤360p, neznámé) a stavu (nové, ve frontě, staženo dříve, dříve odmítnuté, nedostupné); řazení podle pořadí
-  ve zdroji, zdroje, rozlišení, velikosti, délky nebo data přidání; 25 až 500 videí na stránku; velikost miniatur S, M, L (pamatuje
+  ve zdroji, zdroje, rozlišení, velikosti, délky, **data zveřejnění** (od nejnovějšího nebo od nejstaršího, i uvnitř zvoleného zdroje; datum se zjišťuje spolu s podrobnostmi, u starších videí ho doplní tlačítko Doplnit data) nebo data přidání; filtr „zveřejněno za poslední týden / měsíc / rok“; když ve zdroji nezbude žádné video (odstraněním nebo stažením), aplikace se zeptá, jestli zdroj odebrat, nebo ponechat pro budoucí videa; 25 až 500 videí na stránku; velikost miniatur S, M, L (pamatuje
   se v prohlížeči).
 - **Výběr:** zaškrtnutím karet, **Vybrat zobrazené** (stránka) nebo **Vybrat všech vyhovujících** (i na dalších stránkách; jednotlivé
   karty jde z výběru vyřadit). **Odstranit** (u karty i hromadně) video z katalogu skryje; zdroj si ho pamatuje a nabídne ho znovu až

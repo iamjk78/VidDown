@@ -203,6 +203,12 @@ alter table catalog_items add column anim_file text;     -- soubor v složce min
 create index catalog_items_noanim on catalog_items(source_id, pos) where anim_file is null and anim_url is not null;
 """
 
+CATALOG_DATE_V10 = """
+alter table catalog_items add column published_at real;     -- datum zveřejnění videa (UTC, sekundy); null = nezjištěno, 0 = web ho nenabízí
+alter table catalog_sources add column keep_total integer;  -- počet videí zdroje v době, kdy uživatel zvolil „Ponechat“ vyřízený zdroj
+create index catalog_items_published on catalog_items(published_at);
+"""
+
 MIGRATIONS: list[tuple[int, object]] = [
     (1, SCHEMA),   # základní schéma (VidDown 0.1.0)
     (2, SUBSCRIPTIONS_V2),   # odběry
@@ -213,6 +219,7 @@ MIGRATIONS: list[tuple[int, object]] = [
     (7, SUB_INTERVAL_V7),    # vlastní interval kontroly odběru
     (8, CATALOG_V8),         # katalog: zdroje a videa k výběru
     (9, CATALOG_ANIM_V9),    # katalog: animované náhledy
+    (10, CATALOG_DATE_V10),  # katalog: datum zveřejnění videí, volba u vyřízeného zdroje
 ]
 
 

@@ -638,6 +638,23 @@ def create_app(app_state) -> FastAPI:
         return {**res, "disk": await asyncio.to_thread(catalog.disk_usage, catalog.thumbs_dir(S.data, S.settings)),
                 "overview": await asyncio.to_thread(_overview)}
 
+    @app.post("/api/catalog/dates/refill")
+    async def catalog_dates_refill(req: Request):
+        """Doplní datum zveřejnění u už načtených videí: {source?: id}. Znovu zjistí podrobnosti videí, u kterých datum chybí."""
+        body = await req.json() if (await req.body()) else {}
+        src = body.get("source") if isinstance(body, dict) else None
+        if src is not None and (not isinstance(src, int) or isinstance(src, bool) or not 0 < src < 2 ** 62):
+            raise HTTPException(400, "Neplatný zdroj.")
+        res = await asyncio.to_thread(catalogdetails.refill_dates, S.db, src)
+        return {**res, "overview": await asyncio.to_thread(_overview)}
+
+    @app.post("/api/catalog/sources/{sid}/keep")
+    async def catalog_keep(sid: int):
+        """Vyřízený zdroj (už v něm nic nezbývá) zůstane a dál se zjišťuje; na dotaz se znovu zeptá až po nových videích."""
+        if not await asyncio.to_thread(catalog.keep_source, S.db, sid):
+            raise HTTPException(404, "Zdroj nenalezen.")
+        return await asyncio.to_thread(_overview)
+
     @app.post("/api/catalog/anim/refill")
     async def catalog_anim_refill(req: Request):
         """Doplní animace u už načtených videí: {source?: id}. Znovu zjistí podrobnosti videí bez adresy animace a dá další pokus
@@ -745,10 +762,10 @@ def create_app(app_state) -> FastAPI:
 
     @app.get("/api/catalog/items")
     async def catalog_items(source: int = 0, q: str = "", res: str = "", state: str = "", sort: str = "pos", dir: str = "asc",
-                            limit: int = 100, offset: int = 0, anim: str = ""):
+                            limit: int = 100, offset: int = 0, anim: str = "", age: str = ""):
         split = lambda v: [x for x in v.split(",") if x]  # noqa: E731
         source = source if source < 2 ** 62 else -1          # mimo rozsah databáze: nic nevyhovuje
-        return await asyncio.to_thread(catalog.query_items, S.db, source or None, q, split(res), split(state), sort, dir, limit, offset, split(anim))
+        return await asyncio.to_thread(catalog.query_items, S.db, source or None, q, split(res), split(state), sort, dir, limit, offset, split(anim), age)
 
     # --- aktualizace aplikace zevnitř -----------------------------------------------------------
     async def _app_call(fn, *a, **kw):

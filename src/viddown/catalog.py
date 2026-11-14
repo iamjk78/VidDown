@@ -12,6 +12,7 @@ videa; „načíst znovu vše“ (`scan_mode=all`) nabídne znovu i odmítnutá 
 from __future__ import annotations
 
 import asyncio
+import datetime
 import json
 import logging
 import os
@@ -51,6 +52,30 @@ RES_BUCKETS = {
     "unknown": "i.height is null",
 }
 SORT_COLUMNS = {"height": "height", "size": "size", "duration": "duration", "added": "added_at"}
+AGE_DAYS = {"week": 7, "month": 31, "year": 366}          # filtr stáří: videa zveřejněná v posledních N dnech
+
+
+def published_ts(info: dict | None) -> float | None:
+    """Datum zveřejnění z informací yt-dlp (UTC, sekundy): `release_timestamp`, `timestamp`, jinak `release_date` / `upload_date`
+    ve tvaru RRRRMMDD. Nesmyslné hodnoty (před rokem 1990 nebo víc než den v budoucnu) se ignorují."""
+    if not isinstance(info, dict):
+        return None
+    cands: list[float] = []
+    for k in ("release_timestamp", "timestamp"):
+        v = info.get(k)
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            cands.append(float(v))
+    for k in ("release_date", "upload_date"):
+        v = info.get(k)
+        if isinstance(v, str) and re.fullmatch(r"\d{8}", v):
+            try:
+                cands.append(datetime.datetime(int(v[:4]), int(v[4:6]), int(v[6:]), tzinfo=datetime.timezone.utc).timestamp())
+            except ValueError:
+                pass
+    for ts in cands:
+        if 631152000 <= ts <= time.time() + 86400:
+            return ts
+    return None
 THUMB_NAME = re.compile(r"^\d+\.(jpg|jpeg|png|webp|gif)$")
 ANIM_NAME = re.compile(r"^\d+\.anim\.(mp4|webm|gif|webp)$")
 ANIM_RANK = {".mp4": 0, ".webm": 0, ".m4v": 0, ".webp": 1, ".gif": 2}      # nejdřív nejmenší: video, pak WebP, pak GIF
@@ -295,7 +320,7 @@ def _flatten(entries) -> list[dict]:
         key = f"{ie} {e['id']}" if ie and e.get("id") else u
         cands = thumb_candidates(e)
         out.append({"key": key, "id": e.get("id") if not ie else None, "url": u, "title": e.get("title"),
-                    "channel": e.get("channel") or e.get("uploader"), "duration": e.get("duration"),
+                    "channel": e.get("channel") or e.get("uploader"), "duration": e.get("duration"), "published_at": published_ts(e),
                     "thumb_url": cands[0] if cands else None, "thumb_alts": cands[1:1 + THUMB_ALTS_MAX], "anim_url": anim_candidate(e)})
     return out
 
@@ -487,11 +512,11 @@ def apply_listing(db, sid: int, listing: dict, mode: str, dl_keys: set[str], dl_
                 continue
             downloaded = key in dl_keys or e["url"] in dl_urls or bool(e.get("id") and e["id"] in dl_ids)
             c.execute("insert into catalog_items(source_id, key, url, host, title, channel, duration, thumb_url, thumb_alts, height, size, search, pos, "
-                      "state, downloaded_before, detail_state, added_at, updated_at, anim_url) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                      "state, downloaded_before, detail_state, added_at, updated_at, anim_url, published_at) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                       (sid, key, e["url"], domain(e["url"]), e.get("title"), e.get("channel"), e.get("duration"), e.get("thumb_url"),
                        json.dumps(e["thumb_alts"]) if e.get("thumb_alts") else None, e.get("height"),
                        e.get("size"), norm(f"{e.get('title') or ''} {e.get('channel') or ''}"), pos, "gone" if unavailable else "new",
-                       1 if downloaded else 0, "failed" if unavailable else e.get("detail_state", "pending"), now, now, e.get("anim_url")))
+                       1 if downloaded else 0, "failed" if unavailable else e.get("detail_state", "pending"), now, now, e.get("anim_url"), e.get("published_at")))
             added += 1
         if listing.get("complete", True):                         # videa, která ze zdroje zmizela, se skryjí
             gone = [(now, h["id"]) for k, h in existing.items() if h["state"] == "new" and k not in seen]
@@ -510,7 +535,8 @@ def _like(tok: str) -> str:
     return "%" + tok.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
 
 
-def _where(source: int | None, q: str, res: list[str] | None, state: list[str] | None, anim: list[str] | None = None) -> tuple[str, list]:
+def _where(source: int | None, q: str, res: list[str] | None, state: list[str] | None, anim: list[str] | None = None,
+           age: str = "") -> tuple[str, list]:
     """Společná část dotazů (FROM … WHERE …) pro zobrazení i výběr položek. `state` (sjednocení): new, queued, downloaded,
     rejected, gone (výchozí jsou viditelné new a queued)."""
     where, args = [], []
@@ -539,6 +565,9 @@ def _where(source: int | None, q: str, res: list[str] | None, state: list[str] |
         where.append("(i.anim_file is not null and i.anim_file != '')")
     elif want == {"no"}:
         where.append("(i.anim_file is null or i.anim_file = '')")
+    if age in AGE_DAYS:                                                       # jen videa se známým datem zveřejnění
+        where.append("(i.published_at > ?)")
+        args.append(time.time() - AGE_DAYS[age] * 86400)
     buckets = [RES_BUCKETS[r] for r in (res or []) if r in RES_BUCKETS]
     if buckets:
         where.append("(" + " or ".join(f"({b})" for b in buckets) + ")")
@@ -546,12 +575,15 @@ def _where(source: int | None, q: str, res: list[str] | None, state: list[str] |
 
 
 def query_items(db, source: int | None = None, q: str = "", res: list[str] | None = None, state: list[str] | None = None,
-                sort: str = "pos", direction: str = "asc", limit: int = 100, offset: int = 0, anim: list[str] | None = None) -> dict:
+                sort: str = "pos", direction: str = "asc", limit: int = 100, offset: int = 0, anim: list[str] | None = None,
+                age: str = "") -> dict:
     """Položky katalogu s filtry, řazením a stránkováním."""
-    sql_from, args = _where(source, q, res, state, anim)
+    sql_from, args = _where(source, q, res, state, anim, age)
     d = "desc" if str(direction).lower() == "desc" else "asc"
     col = SORT_COLUMNS.get(sort)
-    if col:       # čísla: neznámé hodnoty vždy nakonec
+    if sort == "published":      # neznámé datum (null i 0) vždy nakonec
+        order = f"(i.published_at is null or i.published_at = 0), i.published_at {d}, s.title_search, i.source_id, i.pos, i.id"
+    elif col:       # čísla: neznámé hodnoty vždy nakonec
         order = f"(i.{col} is null), i.{col} {d}, s.title_search, i.source_id, i.pos, i.id"
     elif sort == "source":
         order = f"s.title_search {d}, i.source_id {d}, i.pos, i.id"
@@ -589,7 +621,7 @@ def select_ids(db, spec) -> list[int]:
             or not isinstance(res, list) or not isinstance(state, list) or not isinstance(anim, list) \
             or not all(isinstance(x, str) for x in res + state + anim):
         raise ValueError("invalid filter")
-    sql_from, args = _where(src, q, res, state, anim)
+    sql_from, args = _where(src, q, res, state, anim, f.get("age") if isinstance(f.get("age"), str) else "")
     rows = db.query(f"select i.id {sql_from} order by i.id limit ?", [*args, MAX_SELECT + 1])
     if len(rows) > MAX_SELECT:
         raise ValueError("too many items")
@@ -717,7 +749,7 @@ def reconcile(db, folder: Path | None = None) -> dict:
 def item_out(r: dict) -> dict:
     return {"id": r["id"], "source_id": r["source_id"], "source_title": r.get("source_title"), "source_folder": r.get("source_folder"),
             "title": r["title"], "channel": r["channel"], "url": r["url"], "duration": r["duration"], "height": r["height"],
-            "size": r["size"], "thumb_url": r["thumb_url"], "has_thumb": bool(r["thumb_file"]),
+            "size": r["size"], "published": r["published_at"] or None, "thumb_url": r["thumb_url"], "has_thumb": bool(r["thumb_file"]),
             "thumb": f"/api/catalog/thumb/{r['id']}?v={int(r['updated_at'] or 0)}" if r["thumb_file"] else None,
             "anim": f"/api/catalog/anim/{r['id']}?v={int(r['updated_at'] or 0)}" if r.get("anim_file") else None,
             "anim_kind": (("video" if r["anim_file"].endswith((".mp4", ".webm")) else "image") if r.get("anim_file") else None), "state": r["state"],
@@ -732,7 +764,7 @@ def sources_out(db) -> dict:
         "select source_id, sum(state in ('new','queued')) items, sum(state='queued') queued, "
         "sum(state in ('new','queued') and detail_state='done') details_done, sum(state='gone') gone, "
         "sum(state in ('new','queued') and downloaded_before=1) downloaded_before, "
-        "sum(state in ('new','queued') and rejected_before=1) rejected_before from catalog_items group by source_id")}
+        "sum(state in ('new','queued') and rejected_before=1) rejected_before, count(*) total from catalog_items group by source_id")}
     out, detached = [], []
     for s in db.query("select * from catalog_sources order by id"):
         c = counts.get(s["id"]) or {}
@@ -744,9 +776,24 @@ def sources_out(db) -> dict:
                     "error": s["error"], "added_at": s["added_at"], "last_scan": s["last_scan"],
                     "items": c.get("items") or 0, "queued": c.get("queued") or 0, "details_done": c.get("details_done") or 0,
                     "gone": c.get("gone") or 0, "downloaded_before": c.get("downloaded_before") or 0,
-                    "rejected_before": c.get("rejected_before") or 0})
+                    "rejected_before": c.get("rejected_before") or 0,
+                    # vyřízený zdroj: sken dokončen, žádné video k vybrání ani ve frontě, ale zdroj nějaká videa měl; po volbě „Ponechat“
+                    # se znovu hlásí až když přibudou nová videa (změní se celkový počet)
+                    "exhausted": s["status"] == "done" and not c.get("items") and (c.get("total") or 0) > 0 and s["keep_total"] != c.get("total")})
     return {"sources": out, "detached": detached, "items": sum(x["items"] for x in out) + sum(x["items"] for x in detached),
             "scanning": sum(1 for x in out if x["status"] in ("queued", "scanning"))}
+
+
+def keep_source(db, sid: int) -> bool:
+    """Volba „Ponechat“ u vyřízeného zdroje: zdroj se dál zjišťuje a ptát se na něj bude až po příchodu nových videí."""
+    with db.conn() as c:
+        c.execute("begin immediate")
+        if c.execute("select 1 from catalog_sources where id=?", (sid,)).fetchone() is None:
+            c.execute("rollback")
+            return False
+        c.execute("update catalog_sources set keep_total=(select count(*) from catalog_items where source_id=?) where id=?", (sid, sid))
+        c.execute("commit")
+    return True
 
 
 # --- zjišťování na pozadí -------------------------------------------------------------------------

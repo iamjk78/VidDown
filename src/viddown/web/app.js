@@ -69,6 +69,12 @@ function fmtDate(ts) {
   if (day === 0) return T('dnes ', 'today ') + hm; if (day === 1) return T('včera ', 'yesterday ') + hm;
   return d.toLocaleDateString(LANG === 'cs' ? 'cs-CZ' : 'en-GB');
 }
+function fmtPub(ts) {                                                         // datum zveřejnění videa: datum a (u čerstvých) stáří
+  if (!ts) return ''; const d = new Date(ts * 1000), days = Math.floor((Date.now() - d.getTime()) / 864e5);
+  const abs = d.toLocaleDateString(LANG === 'cs' ? 'cs-CZ' : 'en-GB');
+  if (days < 0 || days > 60) return abs;
+  return abs + ' · ' + (days === 0 ? T('dnes', 'today') : days === 1 ? T('včera', 'yesterday') : T(`před ${days} dny`, `${days} days ago`));
+}
 const pct = p => p == null ? '' : Math.floor(p * 100) + ' %';
 const srcIcon = s => ({ telegram: ic('send', 12), cli: ic('terminal', 12), subscription: ic('rss', 12) }[s] || ic('download', 12));
 const srcName = s => ({ telegram: 'Telegram', cli: 'CLI', subscription: T('Odběr', 'Subscription') }[s] || 'GUI');
@@ -1188,15 +1194,16 @@ const CAT_RES = () => [['2160', '2160p'], ['1440', '1440p'], ['1080', '1080p'], 
 const CAT_STATES = () => [['new', T('nové', 'new')], ['queued', T('ve frontě', 'queued')], ['downloaded', T('staženo dříve', 'downloaded before')],
   ['rejected', T('dříve odmítnuté', 'rejected before')], ['gone', T('nedostupné', 'unavailable')]];
 const CAT_SORTS = () => [['pos', T('pořadí ve zdroji', 'order in source')], ['source', T('zdroj', 'source')], ['height', T('rozlišení', 'resolution')],
-  ['size', T('velikost', 'size')], ['duration', T('délka', 'duration')], ['added', T('přidáno', 'added')]];
+  ['size', T('velikost', 'size')], ['duration', T('délka', 'duration')], ['published', T('datum zveřejnění', 'publication date')], ['added', T('přidáno do katalogu', 'added to catalog')]];
+const CAT_AGES = () => [['week', T('týden', 'week')], ['month', T('měsíc', 'month')], ['year', T('rok', 'year')]];
 const CAT_WIDTH = { S: 180, M: 280, L: 420 };
 const CAT_LIMITS = [25, 50, 100, 200, 500];
 function catPref(k, def, allowed) { try { const v = localStorage.getItem('vd_cat_' + k); return v != null && (!allowed || allowed.map(String).includes(v)) ? v : def; } catch (e) { return def; } }
 function catSetPref(k, v) { try { localStorage.setItem('vd_cat_' + k, v); } catch (e) { /* bez úložiště */ } }
-const CAT = { q: '', source: 0, res: [], state: [], anim: [], offset: 0, sel: new Set(), selAll: null, exclude: new Set(), data: null, ov: null, sig: '', seq: 0, qt: null,
+const CAT = { q: '', source: 0, res: [], state: [], anim: [], age: '', done: new Set(), offset: 0, sel: new Set(), selAll: null, exclude: new Set(), data: null, ov: null, sig: '', seq: 0, qt: null,
   sort: catPref('sort', 'pos', CAT_SORTS().map(x => x[0])), dir: catPref('dir', 'asc', ['asc', 'desc']), limit: +catPref('limit', 100, CAT_LIMITS), thumb: catPref('thumb', 'M', ['S', 'M', 'L']) };
 
-function catFilter() { return { source: CAT.source || null, q: CAT.q, res: CAT.res.slice(), state: CAT.state.slice(), anim: CAT.anim.slice() }; }
+function catFilter() { return { source: CAT.source || null, q: CAT.q, res: CAT.res.slice(), state: CAT.state.slice(), anim: CAT.anim.slice(), age: CAT.age }; }
 function catQuery() {
   const p = new URLSearchParams({ sort: CAT.sort, dir: CAT.dir, limit: CAT.limit, offset: CAT.offset });
   if (CAT.source) p.set('source', CAT.source);
@@ -1204,6 +1211,7 @@ function catQuery() {
   if (CAT.res.length) p.set('res', CAT.res.join(','));
   if (CAT.state.length) p.set('state', CAT.state.join(','));
   if (CAT.anim.length) p.set('anim', CAT.anim.join(','));
+  if (CAT.age) p.set('age', CAT.age);
   return p.toString();
 }
 const catTotal = () => (CAT.data ? CAT.data.total : 0);
@@ -1213,19 +1221,20 @@ function catClearSel() { CAT.sel.clear(); CAT.exclude.clear(); CAT.selAll = null
 
 function renderCatalog() {
   $('#main').innerHTML = `<div class="row gap16 wrap"><div><h1>${T('Katalog', 'Catalog')}</h1><div class="t2" style="margin-top:3px">${T('Videa ze zdrojů k výběru: nic se nestahuje, dokud se nerozhodnete', 'Videos from your sources to pick from: nothing downloads until you decide')}</div></div>
-    <div class="grow"></div><span class="row gap6 fs13" id="catauto"></span><button class="btn" id="cataf" title="${T('Znovu zjistí podrobnosti videí bez animace a zkusí znovu stáhnout ty, které byly nad limitem. Zapněte před tím stahování animací v Nastavení › Katalog.', 'Re-checks videos without an animation and retries those that were over the limit. Turn on animation downloads in Settings › Catalog first.')}">${ic('play', 14)} ${T('Doplnit animace', 'Fill in animations')}</button><button class="btn" id="catpause"></button><button class="btn primary lg" id="catadd">${ic('plus', 15)} ${T('Přidat zdroje', 'Add sources')}</button></div>
+    <div class="grow"></div><span class="row gap6 fs13" id="catauto"></span><button class="btn" id="cataf" title="${T('Znovu zjistí podrobnosti videí bez animace a zkusí znovu stáhnout ty, které byly nad limitem. Zapněte před tím stahování animací v Nastavení › Katalog.', 'Re-checks videos without an animation and retries those that were over the limit. Turn on animation downloads in Settings › Catalog first.')}">${ic('play', 14)} ${T('Doplnit animace', 'Fill in animations')}</button><button class="btn" id="catdf" title="${T('Znovu zjistí podrobnosti videí, u kterých chybí datum zveřejnění (kvůli řazení podle stáří). Web, který datum nenabízí, se neopakuje.', 'Re-checks videos without a publication date (for sorting by age). Sites that do not offer a date are not retried.')}">${ic('clock', 14)} ${T('Doplnit data', 'Fill in dates')}</button><button class="btn" id="catpause"></button><button class="btn primary lg" id="catadd">${ic('plus', 15)} ${T('Přidat zdroje', 'Add sources')}</button></div>
     <div id="catbanner" class="col gap8"></div><div id="catinfo"></div>
     <div class="catlayout"><aside class="catside" id="catside"><div class="catsidehd">${T('Zdroje', 'Sources')}</div><div id="catsrctools" class="catsrctools"></div><div id="catsrcinfo"></div><div id="catsrc" class="catbadges"></div></aside>
     <div class="catmain"><div class="card cattools"><div class="row gap8 wrap">
       <div class="inwrap" style="height:32px;width:280px">${ic('search', 14)}<input id="catq" placeholder="${T('Hledat v názvu videa a kanálu…', 'Search video and channel names…')}" value="${esc(CAT.q)}" autocomplete="off"><button class="ibtn" id="catqx" type="button" title="${T('Smazat (Esc)', 'Clear (Esc)')}" ${CAT.q ? '' : 'hidden'}>${ic('x', 12)}</button></div>
       <select class="input sm" id="catsrcsel"></select>
       <select class="input sm" id="catsort">${CAT_SORTS().map(([v, l]) => `<option value="${v}" ${CAT.sort === v ? 'selected' : ''}>${T('Řadit', 'Sort')}: ${l}</option>`).join('')}</select>
-      <button class="btn sm" id="catdir" title="${T('Směr řazení', 'Sort direction')}">${CAT.dir === 'desc' ? '↓' : '↑'}</button>
+      <button class="btn sm" id="catdir" title="${T('Směr řazení: ↑ vzestupně (u data od nejstaršího), ↓ sestupně (u data od nejnovějšího)', 'Sort direction: ↑ ascending (oldest first for dates), ↓ descending (newest first for dates)')}">${CAT.dir === 'desc' ? '↓' : '↑'}</button>
       <select class="input sm" id="catlimit">${CAT_LIMITS.map(n => `<option value="${n}" ${CAT.limit === n ? 'selected' : ''}>${T('Na stránku', 'Per page')}: ${n}</option>`).join('')}</select>
       <span class="seg" id="catsize" title="${T('Velikost miniatur', 'Thumbnail size')}">${['S', 'M', 'L'].map(s => `<button data-size="${s}" class="${CAT.thumb === s ? 'on' : ''}">${s}</button>`).join('')}</span></div>
       <div class="row gap6 wrap" style="margin-top:8px"><span class="t2 fs12">${T('Rozlišení', 'Resolution')}:</span><span id="catres" class="row gap4 wrap"></span>
         <span class="t2 fs12" style="margin-left:10px">${T('Stav', 'State')}:</span><span id="catstate" class="row gap4 wrap"></span>
-        <span class="t2 fs12" style="margin-left:10px">${T('Animace', 'Animation')}:</span><span id="catanimf" class="row gap4 wrap"></span></div></div>
+        <span class="t2 fs12" style="margin-left:10px">${T('Animace', 'Animation')}:</span><span id="catanimf" class="row gap4 wrap"></span>
+        <span class="t2 fs12" style="margin-left:10px">${T('Zveřejněno za poslední', 'Published in the last')}:</span><span id="catagef" class="row gap4 wrap"></span></div></div>
     <div class="card catsel" id="catsel"></div><div id="catgrid" class="catgrid"></div><div id="catpager" class="row gap8 wrap" style="justify-content:center"></div></div></div><div id="cattip" class="cattip" hidden></div>`;
   const reload = fn => { fn(); CAT.offset = 0; catClearSel(); catLoad(); };
   const q = $('#catq');
@@ -1233,11 +1242,16 @@ function renderCatalog() {
   q.onkeydown = e => { if (e.key === 'Escape' && q.value) { q.value = ''; q.oninput(); } };
   $('#catqx').onclick = () => { q.value = ''; q.oninput(); q.focus(); };
   $('#catsrcsel').onchange = e => reload(() => { CAT.source = +e.target.value; });
-  $('#catsort').onchange = e => { CAT.sort = e.target.value; catSetPref('sort', CAT.sort); reload(() => {}); };
+  $('#catsort').onchange = e => {
+    CAT.sort = e.target.value; catSetPref('sort', CAT.sort);
+    if (CAT.sort === 'published' && CAT.dir !== 'desc') { CAT.dir = 'desc'; catSetPref('dir', 'desc'); $('#catdir').textContent = '↓'; }       // datum: nejdřív nejnovější
+    reload(() => {});
+  };
   $('#catdir').onclick = () => { CAT.dir = CAT.dir === 'asc' ? 'desc' : 'asc'; catSetPref('dir', CAT.dir); $('#catdir').textContent = CAT.dir === 'desc' ? '↓' : '↑'; reload(() => {}); };
   $('#catlimit').onchange = e => { CAT.limit = +e.target.value; catSetPref('limit', CAT.limit); reload(() => {}); };
   $$('#catsize [data-size]').forEach(b => b.onclick = () => { CAT.thumb = b.dataset.size; catSetPref('thumb', CAT.thumb); $$('#catsize [data-size]').forEach(x => x.classList.toggle('on', x === b)); catPaintGrid(); });
   $('#catres').onclick = e => { const b = e.target.closest('[data-res]'); if (b) reload(() => { const v = b.dataset.res, i = CAT.res.indexOf(v); i >= 0 ? CAT.res.splice(i, 1) : CAT.res.push(v); }); };
+  $('#catagef').onclick = e => { const b = e.target.closest('[data-age]'); if (b) reload(() => { CAT.age = CAT.age === b.dataset.age ? '' : b.dataset.age; }); };
   $('#catanimf').onclick = e => { const b = e.target.closest('[data-an]'); if (b) reload(() => { const v = b.dataset.an, i = CAT.anim.indexOf(v); i >= 0 ? CAT.anim.splice(i, 1) : CAT.anim.push(v); }); };
   $('#catstate').onclick = e => { const b = e.target.closest('[data-st]'); if (b) reload(() => { const v = b.dataset.st, i = CAT.state.indexOf(v); i >= 0 ? CAT.state.splice(i, 1) : CAT.state.push(v); }); };
   $('#catadd').onclick = openCatAdd;
@@ -1247,6 +1261,12 @@ function renderCatalog() {
     if (!r) return;
     CAT.ov = r.overview; catPaintSources();
     toast(r.details || r.retry || r.pages ? T(`Doplňuji animace: znovu zjistím ${r.details} videí, další pokus u ${r.retry}, stránky videí znovu u ${r.pages}`, `Filling in animations: re-checking ${r.details} videos, retrying ${r.retry}, video pages again for ${r.pages}`) : T('Není co doplnit', 'Nothing to fill in'));
+  };
+  $('#catdf').onclick = async () => {
+    const r = await act(() => api('/api/catalog/dates/refill', { method: 'POST', body: CAT.source ? { source: CAT.source } : {} }));
+    if (!r) return;
+    CAT.ov = r.overview; catPaintSources();
+    toast(r.details ? T(`Doplňuji data: znovu zjistím ${r.details} videí`, `Filling in dates: re-checking ${r.details} videos`) : T('Není co doplnit', 'Nothing to fill in'));
   };
   catPaintAuto();
   $('#catpause').onclick = async () => { const paused = CAT.ov && CAT.ov.details.paused; const r = await act(() => api('/api/catalog/pause', { method: 'POST', body: { paused: !paused } })); if (r) { CAT.ov = r; catPaintSources(); } };
@@ -1278,7 +1298,7 @@ async function catLoad() {
     if (seq !== CAT.seq || App.view !== 'catalog') return;
     CAT.ov = ov; CAT.data = data; CAT.sig = JSON.stringify(data);
     if (data.total && !data.items.length && CAT.offset > 0) { CAT.offset = Math.max(0, (Math.ceil(data.total / CAT.limit) - 1) * CAT.limit); return catLoad(); }
-    catPaintAll();
+    catPaintAll(); catDonePrompt();
   } catch (e) { if (e.message !== 'auth') toast(e.message, true); }
 }
 async function catPoll() {
@@ -1287,7 +1307,7 @@ async function catPoll() {
   try {
     const [ov, data] = await Promise.all([api('/api/catalog'), api('/api/catalog/items?' + catQuery())]);
     if (seq !== CAT.seq || App.view !== 'catalog') return;
-    CAT.ov = ov; catPaintSources(); catPaintTools();
+    CAT.ov = ov; catPaintSources(); catPaintTools(); catDonePrompt();
     const sig = JSON.stringify(data);
     if (sig !== CAT.sig) { CAT.sig = sig; CAT.data = data; catPaintGrid(); catPaintSel(); catPaintPager(); }
   } catch (e) { /* další průchod to zkusí znovu */ }
@@ -1299,6 +1319,7 @@ function catPaintBanner() {
 function catPaintTools() {
   const ov = CAT.ov; if (!$('#catres')) return;
   $('#catres').innerHTML = CAT_RES().map(([v, l]) => `<button class="chip ${CAT.res.includes(v) ? 'on' : ''}" data-res="${v}">${l}</button>`).join('');
+  $('#catagef').innerHTML = CAT_AGES().map(([v, l]) => `<button class="chip ${CAT.age === v ? 'on' : ''}" data-age="${v}">${l}</button>`).join('');
   $('#catanimf').innerHTML = [['yes', T('s animací', 'with animation')], ['no', T('bez animace', 'without animation')]].map(([v, l]) => `<button class="chip ${CAT.anim.includes(v) ? 'on' : ''}" data-an="${v}">${l}</button>`).join('');
   $('#catstate').innerHTML = CAT_STATES().map(([v, l]) => `<button class="chip ${CAT.state.includes(v) ? 'on' : ''}" data-st="${v}">${l}</button>`).join('');
   const sel = $('#catsrcsel');
@@ -1362,6 +1383,18 @@ function catPaintSources() {
   $('#catinfo').innerHTML = bits.length ? `<div class="row gap10 wrap fs12" style="padding:2px 4px">${bits.join('')}</div>` : '';
   $('#catinfo').onclick = catSrcClick;
 }
+/* Vyřízený zdroj (nezbylo v něm žádné video k vybrání ani ve frontě): zeptá se, jestli ho odebrat, nebo ponechat pro budoucí videa */
+function catDonePrompt() {
+  if (App.view !== 'catalog' || CAT.busy || $('#modal-root .overlay') || !CAT.ov) return;
+  const src = CAT.ov.sources.find(x => x.exhausted && !CAT.done.has(x.id)); if (!src) return;
+  CAT.done.add(src.id);                                                                  // v této relaci se na zdroj zeptá jen jednou
+  const m = modal(`<div class="mh">${ic('check', 18)}<h2>${T('Zdroj je zpracován', 'Source finished')}</h2></div>
+    <div class="mb col gap10"><div class="fs13"><b>${esc(src.title || src.url)}</b></div>
+      <div class="fs13">${T('Ve zdroji už nezbývá žádné video k výběru ani ve frontě stahování. Má se zdroj odebrat, nebo ho ponechat a dál z něj získávat budoucí videa?', 'No video is left to choose from or waiting in the download queue. Remove the source, or keep it to get future videos?')}</div></div>
+    <div class="mf"><button class="btn danger" id="catdone-rm">${T('Odebrat zdroj…', 'Remove source…')}</button><button class="btn primary" id="catdone-keep">${T('Ponechat zdroj', 'Keep the source')}</button></div>`);
+  $('#catdone-keep', m.el).onclick = async () => { m.close(); const r = await act(() => api(`/api/catalog/sources/${src.id}/keep`, { method: 'POST' }), T('Zdroj zůstává, nová videa se budou přidávat', 'Source kept, new videos will be added')); if (r) { CAT.ov = r; catPaintSources(); } };
+  $('#catdone-rm', m.el).onclick = () => { m.close(); catRemoveDialog(src.id); };
+}
 function catRemoveDialog(sid) {
   const src = CAT.ov && CAT.ov.sources.find(x => x.id === sid); if (!src) return;
   const m = modal(`<div class="mh">${ic('trash', 18)}<h2>${T('Odebrat zdroj', 'Remove source')}</h2></div>
@@ -1408,7 +1441,7 @@ function catCard(it) {
     ${h ? `<span class="vb1">${h}</span>` : ''}<label class="vck"><input type="checkbox" data-csel="${it.id}" ${sel ? 'checked' : ''}></label>${it.duration ? `<span class="vb2">${fmtDur(it.duration)}</span>` : ''}</div>
     <div class="vt"><a href="${esc(it.url)}" target="_blank" rel="noopener" title="${esc(it.title || it.url)}">${esc(it.title || it.url)}</a></div>
     <div class="vm ell" title="${esc(it.source_title || '')}">${esc(it.source_title || '')}${it.channel && it.channel !== it.source_title ? ' · ' + esc(it.channel) : ''}</div>
-    <div class="vm2"><span>${meta}</span>${badges}</div>
+    <div class="vm2"><span>${meta}</span>${it.published ? `<span class="t2" title="${T('Datum zveřejnění videa', 'Video publication date')}">${fmtPub(it.published)}</span>` : ''}${badges}</div>
     <div class="vact"><a class="btn sm ib" href="${esc(it.url)}" target="_blank" rel="noopener noreferrer" data-cact="open" title="${T('Otevřít stránku videa na webu', 'Open the video page on the site')}">${ic('external', 14)}</a>
       <button class="btn sm ib" data-cact="copy" data-url="${esc(it.url)}" title="${T('Zkopírovat adresu stránky videa', 'Copy the video page address')}">${ic('copy', 14)}</button>
       <button class="btn sm primary" data-cact="download" data-id="${it.id}" data-dl="${it.downloaded_before ? 1 : 0}" ${it.state === 'new' ? '' : 'disabled'}>${ic('download', 13)} ${T('Stáhnout', 'Download')}</button>

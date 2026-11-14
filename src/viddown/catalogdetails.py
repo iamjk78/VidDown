@@ -204,11 +204,11 @@ class DetailWorker:
             n = c.execute(
                 "update catalog_items set height=coalesce(?, height), size=coalesce(?, size), duration=coalesce(?, duration), "
                 "title=coalesce(?, title), channel=coalesce(?, channel), thumb_url=coalesce(?, thumb_url), thumb_alts=coalesce(?, thumb_alts), "
-                "anim_url=coalesce(?, anim_url), "
+                "anim_url=coalesce(?, anim_url), published_at=coalesce(?, published_at, 0), "
                 "search=?, detail_state='done', detail_error=null, updated_at=? "
                 "where id=? and detail_state=? and state in ('new','queued')",
                 (ytdlp.best_height(info), ytdlp.size_estimate(info), info.get("duration"), title, channel, urls[0] if urls else None,
-                 json.dumps(urls[1:1 + catalog.THUMB_ALTS_MAX]) if len(urls) > 1 else None, catalog.anim_source(info),
+                 json.dumps(urls[1:1 + catalog.THUMB_ALTS_MAX]) if len(urls) > 1 else None, catalog.anim_source(info), catalog.published_ts(info),
                  catalog.norm(f"{title or item['title'] or ''} {channel or item['channel'] or ''}"), time.time(), item["id"], expect)).rowcount
         if n and urls and urls[0] != item.get("thumb_url"):      # jiná (obvykle lepší) miniatura než ze seznamu: nahradit
             name = await asyncio.to_thread(download_thumb, self.folder(), item["id"], urls, thumbs.referer_of(item.get("url")))
@@ -480,12 +480,12 @@ class DetailWorker:
             "select sum(detail_state='pending') pending, sum(detail_state='slow') slow, sum(detail_state='done') done, sum(detail_state='failed') failed, "
             "sum(thumb_file is null and thumb_url is not null) thumbs_pending, sum(thumb_file = '') thumbs_failed, "
             "sum(anim_file is null and anim_url is not null and anim_url != '') anim_pending, sum(anim_url is null and detail_state='done') anim_scan, sum(anim_file is not null and anim_file != '') anim_have, "
-            "sum(anim_file = '') anim_failed "
+            "sum(anim_file = '') anim_failed, sum(detail_state='done' and published_at is null) no_date, sum(published_at > 0) have_date "
             "from catalog_items where state in ('new','queued')")[0]
         now = time.monotonic()
         return {"pending": r["pending"] or 0, "slow": r["slow"] or 0, "done": r["done"] or 0, "failed": r["failed"] or 0,
                 "thumbs_pending": r["thumbs_pending"] or 0, "thumbs_failed": r["thumbs_failed"] or 0,
-                "anim_pending": r["anim_pending"] or 0, "anim_scan": r["anim_scan"] or 0, "anim_have": r["anim_have"] or 0, "anim_failed": r["anim_failed"] or 0,
+                "anim_pending": r["anim_pending"] or 0, "anim_scan": r["anim_scan"] or 0, "anim_have": r["anim_have"] or 0, "anim_failed": r["anim_failed"] or 0, "no_date": r["no_date"] or 0, "have_date": r["have_date"] or 0,
                 "paused": self.paused(), "waiting_for_lists": self.listing_busy(), "active_hosts": sorted(self.active),
                 "backoff": [{"host": h, "seconds": int(b["until"] - now), "reason": b["reason"]} for h, b in sorted(self.backoff.items())
                             if b["until"] > now]}
@@ -530,6 +530,18 @@ def refill_anims(db, source: int | None = None) -> dict:
                       "and anim_url is null and anim_file is null" + vis + where, args).rowcount
         c.execute("commit")
     return {"details": d, "retry": r, "pages": g}
+
+
+def refill_dates(db, source: int | None = None) -> dict:
+    """„Doplnit data“: viditelným videím bez zjištěného data zveřejnění znovu zjistí podrobnosti (po jednom na web s pauzou).
+    Videa, kde web datum nenabízí (`published_at=0`), se neopakují. Vrací {"details": počet}."""
+    where, args = "", []
+    if source:
+        where, args = " and source_id=?", [int(source)]
+    with db.conn() as c:
+        n = c.execute("update catalog_items set detail_state='pending', detail_error=null where detail_state='done' and published_at is null "
+                      "and state in ('new','queued')" + where, args).rowcount
+    return {"details": n}
 
 
 async def task(st, stop: asyncio.Event) -> None:
