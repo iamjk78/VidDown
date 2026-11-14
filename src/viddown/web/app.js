@@ -1474,7 +1474,7 @@ async function catRemove(spec, count) {
   CAT.busy = false;
   if (r) { if (r.skipped) toast(T(`Přeskočeno ${r.skipped} (ve frontě nebo už odstraněno)`, `Skipped ${r.skipped} (queued or already removed)`)); catClearSel(); catLoad(); }
 }
-/* Animace v kartě: načte se a přehraje až při najetí myší (dotyk: klepnutí na náhled), jinak se nic nestahuje ani nepřehrává */
+/* Animace v kartě: načte se a přehraje až při najetí myší na kartu (dotyk: klepnutí na náhled), jinak se nic nestahuje ani nepřehrává */
 function catAnimOn(th, on) {
   const el = $('.vanim', th); if (!el) return;
   if (on) {
@@ -1495,8 +1495,9 @@ function catAnimOn(th, on) {
 }
 function catAnimHover(e) {
   if (matchMedia('(hover: none)').matches) return;                                    // dotyk: přepíná jen klepnutí (jinak by emulované najetí animaci hned vypnulo)
-  const th = e.target.closest && e.target.closest('.vth.has-anim'); if (!th) return;
-  const inside = th.contains(e.relatedTarget);
+  const card = e.target.closest && e.target.closest('.vcard'); if (!card) return;     // animace běží, dokud je kurzor kdekoli v rámečku karty
+  const th = $('.vth.has-anim', card); if (!th) return;
+  const inside = card.contains(e.relatedTarget);
   if (e.type === 'mouseover' && !inside) catAnimOn(th, true);
   if (e.type === 'mouseout' && !inside) catAnimOn(th, false);
 }
