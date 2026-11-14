@@ -436,9 +436,21 @@ class DetailWorker:
             self.next_at[host] = time.monotonic() + self.gap()
 
     # --- animace ze stránek zdroje (výpis videí): jedna stránka = animace desítek videí, proto dřív než stránky videí ---------
+    def source_scan_ready(self) -> bool:
+        """Smí se teď hledat animace na stránkách zdrojů? Jako `pages_ready`, ale nečeká na rychlou práci ani na stahování animací: pár
+        dotazů na výpis nahradí stovky dotazů na podrobnosti a stránky videí, takže má jít první."""
+        s = self.st.settings
+        return bool(s.get("catalog_anim") and s.get("catalog_anim_pages")) and self.allowed_now() and not self.listing_busy()
+
+    def scan_blocked_hosts(self) -> set[str]:
+        """Weby, kterým se prohledání zdroje odloží: jen odložené po omezení a ty, kde už jiný sken stránky běží. Pauza mezi dotazy
+        podrobností (`next_at`) se nezohledňuje, jinak by nepřetržitá práce na podrobnostech hledání animací nikdy nepustila."""
+        now = time.monotonic()
+        return set(self.page_hosts) | {h for h, b in self.backoff.items() if b["until"] > now}
+
     def pick_source_scan(self, excluded: set[str]) -> dict | None:
         for r in self.db.query(
-                "select s.id, s.url, (select max(i.id) from catalog_items i where i.source_id=s.id and i.anim_url is null and i.detail_state='done' "
+                "select s.id, s.url, (select max(i.id) from catalog_items i where i.source_id=s.id and i.anim_url is null "
                 "and i.state in ('new','queued')) top from catalog_sources s where s.status='done' and top is not null order by s.id"):
             if self.src_scanned.get(r["id"], 0) >= r["top"]:
                 continue
@@ -469,7 +481,7 @@ class DetailWorker:
                         failed = True
                     break
                 items = await asyncio.to_thread(
-                    self.db.query, "select id, url, thumb_url from catalog_items where source_id=? and anim_url is null and detail_state='done' "
+                    self.db.query, "select id, url, thumb_url from catalog_items where source_id=? and anim_url is null "
                     "and state in ('new','queued')", (sid,))
                 if not items:
                     break
@@ -503,11 +515,12 @@ class DetailWorker:
     async def pages_loop(self, stop: asyncio.Event) -> None:
         while not stop.is_set():
             try:
-                if await asyncio.to_thread(self.pages_ready):
-                    src = await asyncio.to_thread(self.pick_source_scan, self.excluded_hosts())
+                if await asyncio.to_thread(self.source_scan_ready):
+                    src = await asyncio.to_thread(self.pick_source_scan, self.scan_blocked_hosts())
                     if src is not None:
                         await self.process_source_scan(src)
                         continue
+                if await asyncio.to_thread(self.pages_ready):
                     item = await asyncio.to_thread(self.pick_page_scan, self.excluded_hosts())
                     if item is not None:
                         await self.process_page_scan(item)

@@ -135,3 +135,20 @@ def test_source_scan_respects_excluded_hosts_and_runs_before_video_pages(st, fak
     w = cd.DetailWorker(st)
     assert w.pick_source_scan({"x.example"}) is None
     assert w.pick_source_scan(set()) is not None and w.pick_page_scan(set()) is not None     # obojí čeká; smyčka bere nejdřív zdroj
+
+
+def test_source_scan_does_not_wait_for_pending_details_or_the_gap_between_requests(st, fake, pages):
+    seed(st, fake, [11111111, 22222222])
+    with st.db.conn() as c:
+        c.execute("update catalog_items set detail_state='pending'")                  # po „Doplnit animace“ čeká spousta podrobností
+    w = cd.DetailWorker(st)
+    w.next_at["x.example"] = 10 ** 12                                                 # pauza mezi dotazy podrobností běží
+    assert w.source_scan_ready()                                                      # rychlá práce hledání výpisu nezdržuje
+    src = w.pick_source_scan(w.scan_blocked_hosts())
+    assert src is not None
+    pages.answers[SRC] = card(11111111, "k11111111abcdef")
+    asyncio.run(w.process_source_scan(src))
+    assert anims(st)["youtube k11111111abcdef"].startswith("https://cdn.x/v/11111111/")
+    w.page_hosts.add("x.example")
+    w.src_scanned.clear()
+    assert w.pick_source_scan(w.scan_blocked_hosts()) is None                          # jiný sken téhož webu právě běží
