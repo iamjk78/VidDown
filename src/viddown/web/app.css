@@ -197,6 +197,22 @@ button.chip{cursor:pointer}
 .schwin .x{border:0;background:none;color:var(--muted);cursor:pointer;font-weight:700;padding:0 4px}.schwin .x:hover{color:var(--err)}.schwin .x:disabled{opacity:.35;cursor:default}
 
 /* katalog */
+.catlayout{display:grid;grid-template-columns:232px minmax(0,1fr);gap:14px;align-items:start;margin-top:10px}
+.catmain{min-width:0;display:flex;flex-direction:column;gap:10px}
+.catside{position:sticky;top:8px;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:10px;display:flex;flex-direction:column;gap:8px;max-height:calc(100vh - 24px)}
+.catsidehd{font-weight:700;font-size:13px}
+.catsrctools{display:flex;flex-wrap:wrap;gap:6px}
+.catsrcsel{background:var(--surface2);border-radius:10px;padding:8px 10px;display:flex;flex-direction:column;gap:4px}
+.catbadges{display:flex;flex-direction:column;gap:6px;overflow-y:auto;min-height:0}
+.catbadges.rounds{flex-direction:row;flex-wrap:wrap}
+.srcb{display:flex;align-items:center;gap:8px;min-height:30px;padding:4px 10px;border-radius:999px;border:1px solid var(--border);background:var(--surface);color:inherit;font:inherit;font-size:13px;cursor:pointer;text-align:left}
+.srcb:hover{border-color:var(--border2)}.srcb.on{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent) inset;font-weight:600}
+.srcb .dot{flex:none}.srcb .srcn{flex:none;font-size:11.5px;color:var(--muted);background:var(--surface2);border-radius:999px;padding:0 7px}
+.srcb.round{width:38px;height:38px;min-height:0;padding:0;justify-content:center;position:relative;background:hsl(var(--hue),55%,45%);border-color:transparent;color:#fff}
+.srcb.round.on{box-shadow:0 0 0 2px var(--surface),0 0 0 4px var(--accent)}.srcb.round .dot{position:absolute;right:1px;top:1px;border:1.5px solid var(--surface)}.srcl{font-weight:700}
+.cattip{position:fixed;z-index:60;width:300px;background:var(--surface);border:1px solid var(--border2);border-radius:12px;padding:10px 12px;box-shadow:0 8px 24px rgba(16,24,40,.18);display:flex;flex-direction:column;gap:5px;pointer-events:none}
+.cattip[hidden]{display:none}
+@media (max-width:900px){.catlayout{grid-template-columns:minmax(0,1fr)}.catside{position:static;max-height:none}.catbadges{flex-direction:row;flex-wrap:wrap}.srcb{max-width:220px}}
 .catsrcs{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:10px}
 .catsrc{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:10px 12px;display:flex;flex-direction:column;gap:5px;cursor:pointer}
 .catsrc:hover{border-color:var(--border2)}.catsrc.on{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent) inset}

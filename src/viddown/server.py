@@ -272,7 +272,8 @@ def create_app(app_state) -> FastAPI:
 
     @app.get("/api/stream/{jid}")
     async def stream(jid: int):
-        """Video pro přehrávač v GUI (podporuje HTTP Range, takže jde přetáčet)."""
+        """Video pro přehrávač v GUI (podporuje HTTP Range, takže jde přetáčet). Soubor se posílá beze změny: aplikace nic nekóduje
+        ani nepřebaluje."""
         j = _job(jid)
         p = Path(j["filepath"] or "")
         if not p.exists():
@@ -711,9 +712,16 @@ def create_app(app_state) -> FastAPI:
         res = await asyncio.to_thread(catalog.add_sources, S.db, urls)
         return {**res, "invalid": invalid[:50], "invalid_count": len(invalid), "overview": await asyncio.to_thread(_overview)}
 
+    @app.post("/api/catalog/sources/refresh")
+    async def catalog_refresh_all():
+        """Obnoví všechny zdroje (najde jen nová videa)."""
+        n = await asyncio.to_thread(catalog.rescan_all, S.db)
+        return {"queued": n, "overview": await asyncio.to_thread(_overview)}
+
     @app.delete("/api/catalog/sources/{sid}")
-    async def catalog_delete(sid: int):
-        if not await asyncio.to_thread(catalog.delete_source, S.db, sid, catalog.thumbs_dir(S.data, S.settings)):
+    async def catalog_delete(sid: int, keep_items: int = 0):
+        """Odebere zdroj; `keep_items=1`: videa zdroje zůstanou v katalogu (zdroj se jen odpojí)."""
+        if not await asyncio.to_thread(catalog.delete_source, S.db, sid, catalog.thumbs_dir(S.data, S.settings), bool(keep_items)):
             raise HTTPException(404, "Zdroj nenalezen.")
         return await asyncio.to_thread(_overview)
 

@@ -101,6 +101,12 @@ starší verze odmítne otevřít (chrání před poškozením při downgradu). 
 Menu **Katalog** slouží k třídění videí před stahováním: přidáte zdroje (kanály, playlisty, jednotlivá videa), aplikace je **jen prozkoumá**
 (nic nestahuje) a videa si pak projdete jako mřížku karet s miniaturou, rozlišením, velikostí a délkou.
 
+- **Zdroje vlevo:** zdroje jsou malé odznáčky ve svislém pruhu vlevo od seznamu videí (zkrácený název, počet videí, tečka stavu: zeleně hotovo,
+  žlutě čeká nebo se zjišťuje, červeně chyba; od 16 zdrojů se zmenší na kulaté odznáčky s písmenem). **Při najetí** se ukážou podrobnosti
+  zdroje. **Kliknutím** se zdroj zvolí (seznam videí se vyfiltruje na něj; druhý klik výběr zruší). Nad odznáčky je jedna sada tlačítek pro zvolený
+  zdroj: **Obnovit** (najde jen nová videa; bez zvoleného zdroje „Obnovit všechny“), **Načíst znovu vše**, **Odebrat**. Odebrání se zeptá, zda
+  odebrat **jen zdroj** (jeho videa zůstanou v katalogu a půjdou filtrovat jako „odebraný zdroj“; zdroj se přestane zjišťovat a znovupřidání
+  stejné adresy ho připojí zpět), nebo **zdroj i jeho videa z katalogu**; fronta stahování a už stažená videa se nemění v žádném případě.
 - **Přidání zdrojů:** „Přidat zdroje“ – adresy po jedné na řádek, vložené najednou, nebo ze souboru `.txt` (řádky začínající `#` se
   přeskočí). Adresa, která už v katalogu je, se načte znovu celá. Zdroje se zjišťují ve vlastní frontě, kterou vidíte nahoře
   (stav, počet videí, průběh podrobností); stahování to neblokuje.
@@ -134,6 +140,15 @@ Menu **Katalog** slouží k třídění videí před stahováním: přidáte zdr
   videa do fronty se zdrojem „katalog“ a uloží je do podsložky stahování podle názvu zdroje (kanálu nebo playlistu). Video, které už
   bylo staženo dříve, se přeskočí; potvrzením u karty nebo zaškrtnutím „I videa Staženo dříve stáhnout znovu“ se stáhne znovu. Po
   úspěšném stažení video z katalogu zmizí; když stahování selže nebo se zruší, vrátí se do katalogu s odznakem „stahování selhalo“.
+
+### Přehrávání a kontejner souborů
+
+Aplikace **nic nekóduje ani nepřevádí**: přehrávač v historii posílá soubor beze změny. Safari neumí kontejner MKV, Chrome a Edge ano.
+YouTube s AV1 nebo VP9 a zvukem Opus se skládá do MKV, proto je v Nastavení › Stahování volba **Po stažení přebalit MKV do MP4**
+(výchozí zapnuto): ffmpeg jen **zkopíruje** obraz, zvuk, titulky (text do formátu MP4), obálku a kapitoly do MP4, bez kódování a bez změny kvality
+a rozlišení; trvá to sekundy (76 MB za 1 s). Když přebalení selže, zůstane MKV. Už stažené soubory MKV se nemění. Pozn.: že Safari přehraje
+konkrétní kombinaci (např. AV1 s Opusem v MP4) záleží na verzi systému a čipu; nelze to z aplikace zaručit. Máte-li jistotu přehrání všude,
+nastavte Kvalitu na Kompatibilitu (MP4 s H.264, u některých webů nejvýš 1080p).
 
 ### Časový rozvrh
 

@@ -890,12 +890,19 @@ function openPlayer(h, local) {
   const audio = /\.(mp3|m4a|opus|ogg)$/i.test(h.filepath || '');
   const m = modal(`<div class="mh">${ic('play', 18)}<h2 class="ell grow" title="${esc(h.title || '')}">${esc(h.title || h.url)}</h2><button class="ibtn" id="pclose" title="${T('Zavřít', 'Close')}">${ic('x', 16)}</button></div>
    <div class="mb"><${audio ? 'audio' : 'video'} id="pvid" controls autoplay playsinline preload="metadata" src="/api/stream/${h.id}" style="width:100%;${audio ? '' : 'max-height:70vh;background:#000;border-radius:10px;display:block'}"></${audio ? 'audio' : 'video'}>
-   <div id="perr" class="banner" style="display:none;margin-top:12px">${ic('alert', 16)}<span class="grow">${T('Tento prohlížeč formát videa neumí přehrát (např. MKV s kodekem AV1/VP9 v Safari). Soubor si stáhněte, nebo použijte Chrome či Firefox.', 'This browser cannot play the video format (e.g. MKV with AV1/VP9 in Safari). Download the file or use Chrome or Firefox.')}</span></div>
+   <div id="perr" class="banner" style="display:none;margin-top:12px">${ic('alert', 16)}<span class="grow"><span id="perrmsg">${T('Tento prohlížeč video nepřehraje: Safari neumí kontejner MKV (a některé kodeky), Chrome a Edge ho obvykle přehrají. Soubor si můžete stáhnout nebo otevřít v jiném přehrávači (např. VLC). Aplikace videa nekóduje ani nepřebaluje; chcete-li příště soubory přehratelné všude, nastavte v Nastavení › Stahování Kvalitu na Kompatibilitu (MP4 s H.264, u některých webů nejvýš 1080p).', 'This browser cannot play the video: Safari cannot open the MKV container (and some codecs), Chrome and Edge usually can. Download the file or open it in another player (e.g. VLC). The app never re-encodes or repackages video; to get files that play everywhere next time, set Quality to Compatibility in Settings › Downloading (MP4 with H.264, up to 1080p on some sites).')}</span>${audio ? '' : `<button class="btn sm" id="ptc">${ic('play', 12)} ${T('Přehrát přebalenou verzi', 'Play repackaged version')}</button>`}</div>
    <div class="row gap8 t2 fs12 wrap" style="margin-top:10px">${esc(h.channel || '')}${h.height ? ' · ' + h.height + 'p' : ''} · ${fmtBytes(h.filesize)} · <span class="mono ell" style="max-width:100%">${esc(h.filepath || '')}</span></div></div>
    <div class="mf">${local ? `<button class="btn" id="pfold">${ic('folder', 14)} ${T('Zobrazit ve složce', 'Show in folder')}</button>` : ''}<a class="btn" href="/api/file/${h.id}">${ic('download', 14)} ${T('Stáhnout soubor', 'Download file')}</a><button class="btn primary" id="pclose2">${T('Zavřít', 'Close')}</button></div>`, 'wide');
   m.el.style.width = '960px';
   const v = $('#pvid', m.el);
-  v.addEventListener('error', () => { $('#perr', m.el).style.display = 'flex'; });
+  const perr = $('#perr', m.el);
+  const fail = () => { perr.style.display = 'flex'; };
+  v.addEventListener('error', fail);
+  if (!audio) {                                                                // prohlížeč nemusí poslat chybu: video bez obrazu nebo se nerozjede
+    v.addEventListener('loadedmetadata', () => { if (v.videoWidth === 0) fail(); });
+    const guard = setTimeout(() => { if (v.readyState < 2 || v.videoWidth === 0) fail(); }, 8000);
+    v.addEventListener('playing', () => clearTimeout(guard), { once: true });
+  }
   const close = () => { try { v.pause(); v.removeAttribute('src'); v.load(); } catch (e) { /* nic */ } m.close(); document.removeEventListener('keydown', esc_); };
   const esc_ = e => { if (e.key === 'Escape') close(); };
   document.addEventListener('keydown', esc_);
@@ -923,6 +930,7 @@ const SECTIONS = () => [
     { k: 'subtitles', type: 'toggle', label: ['Titulky', 'Subtitles'], hint: ['Vloží se do souboru videa', 'Embedded into the video file'] },
     { k: 'subtitle_langs', type: 'text', w: 120, label: ['Jazyky titulků', 'Subtitle languages'] },
     { k: 'auto_subtitles', type: 'toggle', label: ['Včetně automatických titulků', 'Include auto-generated'] },
+    { k: 'mkv_to_mp4', type: 'toggle', label: ['Po stažení přebalit MKV do MP4', 'Repackage MKV to MP4 after download'], hint: ['Jen změna kontejneru (obraz, zvuk i titulky se zkopírují, nic se nekóduje, trvá sekundy). Safari MKV nepřehraje, MP4 ano. Selže-li přebalení, zůstane MKV.', 'Container change only (video, audio and subtitles are copied, nothing is re-encoded, takes seconds). Safari cannot play MKV but plays MP4. If it fails, the MKV stays.'] },
     { k: 'embed_metadata', type: 'toggle', label: ['Vložit metadata a kapitoly', 'Embed metadata and chapters'] },
   ] },
   { icon: 'clock', title: ['Rychlost', 'Speed'], col: 0, fields: [
@@ -1204,8 +1212,9 @@ function catClearSel() { CAT.sel.clear(); CAT.exclude.clear(); CAT.selAll = null
 function renderCatalog() {
   $('#main').innerHTML = `<div class="row gap16 wrap"><div><h1>${T('Katalog', 'Catalog')}</h1><div class="t2" style="margin-top:3px">${T('Videa ze zdrojů k výběru: nic se nestahuje, dokud se nerozhodnete', 'Videos from your sources to pick from: nothing downloads until you decide')}</div></div>
     <div class="grow"></div><span class="row gap6 fs13" id="catauto"></span><button class="btn" id="cataf" title="${T('Znovu zjistí podrobnosti videí bez animace a zkusí znovu stáhnout ty, které byly nad limitem. Zapněte před tím stahování animací v Nastavení › Katalog.', 'Re-checks videos without an animation and retries those that were over the limit. Turn on animation downloads in Settings › Catalog first.')}">${ic('play', 14)} ${T('Doplnit animace', 'Fill in animations')}</button><button class="btn" id="catpause"></button><button class="btn primary lg" id="catadd">${ic('plus', 15)} ${T('Přidat zdroje', 'Add sources')}</button></div>
-    <div id="catbanner" class="col gap8"></div><div id="catinfo"></div><div id="catsrc" class="catsrcs"></div>
-    <div class="card cattools"><div class="row gap8 wrap">
+    <div id="catbanner" class="col gap8"></div><div id="catinfo"></div>
+    <div class="catlayout"><aside class="catside" id="catside"><div class="catsidehd">${T('Zdroje', 'Sources')}</div><div id="catsrctools" class="catsrctools"></div><div id="catsrcinfo"></div><div id="catsrc" class="catbadges"></div></aside>
+    <div class="catmain"><div class="card cattools"><div class="row gap8 wrap">
       <div class="inwrap" style="height:32px;width:280px">${ic('search', 14)}<input id="catq" placeholder="${T('Hledat v názvu videa a kanálu…', 'Search video and channel names…')}" value="${esc(CAT.q)}" autocomplete="off"><button class="ibtn" id="catqx" type="button" title="${T('Smazat (Esc)', 'Clear (Esc)')}" ${CAT.q ? '' : 'hidden'}>${ic('x', 12)}</button></div>
       <select class="input sm" id="catsrcsel"></select>
       <select class="input sm" id="catsort">${CAT_SORTS().map(([v, l]) => `<option value="${v}" ${CAT.sort === v ? 'selected' : ''}>${T('Řadit', 'Sort')}: ${l}</option>`).join('')}</select>
@@ -1215,7 +1224,7 @@ function renderCatalog() {
       <div class="row gap6 wrap" style="margin-top:8px"><span class="t2 fs12">${T('Rozlišení', 'Resolution')}:</span><span id="catres" class="row gap4 wrap"></span>
         <span class="t2 fs12" style="margin-left:10px">${T('Stav', 'State')}:</span><span id="catstate" class="row gap4 wrap"></span>
         <span class="t2 fs12" style="margin-left:10px">${T('Animace', 'Animation')}:</span><span id="catanimf" class="row gap4 wrap"></span></div></div>
-    <div class="card catsel" id="catsel"></div><div id="catgrid" class="catgrid"></div><div id="catpager" class="row gap8 wrap" style="justify-content:center"></div>`;
+    <div class="card catsel" id="catsel"></div><div id="catgrid" class="catgrid"></div><div id="catpager" class="row gap8 wrap" style="justify-content:center"></div></div></div><div id="cattip" class="cattip" hidden></div>`;
   const reload = fn => { fn(); CAT.offset = 0; catClearSel(); catLoad(); };
   const q = $('#catq');
   q.oninput = () => { clearTimeout(CAT.qt); $('#catqx').hidden = !q.value; CAT.qt = setTimeout(() => reload(() => { CAT.q = q.value.trim(); }), 280); };
@@ -1239,7 +1248,8 @@ function renderCatalog() {
   };
   catPaintAuto();
   $('#catpause').onclick = async () => { const paused = CAT.ov && CAT.ov.details.paused; const r = await act(() => api('/api/catalog/pause', { method: 'POST', body: { paused: !paused } })); if (r) { CAT.ov = r; catPaintSources(); } };
-  $('#catsrc').onclick = catSrcClick;
+  $('#catside').onclick = catSrcClick;
+  $('#catsrc').onmouseover = catTipShow; $('#catsrc').onmouseout = catTipHide; $('#catsrc').onfocusin = catTipShow; $('#catsrc').onfocusout = catTipHide;
   $('#catgrid').onclick = catGridClick;
   $('#catgrid').onmouseover = catAnimHover; $('#catgrid').onmouseout = catAnimHover;
   $('#catgrid').onchange = e => { const c = e.target.closest('[data-csel]'); if (c) catToggle(+c.dataset.csel, c.checked); };
@@ -1290,26 +1300,53 @@ function catPaintTools() {
   $('#catanimf').innerHTML = [['yes', T('s animací', 'with animation')], ['no', T('bez animace', 'without animation')]].map(([v, l]) => `<button class="chip ${CAT.anim.includes(v) ? 'on' : ''}" data-an="${v}">${l}</button>`).join('');
   $('#catstate').innerHTML = CAT_STATES().map(([v, l]) => `<button class="chip ${CAT.state.includes(v) ? 'on' : ''}" data-st="${v}">${l}</button>`).join('');
   const sel = $('#catsrcsel');
-  const opts = `<option value="0">${T('Všechny zdroje', 'All sources')}</option>` + (ov ? ov.sources.map(s => `<option value="${s.id}" ${CAT.source === s.id ? 'selected' : ''}>${esc(s.title || s.url)}</option>`).join('') : '');
+  const opts = `<option value="0">${T('Všechny zdroje', 'All sources')}</option>` + (ov ? ov.sources.map(s => `<option value="${s.id}" ${CAT.source === s.id ? 'selected' : ''}>${esc(s.title || s.url)}</option>`).join('') + (ov.detached || []).map(s => `<option value="${s.id}" ${CAT.source === s.id ? 'selected' : ''}>${esc(s.title)} (${T('odebraný zdroj', 'removed source')})</option>`).join('') : '');
   if (sel.dataset.sig !== opts) { sel.dataset.sig = opts; sel.innerHTML = opts; }
   const p = $('#catpause'); if (p && ov) p.innerHTML = ov.details.paused ? `${ic('play', 14)} ${T('Pokračovat ve zjišťování', 'Resume scanning')}` : `${ic('pause', 14)} ${T('Pozastavit zjišťování', 'Pause scanning')}`;
 }
-function catSourceCard(s) {
+const CAT_ROUND_FROM = 16;                                                  // od tolika zdrojů se odznáčky zmenší na kulaté
+const catStatusDot = s => (s.status === 'error' ? 'r' : s.status === 'queued' || s.status === 'scanning' ? 'y' : 'g');
+function catBadge(s, round) {
+  const name = s.title || s.url, initial = ([...name.replace(/^https?:\/\/(www\.)?/, '')][0] || '?').toUpperCase();
+  const hue = Math.round((([...name].reduce((a, c) => (a * 31 + c.charCodeAt(0)) | 0, 7) >>> 0) % 997) * 137.508) % 360;      // zlatý úhel: i podobné názvy dostanou různé barvy
+  return `<button type="button" class="srcb ${round ? 'round' : ''} ${CAT.source === s.id ? 'on' : ''}" data-csrc="${s.id}" ${round ? `style="--hue:${hue}"` : ''} aria-label="${esc(name)}">
+    <span class="dot ${catStatusDot(s)}"></span>${round ? `<span class="srcl">${esc(initial)}</span>` : `<span class="ell grow">${esc(name)}</span><span class="srcn">${s.items}</span>`}</button>`;
+}
+function catSourceDetail(s) {
   const st = { queued: T('čeká ve frontě', 'waiting'), scanning: T('zjišťuje se…', 'scanning…'), error: T('chyba', 'error'), done: '' }[s.status] || '';
-  const kind = { channel: T('kanál', 'channel'), playlist: 'playlist', video: T('video', 'video') }[s.kind] || '';
+  const kind = { channel: T('kanál', 'channel'), playlist: 'playlist', video: T('video', 'video'), page: T('stránka', 'page') }[s.kind] || '';
   const pct = s.items ? Math.round(100 * s.details_done / s.items) : 0;
-  return `<div class="catsrc ${CAT.source === s.id ? 'on' : ''}" data-csrc="${s.id}" title="${esc(s.url)}">
-    <div class="row gap6"><b class="ell grow">${esc(s.title || s.url)}</b>${st ? `<span class="badge ${s.status === 'error' ? 'b-err' : 'b-warn'}">${st}</span>` : ''}</div>
-    <div class="fs12 t2">${kind ? kind + ' · ' : ''}${s.items} ${T('videí', 'videos')}${s.items ? ` · ${T('podrobnosti', 'details')} ${s.details_done}/${s.items}` : ''}${s.downloaded_before ? ` · ${s.downloaded_before}× ${T('staženo dříve', 'downloaded before')}` : ''}</div>
-    <div class="pbar"><i style="width:${pct}%"></i></div>${s.error ? `<div class="fs12" style="color:var(--err)">${esc(s.error)}</div>` : ''}
-    <div class="row gap4 wrap"><button class="btn sm ghost" data-csa="refresh:${s.id}" title="${T('Najde jen nová videa', 'Finds only new videos')}">${ic('refresh', 12)} ${T('Obnovit', 'Refresh')}</button>
-      <button class="btn sm ghost" data-csa="reload:${s.id}" title="${T('Nabídne znovu i odmítnutá a stažená', 'Offers rejected and downloaded videos again')}">${T('Načíst znovu vše', 'Reload all')}</button>
-      <button class="btn sm ghost" data-csa="del:${s.id}">${ic('trash', 12)} ${T('Odebrat', 'Remove')}</button></div></div>`;
+  const when = s.last_scan ? new Date(s.last_scan * 1000).toLocaleString(LANG === 'cs' ? 'cs-CZ' : 'en-GB') : '—';
+  return `<div class="row gap6"><b class="ell grow">${esc(s.title || s.url)}</b>${st ? `<span class="badge ${s.status === 'error' ? 'b-err' : 'b-warn'}">${st}</span>` : ''}</div>
+    <div class="fs12 t2 ell" title="${esc(s.url)}">${esc(s.url)}</div>
+    <div class="fs12 t2">${kind ? kind + ' · ' : ''}${s.items} ${T('videí', 'videos')}${s.queued ? ` · ${s.queued}× ${T('ve frontě', 'queued')}` : ''}${s.downloaded_before ? ` · ${s.downloaded_before}× ${T('staženo dříve', 'downloaded before')}` : ''}${s.rejected_before ? ` · ${s.rejected_before}× ${T('dříve odmítnuto', 'rejected before')}` : ''}${s.gone ? ` · ${s.gone}× ${T('nedostupné', 'unavailable')}` : ''}</div>
+    ${s.items ? `<div class="fs12 t2">${T('Podrobnosti', 'Details')} ${s.details_done}/${s.items}</div><div class="pbar"><i style="width:${pct}%"></i></div>` : ''}
+    <div class="fs12 t2">${T('Naposledy zjištěno', 'Last scanned')}: ${when}</div>${s.error ? `<div class="fs12" style="color:var(--err)">${esc(s.error)}</div>` : ''}`;
+}
+function catTipShow(e) {
+  const b = e.target.closest && e.target.closest('.srcb'); const tip = $('#cattip'); if (!b || !tip || !CAT.ov) return;
+  const s = CAT.ov.sources.find(x => x.id === +b.dataset.csrc); if (!s) return;
+  tip.innerHTML = catSourceDetail(s); tip.hidden = false;
+  const r = b.getBoundingClientRect(), h = tip.offsetHeight, w = tip.offsetWidth;
+  const left = r.right + 10 + w < innerWidth ? r.right + 10 : Math.max(8, r.left - w - 10);
+  tip.style.left = left + 'px'; tip.style.top = Math.max(8, Math.min(r.top, innerHeight - h - 8)) + 'px';
+}
+function catTipHide() { const tip = $('#cattip'); if (tip) tip.hidden = true; }
+function catPaintSrcTools() {
+  const box = $('#catsrctools'), ov = CAT.ov; if (!box || !ov) return;
+  const sel = ov.sources.find(x => x.id === CAT.source), none = !sel;
+  box.innerHTML = `<button class="btn sm" data-csa="${none ? 'refreshall:0' : 'refresh:' + sel.id}" ${ov.sources.length ? '' : 'disabled'} title="${none ? T('Najde nová videa ve všech zdrojích', 'Finds new videos in all sources') : T('Najde jen nová videa ve zvoleném zdroji', 'Finds only new videos in the selected source')}">${ic('refresh', 12)} ${none ? T('Obnovit všechny', 'Refresh all') : T('Obnovit', 'Refresh')}</button>
+    <button class="btn sm" data-csa="reload:${sel ? sel.id : 0}" ${none ? 'disabled' : ''} title="${T('Nabídne znovu i odmítnutá a stažená videa zvoleného zdroje', 'Offers rejected and downloaded videos of the selected source again')}">${T('Načíst znovu vše', 'Reload all')}</button>
+    <button class="btn sm" data-csa="del:${sel ? sel.id : 0}" ${none ? 'disabled' : ''} title="${T('Odebere zvolený zdroj', 'Removes the selected source')}">${ic('trash', 12)} ${T('Odebrat', 'Remove')}</button>`;
+  $('#catsrcinfo').innerHTML = sel ? `<div class="catsrcsel">${catSourceDetail(sel)}</div>` : '';
 }
 function catPaintSources() {
   const box = $('#catsrc'), ov = CAT.ov; if (!box || !ov) return;
   const d = ov.details;
-  box.innerHTML = ov.sources.map(catSourceCard).join('') || `<div class="card empty" style="grid-column:1/-1">${ic('film', 30)}<h3>${T('Katalog je prázdný', 'The catalog is empty')}</h3><p>${T('Přidejte kanály, playlisty nebo stránky (po jednom, více najednou, nebo ze souboru .txt). Aplikace je projde a nabídne vám videa k výběru.', 'Add channels, playlists or pages (one by one, many at once, or from a .txt file). The app goes through them and offers the videos.')}</p></div>`;
+  const round = ov.sources.length >= CAT_ROUND_FROM;
+  box.classList.toggle('rounds', round);
+  box.innerHTML = ov.sources.map(x => catBadge(x, round)).join('') || `<div class="t2 fs13" style="padding:6px 2px">${T('Zatím žádný zdroj. Přidejte kanály, playlisty nebo stránky tlačítkem Přidat zdroje.', 'No sources yet. Add channels, playlists or pages with the Add sources button.')}</div>`;
+  catPaintSrcTools();
   const bits = [];
   if (d.paused) bits.push(`<span class="badge b-warn">${T('pozastaveno', 'paused')}</span>`);
   else if (d.waiting_for_lists) bits.push(`<span class="t2">${T('Nejdřív se dokončí seznamy všech zdrojů…', 'Finishing the lists of all sources first…')}</span>`);
@@ -1323,21 +1360,38 @@ function catPaintSources() {
   $('#catinfo').innerHTML = bits.length ? `<div class="row gap10 wrap fs12" style="padding:2px 4px">${bits.join('')}</div>` : '';
   $('#catinfo').onclick = catSrcClick;
 }
+function catRemoveDialog(sid) {
+  const src = CAT.ov && CAT.ov.sources.find(x => x.id === sid); if (!src) return;
+  const m = modal(`<div class="mh">${ic('trash', 18)}<h2>${T('Odebrat zdroj', 'Remove source')}</h2></div>
+    <div class="mb col gap10"><div class="fs13"><b>${esc(src.title || src.url)}</b> · ${src.items} ${T('videí', 'videos')}</div>
+      <div class="fs13 t2">${T('Fronta stahování i už stažená videa se nezmění v žádném případě.', 'The download queue and already downloaded videos are not affected either way.')}</div>
+      <button class="btn" id="catdkeep" style="justify-content:flex-start;text-align:left;height:auto;padding:10px 12px"><span class="col gap4"><b>${T('Odebrat jen zdroj', 'Remove the source only')}</b><span class="t2 fs12" style="font-weight:400">${T('Videa z něj zůstanou v katalogu (ve filtru Zdroj jako „odebraný zdroj“). Zdroj se přestane zjišťovat; znovupřidání stejné adresy ho připojí zpět.', 'Its videos stay in the catalog (in the Source filter as “removed source”). The source stops being scanned; adding the same address again reconnects it.')}</span></span></button>
+      <button class="btn danger" id="catdall" style="justify-content:flex-start;text-align:left;height:auto;padding:10px 12px"><span class="col gap4"><b>${T('Odebrat zdroj i jeho videa z katalogu', 'Remove the source and its videos from the catalog')}</b><span class="t2 fs12" style="font-weight:400">${T('Smaže se i paměť o odmítnutých a stažených videích z tohoto zdroje a jejich miniatury a animace.', 'The memory of rejected and downloaded videos from this source and their thumbnails and animations are deleted too.')}</span></span></button></div>
+    <div class="mf"><button class="btn" id="catdno">${T('Zrušit', 'Cancel')}</button></div>`);
+  const go = async keep => {
+    m.close();
+    const r = await act(() => api(`/api/catalog/sources/${sid}?keep_items=${keep ? 1 : 0}`, { method: 'DELETE' }), keep ? T('Zdroj odebrán, videa zůstala v katalogu', 'Source removed, videos kept in the catalog') : T('Zdroj i jeho videa odebrány', 'Source and its videos removed'));
+    if (r) { CAT.source = 0; $('#catsrcsel').value = '0'; catClearSel(); catLoad(); }
+  };
+  $('#catdkeep', m.el).onclick = () => go(true); $('#catdall', m.el).onclick = () => go(false); $('#catdno', m.el).onclick = m.close;
+}
 async function catSrcClick(e) {
   const a = e.target.closest('[data-csa]');
   if (a) {
     e.stopPropagation();
+    if (a.disabled) return;
     const [what, id] = a.dataset.csa.split(':'), sid = +id;
-    if (what === 'del' && !confirm(T('Odebrat zdroj z katalogu? Smažou se i jeho videa a paměť o odmítnutých a stažených.', 'Remove this source from the catalog? Its videos and the memory of rejected and downloaded ones are deleted.'))) return;
+    if (what === 'del') return catRemoveDialog(sid);
     if (what === 'reload' && !confirm(T('Načíst zdroj znovu celý? Znovu se nabídnou i dříve odmítnutá a stažená videa (s odznaky).', 'Reload the whole source? Rejected and downloaded videos are offered again (with badges).'))) return;
     const call = { refresh: () => api(`/api/catalog/sources/${sid}/refresh`, { method: 'POST' }), reload: () => api(`/api/catalog/sources/${sid}/reload`, { method: 'POST' }),
-      del: () => api(`/api/catalog/sources/${sid}`, { method: 'DELETE' }), retry: () => api('/api/catalog/retry', { method: 'POST', body: {} }) }[what];
-    const r = await act(call, { refresh: T('Zdroj je ve frontě zjišťování', 'Source queued'), reload: T('Zdroj se načte znovu', 'Source will be reloaded'), del: T('Zdroj odebrán', 'Source removed'), retry: T('Zařazeno znovu', 'Queued again') }[what]);
-    if (r) { if (what === 'del' && CAT.source === sid) CAT.source = 0; catClearSel(); catLoad(); }
+      refreshall: () => api('/api/catalog/sources/refresh', { method: 'POST' }), retry: () => api('/api/catalog/retry', { method: 'POST', body: {} }) }[what];
+    const r = await act(call, { refresh: T('Zdroj je ve frontě zjišťování', 'Source queued'), reload: T('Zdroj se načte znovu', 'Source will be reloaded'),
+      refreshall: T('Všechny zdroje jsou ve frontě zjišťování', 'All sources queued'), retry: T('Zařazeno znovu', 'Queued again') }[what]);
+    if (r) { catClearSel(); catLoad(); }
     return;
   }
   const c = e.target.closest('[data-csrc]');
-  if (c) { const id = +c.dataset.csrc; CAT.source = CAT.source === id ? 0 : id; CAT.offset = 0; catClearSel(); $('#catsrcsel').value = String(CAT.source); catLoad(); }
+  if (c) { const id = +c.dataset.csrc; CAT.source = CAT.source === id ? 0 : id; CAT.offset = 0; catClearSel(); $('#catsrcsel').value = String(CAT.source); catTipHide(); catLoad(); }
 }
 function catCard(it) {
   const sel = catIsSel(it.id), h = it.height ? `${it.height}p` : '';

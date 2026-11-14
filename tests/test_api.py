@@ -192,3 +192,19 @@ def test_history_bulk_delete_forgets_archive(client):
     d = st.db.add("https://www.youtube.com/watch?v=CCCCCCCCCCC", status="done", finished_at=4.0)
     c.request("DELETE", "/api/history", json={"ids": [d]})
     assert "CCCCCCCCCCC" in arch.read_text()
+
+
+def test_stream_never_encodes_or_repackages(client, tmp_path):
+    """Přehrávač dostane vždy původní soubor; žádný režim převodu ani přebalení neexistuje (aplikace nekóduje video)."""
+    c, st = client
+    f = tmp_path / "v.mkv"
+    f.write_bytes(b"0123456789" * 100)
+    j = st.db.add("https://v/x", status="done", filepath=str(f))
+    for q in ("", "?remux=1", "?transcode=1"):
+        r = c.get(f"/api/stream/{j}{q}")
+        assert r.status_code == 200 and r.content == f.read_bytes(), q
+    assert c.get(f"/api/stream/{j}", headers={"Range": "bytes=0-9"}).content == b"0123456789"
+    import viddown.server as srv
+    src = open(srv.__file__, encoding="utf-8").read()
+    assert "libx264" not in src and "-c:v" not in src and "remux" not in src.lower().replace("přebal", "")
+

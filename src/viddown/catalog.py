@@ -180,8 +180,14 @@ def delete_anims(db, folder: Path) -> dict:
     return {"files": files, "bytes": size, "items": items}
 
 
-def delete_source(db, sid: int, folder: Path | None = None) -> bool:
-    """Smaže zdroj, jeho položky (a paměť o nich) i jejich miniatury."""
+def delete_source(db, sid: int, folder: Path | None = None, keep_items: bool = False) -> bool:
+    """Odebere zdroj. Výchozí: smaže zdroj, jeho položky (a paměť o nich) i miniatury a animace. `keep_items`: zdroj se jen „odpojí“
+    (stav `detached`): zmizí ze seznamu zdrojů a už se nezjišťuje ani neobnovuje, ale jeho videa zůstanou v katalogu (složka
+    stahování zůstává, ve filtru je jako „odebraný zdroj“); znovupřidání stejné adresy zdroj připojí zpět. Fronta stahování a
+    už stažená videa se tím nemění ani v jednom případě."""
+    if keep_items:
+        with db.conn() as c:
+            return c.execute("update catalog_sources set status='detached', manual=0 where id=? and status != 'detached'", (sid,)).rowcount > 0
     with db.conn() as c:
         c.execute("begin immediate")
         names = [r["thumb_file"] for r in c.execute("select thumb_file from catalog_items where source_id=? and thumb_file != ''", (sid,))]
@@ -206,12 +212,21 @@ def rescan_source(db, sid: int, mode: str) -> bool | None:
         if r is None:
             c.execute("rollback")
             return None
+        if r["status"] == "detached":                                   # odebraný zdroj se neobnovuje (vrátí ho jen znovupřidání adresy)
+            c.execute("rollback")
+            return None
         if r["status"] == "scanning":
             c.execute("rollback")
             return False
         c.execute("update catalog_sources set status='queued', scan_mode=?, manual=1, error=null where id=?", (mode, sid))
         c.execute("commit")
     return True
+
+
+def rescan_all(db) -> int:
+    """Obnovení všech zdrojů najednou (jen nová videa); zdroj, který se právě zjišťuje, a odebrané zdroje se přeskočí."""
+    with db.conn() as c:
+        return c.execute("update catalog_sources set status='queued', scan_mode='new', manual=1, error=null where status in ('done','error','queued')").rowcount
 
 
 # --- čtení seznamu zdroje -------------------------------------------------------------------------
@@ -483,7 +498,7 @@ def apply_listing(db, sid: int, listing: dict, mode: str, dl_keys: set[str], dl_
             c.executemany("update catalog_items set state='gone', updated_at=? where id=?", gone)
             missing = len(gone)
         folder = sanitize_filename(title or "") if kind in ("channel", "playlist", "page") and title else None
-        c.execute("update catalog_sources set kind=?, title=?, title_search=?, thumb_url=?, folder=?, status='done', error=null, "
+        c.execute("update catalog_sources set kind=?, title=?, title_search=?, thumb_url=?, folder=?, status=case when status='detached' then 'detached' else 'done' end, error=null, "
                   "scan_mode=case when scan_mode=? then 'new' else scan_mode end, last_scan=? where id=?",
                   (kind, title, norm(title), listing.get("thumb_url"), folder or None, mode, now, sid))
         c.execute("commit")
@@ -718,15 +733,20 @@ def sources_out(db) -> dict:
         "sum(state in ('new','queued') and detail_state='done') details_done, sum(state='gone') gone, "
         "sum(state in ('new','queued') and downloaded_before=1) downloaded_before, "
         "sum(state in ('new','queued') and rejected_before=1) rejected_before from catalog_items group by source_id")}
-    out = []
+    out, detached = [], []
     for s in db.query("select * from catalog_sources order by id"):
         c = counts.get(s["id"]) or {}
+        if s["status"] == "detached":                                   # odebraný zdroj: jen kvůli filtru jeho ponechaných videí
+            if c.get("items"):
+                detached.append({"id": s["id"], "title": s["title"] or s["url"], "items": c["items"]})
+            continue
         out.append({"id": s["id"], "url": s["url"], "kind": s["kind"], "title": s["title"], "folder": s["folder"], "status": s["status"],
                     "error": s["error"], "added_at": s["added_at"], "last_scan": s["last_scan"],
                     "items": c.get("items") or 0, "queued": c.get("queued") or 0, "details_done": c.get("details_done") or 0,
                     "gone": c.get("gone") or 0, "downloaded_before": c.get("downloaded_before") or 0,
                     "rejected_before": c.get("rejected_before") or 0})
-    return {"sources": out, "items": sum(x["items"] for x in out), "scanning": sum(1 for x in out if x["status"] in ("queued", "scanning"))}
+    return {"sources": out, "detached": detached, "items": sum(x["items"] for x in out) + sum(x["items"] for x in detached),
+            "scanning": sum(1 for x in out if x["status"] in ("queued", "scanning"))}
 
 
 # --- zjišťování na pozadí -------------------------------------------------------------------------
@@ -765,7 +785,9 @@ async def scan_one(st, src: dict) -> dict:
     """Zjistí seznam jednoho zdroje a uloží ho. Chyba se zapíše ke zdroji (a zdroj zůstane k ručnímu opakování)."""
     db, sid = st.db, src["id"]
     with db.conn() as c:
-        c.execute("update catalog_sources set status='scanning', error=null where id=?", (sid,))
+        n = c.execute("update catalog_sources set status='scanning', error=null where id=? and status != 'detached'", (sid,)).rowcount
+    if not n:                                                           # mezitím odebraný (odpojený) nebo smazaný zdroj se nezjišťuje
+        return {}
     try:
         listing = await list_source(src["url"], st.runner.ctx())
         keys, ids, urls = await asyncio.to_thread(downloaded_sets, db, st.data)

@@ -4,9 +4,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import shutil
 import time
 from pathlib import Path
 
+from .. import container
 from ..util import classify_error
 from . import Cancelled, Ctx, ProcHolder, ResolveError, subprocess_kwargs
 
@@ -212,6 +214,18 @@ async def download(url: str, info: dict | None, ctx: Ctx, staging: Path, name: s
             return await download(url, info, ctx, staging, name, rate_bps, on_progress, holder, audio_only, no_subs=True)
         raise ResolveError(msg, classify_error(msg))
     fp = Path(filepath)
+    if s.get("mkv_to_mp4", True) and fp.suffix.lower() == ".mkv":       # jen změna kontejneru (kopie proudů), nic se nekóduje
+        on_progress(progress=1.0, speed=None, eta=None, phase="post")
+        ff = None
+        try:
+            ff = ctx.engines.get("ffmpeg").bin_path()
+        except Exception:  # noqa: BLE001
+            ff = None
+        remuxed = await container.remux_mkv_to_mp4(str(ff) if ff else shutil.which("ffmpeg"), fp, holder, MODES.get(s.get("perf_mode", "full"), MODES["full"])[1] or None)
+        if holder.stopped:
+            raise Cancelled()
+        if remuxed:
+            fp = remuxed
     thumb = fp.with_suffix(".jpg")
     if not thumb.exists():
         jpgs = [p for p in staging.glob("*.jpg")]

@@ -66,6 +66,7 @@ DEFAULTS: dict = {
     "subtitles": False,
     "subtitle_langs": "cs,en",
     "auto_subtitles": False,
+    "mkv_to_mp4": True,             # po stažení přebalit MKV do MP4 (kopie proudů, bez kódování), aby šlo přehrát i v Safari
     "embed_metadata": False,
     "methods": ["ytdlp", "sniffer"],
     "sniff_timeout": 40,
