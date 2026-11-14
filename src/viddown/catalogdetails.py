@@ -9,11 +9,13 @@ Pomalá úroveň (prohlížeč u webů bez podpory yt-dlp) přijde s dalšími t
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 import dataclasses
 import json
 import logging
 import random
+import re
 import shutil
 import time
 import uuid
@@ -32,6 +34,7 @@ BACKOFF_MAX = 7200.0
 BACKOFF_LOGIN = 3600.0              # web vyžaduje přihlášení/ověření: zkusit až za hodinu
 PERF_MULT = {"full": 1.0, "balanced": 2.0, "eco": 4.0}
 THUMB_BATCH = 4
+BLOCKED_RE = re.compile(r"HTTP (401|403|406|410|451)\b")     # odpovědi, kdy web odmítá program, ale prohlížeč nejspíš pustí
 SRC_SCAN_PAGES = 30                 # nejvýš tolik stránek výpisu zdroje při hledání animací
 THUMB_CANDIDATES = 10               # kolik kandidátů miniatury se zkusí, než se vzdá (největší varianty starším videím chybějí)
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".gif")
@@ -467,18 +470,34 @@ class DetailWorker:
         sid, host = src["id"], catalog.domain(src["url"])
         self.src_scanned[sid] = src["top"]
         self.page_hosts.add(host)
-        url, page_no, visited, failed = src["url"], 1, set(), False
+        url, page_no, visited, failed, rd = src["url"], 1, set(), False, None
+        stack = contextlib.AsyncExitStack()
         try:
             while url and url not in visited and page_no <= SRC_SCAN_PAGES:
                 visited.add(url)
                 try:
-                    text, final = await pagelist.fetch(url, self.st.settings.all())
+                    if rd is not None:                                  # web už jednou odmítl prostý dotaz: dál jen prohlížečem
+                        text, final = await rd.render(url, scrolls=1)
+                    else:
+                        text, final = await pagelist.fetch(url, self.st.settings.all())
                 except pagelist.PageError as e:
                     msg = str(e)
                     if "HTTP 429" in msg or "HTTP 5" in msg or "se nepodařilo načíst" in msg:
                         self.src_scanned.pop(sid, None)                  # omezení nebo výpadek: zkusit později
                         self._back_off(host, BACKOFF_FIRST, "stránka zdroje: " + msg[:120])
                         failed = True
+                        break
+                    if not (BLOCKED_RE.search(msg) and self.st.settings.get("catalog_slow_browser")):
+                        break
+                    # web odmítl prostý dotaz (typicky 403/410 podle otisku spojení), ale prohlížeč pustí: vykreslí se Chromiem
+                    try:
+                        rd = await stack.enter_async_context(sniffer.Renderer(self.st.runner.ctx()))
+                        text, final = await rd.render(url, scrolls=1)
+                    except ResolveError as e2:
+                        log.warning("katalog: stránku zdroje %s nelze vykreslit prohlížečem: %s", sid, str(e2)[:150])
+                        break
+                except ResolveError as e:
+                    log.warning("katalog: stránku zdroje %s nelze vykreslit prohlížečem: %s", sid, str(e)[:150])
                     break
                 items = await asyncio.to_thread(
                     self.db.query, "select id, url, thumb_url from catalog_items where source_id=? and anim_url is null "
@@ -509,6 +528,7 @@ class DetailWorker:
         except Exception:  # noqa: BLE001
             log.exception("katalog: stránky zdroje %s", sid)
         finally:
+            await stack.aclose()
             self.page_hosts.discard(host)
             self.next_at[host] = time.monotonic() + self.gap()
 

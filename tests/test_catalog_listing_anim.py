@@ -152,3 +152,53 @@ def test_source_scan_does_not_wait_for_pending_details_or_the_gap_between_reques
     w.page_hosts.add("x.example")
     w.src_scanned.clear()
     assert w.pick_source_scan(w.scan_blocked_hosts()) is None                          # jiný sken téhož webu právě běží
+
+
+class FakeBrowser:
+    """Podvržený Chromium: vrací HTML podle adresy a eviduje, co se vykreslovalo."""
+    pages, rendered, entered = {}, [], []
+
+    def __init__(self, ctx):
+        pass
+
+    async def __aenter__(self):
+        FakeBrowser.entered.append(1)
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def render(self, url, scrolls=6):
+        FakeBrowser.rendered.append(url)
+        return FakeBrowser.pages[url], url
+
+
+def test_source_scan_falls_back_to_the_browser_when_the_site_refuses_plain_requests(st, fake, pages, monkeypatch):
+    monkeypatch.setattr(cd.sniffer, "Renderer", FakeBrowser)
+    FakeBrowser.pages, FakeBrowser.rendered, FakeBrowser.entered = {}, [], []
+    st.settings.update({"catalog_slow_browser": True})
+    seed(st, fake, [11111111, 22222222, 33333333])
+    pages.answers[SRC] = pagelist.PageError("stránka vrací chybu HTTP 410")           # prostý dotaz web odmítá
+    FakeBrowser.pages[SRC] = card(11111111, "k11111111abcdef") + '<a href="/pl?page=2">2</a>'
+    FakeBrowser.pages[SRC + "?page=2"] = card(22222222, "k22222222abcdef") + '<li><a href="/watch?viewkey=k33333333abcdef">x</a></li>'
+    w = cd.DetailWorker(st)
+    run_scan(w, st)
+    got = anims(st)
+    assert got["youtube k11111111abcdef"].startswith("https://cdn.x/v/11111111/") and got["youtube k22222222abcdef"].startswith("https://cdn.x/v/22222222/")
+    assert got["youtube k33333333abcdef"] == ""
+    assert FakeBrowser.rendered == [SRC, SRC + "?page=2"] and len(FakeBrowser.entered) == 1       # jeden prohlížeč na všechny stránky
+    assert pages.calls == [SRC]                                                       # prostý dotaz jen jednou, další stránky rovnou prohlížečem
+
+
+def test_source_scan_does_not_use_the_browser_when_disabled_or_for_not_found(st, fake, pages, monkeypatch):
+    monkeypatch.setattr(cd.sniffer, "Renderer", FakeBrowser)
+    FakeBrowser.pages, FakeBrowser.rendered, FakeBrowser.entered = {SRC: "<html></html>"}, [], []
+    seed(st, fake, [11111111])
+    st.settings.update({"catalog_slow_browser": False})
+    pages.answers[SRC] = pagelist.PageError("stránka vrací chybu HTTP 410")
+    run_scan(cd.DetailWorker(st), st)
+    assert FakeBrowser.rendered == [] and anims(st)["youtube k11111111abcdef"] is None      # vypnutý prohlížeč: nic
+    st.settings.update({"catalog_slow_browser": True})
+    pages.answers[SRC] = pagelist.PageError("stránka vrací chybu HTTP 404")
+    run_scan(cd.DetailWorker(st), st)
+    assert FakeBrowser.rendered == []                                                 # 404 není blokování
