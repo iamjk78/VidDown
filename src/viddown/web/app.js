@@ -60,6 +60,10 @@ function toast(msg, err = false) {
 }
 async function act(fn, okMsg) { try { const r = await fn(); if (okMsg) toast(okMsg); return r; } catch (e) { if (e.message !== 'auth') toast(e.message, true); } }
 function fmtBytes(n) { if (!n) return '—'; const u = ['B', 'KB', 'MB', 'GB', 'TB']; let i = 0; while (n >= 1024 && i < 4) { n /= 1024; i++; } return (i < 2 ? Math.round(n) : n.toFixed(n >= 100 ? 0 : 1)).toString().replace('.', LANG === 'cs' ? ',' : '.') + ' ' + u[i]; }
+async function copyText(t) {                                                   // schránka (Clipboard API, jinak záložní cesta přes textarea)
+  try { await navigator.clipboard.writeText(t); return true; } catch (e) { /* bez práv nebo bez HTTPS */ }
+  try { const a = document.createElement('textarea'); a.value = t; a.style.cssText = 'position:fixed;opacity:0'; document.body.appendChild(a); a.select(); const ok = document.execCommand('copy'); a.remove(); return ok; } catch (e) { return false; }
+}
 const fmtSpeed = b => b ? fmtBytes(b) + '/s' : '—';
 function fmtDur(s) { if (s == null) return ''; s = Math.round(s); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60; return h ? `${h}:${String(m).padStart(2, '0')}:${String(x).padStart(2, '0')}` : `${m}:${String(x).padStart(2, '0')}`; }
 function fmtDate(ts) {
@@ -70,7 +74,7 @@ function fmtDate(ts) {
   return d.toLocaleDateString(LANG === 'cs' ? 'cs-CZ' : 'en-GB');
 }
 function fmtPub(ts) {                                                         // datum zveřejnění videa: datum a (u čerstvých) stáří
-  if (!ts) return ''; const d = new Date(ts * 1000), days = Math.floor((Date.now() - d.getTime()) / 864e5);
+  if (!ts) return ''; const d = new Date(ts * 1000), days = Math.round((new Date(new Date().toDateString()) - new Date(d.toDateString())) / 864e5);      // kalendářní dny, ne 24hodinová okna
   const abs = d.toLocaleDateString(LANG === 'cs' ? 'cs-CZ' : 'en-GB');
   if (days < 0 || days > 60) return abs;
   return abs + ' · ' + (days === 0 ? T('dnes', 'today') : days === 1 ? T('včera', 'yesterday') : T(`před ${days} dny`, `${days} days ago`));
@@ -112,6 +116,12 @@ function connectSSE() {
   if (App.es) App.es.close();
   const es = new EventSource('/api/events');
   es.onmessage = e => { App.st = JSON.parse(e.data); onState(); };
+  es.onerror = () => {                                                         // spojení definitivně zavřel prohlížeč (401, restart serveru): ověřit přihlášení a připojit znovu
+    if (es.readyState !== 2) return;
+    setTimeout(async () => {
+      try { const s = await api('/api/session'); if (s.auth_required && !s.authed) return renderLogin(); connectSSE(); } catch (e) { setTimeout(connectSSE, 3000); }
+    }, 2000);
+  };
   App.es = es;
 }
 function onState() {
@@ -132,7 +142,7 @@ matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => App.
 function go(v) { if (/^settings\//.test(v)) App.setQ = ''; location.hash = v; }
 
 function render() {
-  clearInterval(App.timer); App.timer = null;
+  clearInterval(App.timer); App.timer = null; clearTimeout(App.setQt);
   App.subFilter = null; App.subReady = false;
   renderSide();
   const freshSettings = async () => { const r = await act(() => api('/api/settings')); if (r) App.settings = r; if (App.view === 'settings') renderSettings(); };
@@ -583,7 +593,7 @@ function renderSubNew() {
     }
   };
   $('#saok').onclick = submit;
-  $('#sau').addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
+  $('#sau').addEventListener('keydown', e => { if (e.key === 'Enter' && !$('#saok').disabled) submit(); });
   $('#sau').focus();
 }
 
@@ -736,8 +746,8 @@ function renderStats() {
   loadStats();
 }
 async function loadStats() {
-  const [t0, t1] = statsRange();
-  const r = await act(() => api(`/api/stats?t0=${t0}&t1=${t1}&tz=${-new Date().getTimezoneOffset()}`)); const box = $('#stbody'); if (!r || !box) return;
+  const [t0, t1] = statsRange(), seq = App.statsSeq = (App.statsSeq || 0) + 1;
+  const r = await act(() => api(`/api/stats?t0=${t0}&t1=${t1}&tz=${-new Date().getTimezoneOffset()}`)); const box = $('#stbody'); if (!r || !box || seq !== App.statsSeq) return;      // starší odpověď nepřepíše novější
   const total = r.done + r.failed, rate = total ? Math.round(r.done / total * 100) : null;
   const days = Math.max(1, ((r.t1 - r.t0) / 86400)), perDay = r.done / days;
   const kpi = (l, v, sub = '') => `<div class="card kpi"><div class="t2 fs12">${l}</div><div class="kv">${v}</div><div class="t2 fs12">${sub || '&nbsp;'}</div></div>`;
@@ -788,7 +798,7 @@ async function renderHistory(host, sub = null) {
    <div class="inwrap" style="height:32px;width:260px">${ic('search', 15)}<input id="hq" placeholder="${T('Hledat v historii…', 'Search history…')}" value="${esc(H.q)}"><button class="ibtn" id="hqx" type="button" title="${T('Smazat hledání (Esc)', 'Clear search (Esc)')}" style="width:22px;height:22px;${H.q ? '' : 'display:none'}">${ic('x', 13)}</button></div>
    <span class="seg" id="hst">${[['', T('Vše', 'All')], ['done', T('Hotovo', 'Done')], ['failed', T('Chyby', 'Failed')], ['cancelled', T('Zrušeno', 'Cancelled')], ['skipped', T('Přeskočeno', 'Skipped')]].map(([v, l]) => `<button class="${H.status === v ? 'on' : ''}" data-v="${v}">${l}</button>`).join('')}</span>
    <select class="input sm" id="hdays" style="width:170px">${[[1, T('Posledních 24 h', 'Last 24 h')], [7, T('Posledních 7 dní', 'Last 7 days')], [30, T('Posledních 30 dní', 'Last 30 days')], [0, T('Vše', 'All time')]].map(([v, l]) => `<option value="${v}" ${H.days === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
-   ${(sub || (App.st.subs || []).length) ? `<label class="row gap6 fs12" style="cursor:pointer" title="${sub ? T('Záznam zůstane jinak v celkové historii.', 'Otherwise the record stays in the global history.') : T('Záznamy z odběrů zůstanou jinak v historii příslušného odběru.', 'Otherwise records from subscriptions stay in that subscription\'s history.')}"><input type="checkbox" id="hboth" ${H.both ? 'checked' : ''}>${sub ? T('i z celkové historie', 'also from global history') : T('i z historie odběrů', 'also from subscription histories')}</label>` : ''}
+   ${(sub || ((App.st && App.st.subs) || []).length) ? `<label class="row gap6 fs12" style="cursor:pointer" title="${sub ? T('Záznam zůstane jinak v celkové historii.', 'Otherwise the record stays in the global history.') : T('Záznamy z odběrů zůstanou jinak v historii příslušného odběru.', 'Otherwise records from subscriptions stay in that subscription\'s history.')}"><input type="checkbox" id="hboth" ${H.both ? 'checked' : ''}>${sub ? T('i z celkové historie', 'also from global history') : T('i z historie odběrů', 'also from subscription histories')}</label>` : ''}
    <button class="btn sm" id="hclear">${ic('trash', 13)} ${T('Vymazat historii', 'Clear history')}</button></div>
    <div id="hbulk"></div>
    <div class="card" style="overflow:hidden" id="hlist"><div class="empty"><div class="spin" style="margin:auto"></div></div></div>
@@ -841,8 +851,8 @@ function bulkBar(matched) {
   };
 }
 async function loadHistory() {
-  const H = App.hist; if (!H.sel) resetSel();
-  const r = await act(() => api(`/api/history?q=${encodeURIComponent(H.q)}&status=${H.status}&days=${H.days}&offset=${H.offset}&limit=${H.limit}&sub=${H.sub || 0}`)); if (!r) return;
+  const H = App.hist, seq = App.histSeq = (App.histSeq || 0) + 1; if (!H.sel) resetSel();
+  const r = await act(() => api(`/api/history?q=${encodeURIComponent(H.q)}&status=${H.status}&days=${H.days}&offset=${H.offset}&limit=${H.limit}&sub=${H.sub || 0}`)); if (!r || seq !== App.histSeq) return;
   if (!r.items.length && r.matched && H.offset >= r.matched) { H.offset = Math.max(0, Math.floor((r.matched - 1) / H.limit) * H.limit); return loadHistory(); }
   H.items = r.items;
   $('#htot').textContent = `${r.total_done} ${T('stažených videí', 'downloaded videos')} · ${fmtBytes(r.total_bytes)}`;
@@ -898,7 +908,7 @@ function openPlayer(h, local) {
   const audio = /\.(mp3|m4a|opus|ogg)$/i.test(h.filepath || '');
   const m = modal(`<div class="mh">${ic('play', 18)}<h2 class="ell grow" title="${esc(h.title || '')}">${esc(h.title || h.url)}</h2><button class="ibtn" id="pclose" title="${T('Zavřít', 'Close')}">${ic('x', 16)}</button></div>
    <div class="mb"><${audio ? 'audio' : 'video'} id="pvid" controls autoplay playsinline preload="metadata" src="/api/stream/${h.id}" style="width:100%;${audio ? '' : 'max-height:70vh;background:#000;border-radius:10px;display:block'}"></${audio ? 'audio' : 'video'}>
-   <div id="perr" class="banner" style="display:none;margin-top:12px">${ic('alert', 16)}<span class="grow"><span id="perrmsg">${T('Tento prohlížeč video nepřehraje: Safari neumí kontejner MKV (a některé kodeky), Chrome a Edge ho obvykle přehrají. Soubor si můžete stáhnout nebo otevřít v jiném přehrávači (např. VLC). Aplikace videa nekóduje ani nepřebaluje; chcete-li příště soubory přehratelné všude, nastavte v Nastavení › Stahování Kvalitu na Kompatibilitu (MP4 s H.264, u některých webů nejvýš 1080p).', 'This browser cannot play the video: Safari cannot open the MKV container (and some codecs), Chrome and Edge usually can. Download the file or open it in another player (e.g. VLC). The app never re-encodes or repackages video; to get files that play everywhere next time, set Quality to Compatibility in Settings › Downloading (MP4 with H.264, up to 1080p on some sites).')}</span>${audio ? '' : `<button class="btn sm" id="ptc">${ic('play', 12)} ${T('Přehrát přebalenou verzi', 'Play repackaged version')}</button>`}</div>
+   <div id="perr" class="banner" style="display:none;margin-top:12px">${ic('alert', 16)}<span class="grow"><span id="perrmsg">${T('Tento prohlížeč video nepřehraje: Safari neumí kontejner MKV (a některé kodeky), Chrome a Edge ho obvykle přehrají. Soubor si můžete stáhnout nebo otevřít v jiném přehrávači (např. VLC). Aplikace videa nekóduje ani nepřebaluje; chcete-li příště soubory přehratelné všude, nastavte v Nastavení › Stahování Kvalitu na Kompatibilitu (MP4 s H.264, u některých webů nejvýš 1080p).', 'This browser cannot play the video: Safari cannot open the MKV container (and some codecs), Chrome and Edge usually can. Download the file or open it in another player (e.g. VLC). The app never re-encodes or repackages video; to get files that play everywhere next time, set Quality to Compatibility in Settings › Downloading (MP4 with H.264, up to 1080p on some sites).')}</span></div>
    <div class="row gap8 t2 fs12 wrap" style="margin-top:10px">${esc(h.channel || '')}${h.height ? ' · ' + h.height + 'p' : ''} · ${fmtBytes(h.filesize)} · <span class="mono ell" style="max-width:100%">${esc(h.filepath || '')}</span></div></div>
    <div class="mf">${local ? `<button class="btn" id="pfold">${ic('folder', 14)} ${T('Zobrazit ve složce', 'Show in folder')}</button>` : ''}<a class="btn" href="/api/file/${h.id}">${ic('download', 14)} ${T('Stáhnout soubor', 'Download file')}</a><button class="btn primary" id="pclose2">${T('Zavřít', 'Close')}</button></div>`, 'wide');
   m.el.style.width = '960px';
@@ -1313,6 +1323,7 @@ async function catPoll() {
   try {
     const [ov, data] = await Promise.all([api('/api/catalog'), api('/api/catalog/items?' + catQuery())]);
     if (seq !== CAT.seq || App.view !== 'catalog') return;
+    if (data.total && !data.items.length && CAT.offset > 0) { CAT.offset = Math.max(0, (Math.ceil(data.total / CAT.limit) - 1) * CAT.limit); return catLoad(); }     // poslední stránka mezitím zmizela
     CAT.ov = ov; catPaintSources(); catPaintTools(); catDonePrompt();
     const sig = JSON.stringify(data);
     if (sig !== CAT.sig) { CAT.sig = sig; CAT.data = data; catPaintGrid(); catPaintSel(); catPaintPager(); }
@@ -1435,7 +1446,7 @@ function catRemoveDialog(sid) {
   const go = async keep => {
     m.close();
     const r = await act(() => api(`/api/catalog/sources/${sid}?keep_items=${keep ? 1 : 0}`, { method: 'DELETE' }), keep ? T('Zdroj odebrán, videa zůstala v katalogu', 'Source removed, videos kept in the catalog') : T('Zdroj i jeho videa odebrány', 'Source and its videos removed'));
-    if (r) { CAT.source = 0; $('#catsrcsel').value = '0'; catClearSel(); catLoad(); }
+    if (r) { if (CAT.source === sid) { CAT.source = 0; $('#catsrcsel').value = '0'; } catClearSel(); catLoad(); }
   };
   $('#catdkeep', m.el).onclick = () => go(true); $('#catdall', m.el).onclick = () => go(false); $('#catdno', m.el).onclick = m.close;
 }
@@ -1570,7 +1581,7 @@ function catAnimTrack() {
   let raf = 0;
   document.addEventListener('mousemove', e => { CAT.mx = e.clientX; CAT.my = e.clientY; }, { passive: true });
   document.documentElement.addEventListener('mouseleave', () => { CAT.mx = null; });
-  window.addEventListener('scroll', () => { if (!raf) raf = requestAnimationFrame(() => { raf = 0; catAnimSync(); }); }, { passive: true });
+  (document.getElementById('mainwrap') || window).addEventListener('scroll', () => { if (!raf) raf = requestAnimationFrame(() => { raf = 0; catAnimSync(); }); }, { passive: true });
 }
 function catAnimHover(e) {
   if (matchMedia('(hover: none)').matches) return;                                    // dotyk: přepíná jen klepnutí (jinak by emulované najetí animaci hned vypnulo)
@@ -1582,7 +1593,11 @@ function catAnimHover(e) {
 }
 function catGridClick(e) {
   const th = e.target.closest('.vth.has-anim');
-  if (th && !e.target.closest('.vck, a, button') && matchMedia('(hover: none)').matches) { catAnimOn(th, th.dataset.want !== '1'); return; }
+  if (th && !e.target.closest('.vck, a, button') && matchMedia('(hover: none)').matches) {
+    const on = th.dataset.want !== '1';
+    if (on) $$('#catgrid .vth.has-anim').forEach(o => { if (o !== th && o.dataset.want === '1') catAnimOn(o, false); });        // na dotyku hraje jen jedna animace
+    catAnimOn(th, on); return;
+  }
   const b = e.target.closest('[data-cact]');
   if (!b || b.disabled) return;
   if (b.dataset.cact === 'copy') { copyText(b.dataset.url).then(ok => toast(ok ? T('Adresa zkopírována', 'Address copied') : T('Kopírování se nepodařilo', 'Copy failed'), !ok)); return; }
@@ -1624,9 +1639,12 @@ function openCatAdd() {
   $('#catfile', m.el).onchange = async e => { const f = e.target.files[0]; if (!f) return; ta.value = (ta.value.trim() ? ta.value.trim() + '\n' : '') + await f.text(); e.target.value = ''; count(); };
   $('#catcancel', m.el).onclick = m.close;
   $('#catgo', m.el).onclick = async () => {
-    if (!ta.value.trim()) return;
+    const go = $('#catgo', m.el);
+    if (!ta.value.trim() || go.disabled) return;
+    go.disabled = true;                                                        // druhé kliknutí by existující adresy zařadilo jako „načíst znovu vše“
     const r = await act(() => api('/api/catalog/sources', { method: 'POST', body: { text: ta.value } }));
-    if (!r) return;
+    if (!r) { go.disabled = false; return; }
+    ta.value = ''; count();
     CAT.ov = r.overview;
     const parts = [r.added.length && `${T('Přidáno', 'Added')}: ${r.added.length}`, r.reloaded.length && `${T('Načte se znovu', 'Reloading')}: ${r.reloaded.length}`,
       r.skipped.length && `${T('Přeskočeno', 'Skipped')}: ${r.skipped.length}`, r.invalid_count && `${T('Neplatných řádků', 'Invalid lines')}: ${r.invalid_count}`].filter(Boolean);
@@ -2134,6 +2152,7 @@ function renderHelp() {
 /* ------------------------------------------------------------ přihlášení */
 function renderLogin() {
   if (App.es) App.es.close();
+  clearInterval(App.timer); App.timer = null; clearTimeout(App.setQt);          // dotazování na pozadí by dál dostávalo 401 a přepisovalo přihlašovací formulář
   $('#app').innerHTML = `<div class="card login"><div class="logo" style="padding:0 0 18px"><div class="mk">${ic('download', 16)}</div>VidDown</div>
    <h2 style="margin-bottom:12px">${T('Přihlášení', 'Sign in')}</h2><form id="lf" class="col gap10"><input class="input" type="password" id="lp" placeholder="${T('Heslo', 'Password')}" autofocus autocomplete="current-password">
    <button class="btn primary lg" type="submit">${T('Přihlásit', 'Sign in')}</button><div id="lerr" class="err fs12"></div></form></div>`;

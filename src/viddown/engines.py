@@ -204,6 +204,9 @@ class Engine:
         return rel.version
 
     def remove(self, version: str) -> None:
+        # jen nainstalovaná verze: jinak by `root / version` (absolutní cesta, „..“, prázdný řetězec) smazalo cizí složku
+        if not isinstance(version, str) or version not in [v["version"] for v in self.versions()]:
+            raise ValueError(f"Verze {version!r} není nainstalovaná")
         if version == self.current():
             raise ValueError("Aktivní verzi nelze smazat")
         shutil.rmtree(self.root / version, ignore_errors=True)

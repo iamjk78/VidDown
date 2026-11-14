@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import re
@@ -11,7 +12,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from starlette.background import BackgroundTask
@@ -57,9 +58,46 @@ def create_app(app_state) -> FastAPI:
             return True
         return hmac.compare_digest(req.cookies.get("vd_session", ""), token())
 
+    extra_hosts = {h.strip().lower() for h in os.environ.get("VIDDOWN_ALLOWED_HOSTS", "").split(",") if h.strip()}
+
+    def host_ok(host_header: str) -> bool:
+        """Ochrana proti DNS rebindingu: GUI odpovídá jen na adresu IP, `localhost`, jména bez tečky a místní/VPN domény
+        (`.local`, `.lan`, `.ts.net`, `.internal`…); jiná doména (např. cizí web, který přesměroval svůj DNS sem) se odmítne.
+        Další jména povolí proměnná VIDDOWN_ALLOWED_HOSTS (čárkami oddělená)."""
+        h = (host_header or "").strip().lower()
+        if h.startswith("["):
+            h = h[1:].split("]", 1)[0]
+        else:
+            h = h.rsplit(":", 1)[0] if h.count(":") == 1 else h
+        if not h:
+            return False
+        try:
+            ipaddress.ip_address(h)
+            return True
+        except ValueError:
+            pass
+        return (h in extra_hosts or "." not in h or h.endswith((".local", ".lan", ".localhost", ".internal", ".ts.net", ".home.arpa")))
+
+    def same_origin(req: Request) -> bool:
+        """Měnící požadavek z cizího webu (CSRF) má `Origin` jiného hostitele nebo `Sec-Fetch-Site: cross-site`."""
+        if req.headers.get("sec-fetch-site", "").lower() == "cross-site":
+            return False
+        origin = req.headers.get("origin")
+        if not origin or origin == "null":
+            return origin is None
+        try:
+            netloc = urlsplit(origin).netloc.lower()
+        except ValueError:
+            return False
+        return netloc == (req.headers.get("host") or "").lower()
+
     @app.middleware("http")
     async def guard(req: Request, call_next):
         p = req.url.path
+        if not host_ok(req.headers.get("host", "")):
+            return JSONResponse({"error": "host"}, status_code=400)
+        if req.method not in ("GET", "HEAD", "OPTIONS") and not same_origin(req):
+            return JSONResponse({"error": "cross-origin"}, status_code=403)
         open_paths = ("/api/session", "/api/login")
         if p.startswith("/api/") and p not in open_paths and not authed(req):
             return JSONResponse({"error": "auth"}, status_code=401)
@@ -96,6 +134,7 @@ def create_app(app_state) -> FastAPI:
 
     @app.post("/api/logout")
     async def logout():
+        S.secrets.rotate_session()                      # odhlášení zneplatní cookie i na ostatních zařízeních
         r = JSONResponse({"ok": True})
         r.delete_cookie("vd_session")
         return r
@@ -1102,7 +1141,7 @@ def create_app(app_state) -> FastAPI:
         if action == "remove":
             body = await req.json()
             try:
-                S.engines.get(name).remove(body["version"])
+                S.engines.get(name).remove(body.get("version") if isinstance(body, dict) else None)
             except ValueError as e:
                 raise HTTPException(400, str(e))
             return {"ok": True}

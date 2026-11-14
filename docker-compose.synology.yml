@@ -16,8 +16,10 @@ services:
       TZ: Europe/Prague
       PUID: "1026"           # vlastník stažených souborů: uživatel NAS (v SSH `id <uživatel>`)
       PGID: "100"            # skupina (na Synology běžně 100 = users)
-      VIDDOWN_ALLOW_NO_PASSWORD: "1"   # bez hesla – jen když je NAS dostupný jen přes VPN (nebo nastavte VIDDOWN_PASSWORD)
-      # VIDDOWN_PASSWORD: "silne-heslo"
+      # Port je dostupný celé místní síti, proto je heslo povinné: nastavte ho tady, nebo v proměnné prostředí VIDDOWN_PASSWORD.
+      # Bez hesla (jen když je NAS dostupný výhradně přes VPN a port je vázaný na adresu VPN) lze použít VIDDOWN_ALLOW_NO_PASSWORD: "1".
+      VIDDOWN_PASSWORD: "${VIDDOWN_PASSWORD:?Nastavte VIDDOWN_PASSWORD (heslo do GUI)}"
+      # VIDDOWN_ALLOWED_HOSTS: "nas.example.com"   # jméno, kterým se do GUI přistupuje, když není IP adresa, bez tečky ani .local/.lan
     volumes:
       - /volume1/docker/viddown/data:/data           # databáze, nastavení, token, cookies, enginy, logy
       - /volume1/video/VidDown:/downloads      # sem se ukládají videa (cílová složka v GUI: /downloads)

@@ -13,6 +13,12 @@ from viddown.config import Settings
 from viddown.db import DB
 from viddown.resolvers import ResolveError
 
+@pytest.fixture(autouse=True)
+def no_dns_for_pages(monkeypatch):
+    """Adresy videí se před prohlížečem ověřují včetně DNS; zkoušky běží bez sítě, proto jen kontrola zápisu adresy."""
+    monkeypatch.setattr(cd.netsafe, "host_ok", cd.netsafe.literal_ok)
+
+
 UNSUP = ResolveError("Unsupported URL: https://web.example/porad", "unsupported")
 BASE = "https://web.example/porad"
 

@@ -140,7 +140,7 @@ def build(folder: Path, item_id: int, value: str, ffmpeg: str | None, max_bytes:
                     (folder / f"{item_id}.anim.{other}").unlink(missing_ok=True)
                 return final.name
         return None
-    except (OSError, subprocess.SubprocessError, httpx.HTTPError) as e:
+    except Exception as e:  # noqa: BLE001 - vadná adresa nebo odpověď nesmí zastavit smyčku animací
         log.debug("storyboard %s: %s", item_id, e)
         return None
     finally:

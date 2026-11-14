@@ -26,7 +26,7 @@ def make_mkv(tmp_path, name="v.mkv", subs=True, audio="libopus", video="libx264"
     cmd = [FF, "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=duration=2:size=640x360:rate=10", "-f", "lavfi", "-i", "sine=duration=2"]
     if subs:
         cmd += ["-i", str(srt)]
-    cmd += ["-map", "0:v", "-map", "1:a", *(["-map", "2:s"] if subs else []), "-c:v", video, "-c:a", audio, *(["-c:s", "webvtt"] if subs else []), "-shortest", "-t", "2",
+    cmd += ["-map", "0:v", "-map", "1:a", *(["-map", "2:s"] if subs else []), "-c:v", video, "-c:a", audio, *(["-c:s", "webvtt"] if subs else []), "-t", "2",
             str(tmp_path / name)]
     subprocess.run(cmd, check=True, stdin=subprocess.DEVNULL, timeout=60)
     return tmp_path / name

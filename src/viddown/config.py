@@ -338,17 +338,24 @@ class Secrets:
             salt = pysecrets.token_hex(16)
             d["password_salt"] = salt
             d["password_hash"] = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt), 200_000).hex()
+        d["session_key"] = pysecrets.token_hex(32)                      # změna hesla zneplatní stará sezení
         self._save(d)
 
     def check_password(self, password: str) -> bool:
         env = os.environ.get("VIDDOWN_PASSWORD")
         if env:
-            return pysecrets.compare_digest(env, password)
+            return pysecrets.compare_digest(env.encode(), password.encode())            # bajty: str s diakritikou by vyhodil TypeError
         d = self._load()
         if not d.get("password_hash"):
             return False
         h = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(d["password_salt"]), 200_000).hex()
-        return pysecrets.compare_digest(h, d["password_hash"])
+        return pysecrets.compare_digest(h.encode(), d["password_hash"].encode())
+
+    def rotate_session(self) -> None:
+        """Nový klíč sezení: všechny dosud vydané cookies přestanou platit (změna hesla, odhlášení)."""
+        d = self._load()
+        d["session_key"] = pysecrets.token_hex(32)
+        self._save(d)
 
     def session_key(self) -> str:
         d = self._load()

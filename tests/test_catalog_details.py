@@ -61,7 +61,7 @@ def images(monkeypatch):
     fetched = Fetched()
     fetched.referers = []
 
-    def fetch(url, dest, timeout=20, referer=None):
+    def fetch(url, dest, timeout=20, referer=None, proxy=None):
         fetched.append(url)
         fetched.referers.append(referer)
         if "bad" in url:

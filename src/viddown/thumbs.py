@@ -9,6 +9,8 @@ from pathlib import Path
 
 import httpx
 
+from . import netsafe
+
 log = logging.getLogger("viddown.thumbs")
 UA = "Mozilla/5.0 (VidDown)"
 
@@ -41,15 +43,18 @@ def referer_of(page_url: str | None) -> str | None:
     return f"{u.scheme}://{u.netloc}/" if u.scheme in ("http", "https") and u.netloc else None
 
 
-def fetch(url: str, dest: Path, timeout=20, referer: str | None = None) -> bool:
+MAX_THUMB_BYTES = 15 * 1024 * 1024
+
+
+def fetch(url: str, dest: Path, timeout=20, referer: str | None = None, proxy: str | None = None) -> bool:
+    """Stáhne miniaturu (adresy pocházejí od cizích webů): jen veřejné adresy i po přesměrování, limit velikosti a celkového času."""
     headers = {"User-Agent": BROWSER_UA, "Referer": referer} if referer else {"User-Agent": UA}
     try:
-        with httpx.Client(follow_redirects=True, timeout=timeout, headers=headers) as c:
-            r = c.get(url)
-            if r.status_code != 200 or not r.content:
-                return False
-            dest.write_bytes(r.content)
-            return True
+        got = netsafe.fetch_limited(url, headers, MAX_THUMB_BYTES, proxy, total_timeout=float(timeout))
+        if got is None or got[0] != 200 or not got[2]:
+            return False
+        dest.write_bytes(got[2])
+        return True
     except Exception as e:  # noqa: BLE001
         log.debug("miniatura %s: %s", url, e)
         return False

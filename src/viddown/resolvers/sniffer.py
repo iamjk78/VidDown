@@ -357,8 +357,8 @@ async def sniff(url: str, ctx: Ctx) -> dict:
             except Exception:  # noqa: BLE001
                 meta = {"title": "", "image": None, "poster": None, "drm": None, "srcs": []}
             for src in meta.get("srcs") or []:
-                if is_junk_direct(src, 0):
-                    continue
+                if not isinstance(src, str) or not src.lower().startswith(("http://", "https://")) or is_junk_direct(src, 0):
+                    continue                                              # file:, concat: a jiná schémata by ffmpeg četl z disku kontejneru
                 found.setdefault(src, {"kind": "direct", "len": 0, "t": time.monotonic()})
 
             candidates = []

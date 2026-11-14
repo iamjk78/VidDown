@@ -64,7 +64,7 @@ def looks_like_image(path: Path) -> bool:
     return head[:3] == b"\xff\xd8\xff" or head[:8] == b"\x89PNG\r\n\x1a\n" or head[:6] in (b"GIF87a", b"GIF89a") or (head[:4] == b"RIFF" and head[8:12] == b"WEBP")
 
 
-def download_thumb(folder: Path, item_id: int, urls: list[str], referer: str | None = None) -> str | None:
+def download_thumb(folder: Path, item_id: int, urls: list[str], referer: str | None = None, proxy: str | None = None) -> str | None:
     """Stáhne první použitelnou miniaturu ze seznamu a uloží ji jako `<id>.<přípona>` (starší soubor položky nahradí).
     Vrací název souboru, nebo None."""
     folder.mkdir(parents=True, exist_ok=True)
@@ -73,7 +73,7 @@ def download_thumb(folder: Path, item_id: int, urls: list[str], referer: str | N
         ext = suffix if suffix in IMAGE_EXTS else ".jpg"
         tmp = folder / f"{item_id}{ext}.{uuid.uuid4().hex[:8]}.part"           # vlastní soubor pro každé stažení (souběh s podrobnostmi)
         try:
-            if not thumbs.fetch(url, tmp, referer=referer) or not looks_like_image(tmp):
+            if not thumbs.fetch(url, tmp, referer=referer, proxy=proxy) or not looks_like_image(tmp):
                 continue
             final = folder / f"{item_id}{ext}"
             tmp.replace(final)
@@ -108,7 +108,7 @@ def download_anim(folder: Path, item_id: int, url: str, max_bytes: int, referer:
     headers = {"User-Agent": thumbs.BROWSER_UA, "Referer": referer} if referer else {"User-Agent": thumbs.UA}
     try:
         got = netsafe.fetch_limited(url, headers, max_bytes, proxy)
-    except (OSError, ValueError, httpx.HTTPError) as e:
+    except Exception as e:  # noqa: BLE001 - cokoli z cizí adresy (i InvalidURL) nesmí zastavit smyčku animací
         log.debug("animace %s: %s", url, e)
         return None
     if got is None or got[0] != 200 or not got[2]:
@@ -216,7 +216,7 @@ class DetailWorker:
                  json.dumps(urls[1:1 + catalog.THUMB_ALTS_MAX]) if len(urls) > 1 else None, catalog.anim_source(info), catalog.published_ts(info),
                  catalog.norm(f"{title or item['title'] or ''} {channel or item['channel'] or ''}"), time.time(), item["id"], expect)).rowcount
         if n and urls and urls[0] != item.get("thumb_url"):      # jiná (obvykle lepší) miniatura než ze seznamu: nahradit
-            name = await asyncio.to_thread(download_thumb, self.folder(), item["id"], urls, thumbs.referer_of(item.get("url")))
+            name = await asyncio.to_thread(download_thumb, self.folder(), item["id"], urls, thumbs.referer_of(item.get("url")), self.proxy())
             if name:
                 with self.db.conn() as c:
                     c.execute("update catalog_items set thumb_file=?, updated_at=? where id=? and state in ('new','queued')", (name, time.time(), item["id"]))
@@ -276,6 +276,9 @@ class DetailWorker:
     async def process_slow(self, item: dict) -> None:
         """Jedno video prohlížečem: najde přehrávaný stream, rozlišení a miniaturu (stahování samo nic nestahuje)."""
         host = item.get("host") or ""
+        if not await asyncio.to_thread(netsafe.host_ok, item["url"]):          # prohlížeč ani ffmpeg nesmí z cizí stránky na vnitřní síť
+            self._finish_slow(item, "failed", "adresa vede do vnitřní sítě")
+            return
         try:
             sn = await sniffer.sniff(item["url"], detail_ctx(self.st))
         except ResolveError as e:
@@ -351,8 +354,12 @@ class DetailWorker:
             alts = json.loads(row.get("thumb_alts") or "[]")
         except ValueError:
             alts = []
-        name = await asyncio.to_thread(download_thumb, self.folder(), row["id"], [row["thumb_url"], *[a for a in alts if isinstance(a, str)]],
-                                       thumbs.referer_of(row.get("url")))
+        try:
+            name = await asyncio.to_thread(download_thumb, self.folder(), row["id"], [row["thumb_url"], *[a for a in alts if isinstance(a, str)]],
+                                           thumbs.referer_of(row.get("url")), self.proxy())
+        except Exception:  # noqa: BLE001 - chyba jedné miniatury nesmí zastavit smyčku (jinak by se pokaždé zkoušela znovu ta samá)
+            log.exception("katalog: miniatura %s", row["id"])
+            name = None
         with self.db.conn() as c:
             c.execute("update catalog_items set thumb_file=?, updated_at=? where id=? and thumb_file is null",
                       (name if name else "", time.time(), row["id"]))
@@ -379,10 +386,14 @@ class DetailWorker:
     async def _anim_one(self, row: dict) -> None:
         max_bytes = int(float(self.st.settings.get("catalog_anim_max_mb") or 5) * 1024 * 1024)
         referer = thumbs.referer_of(row.get("url"))
-        if storyboard.is_spec(row["anim_url"]):                       # storyboard: obrázky se složí ffmpegem do krátkého MP4
-            name = await asyncio.to_thread(storyboard.build, self.folder(), row["id"], row["anim_url"], self.ffmpeg(), max_bytes, referer, self.proxy())
-        else:
-            name = await asyncio.to_thread(download_anim, self.folder(), row["id"], row["anim_url"], max_bytes, referer, self.proxy())
+        try:
+            if storyboard.is_spec(row["anim_url"]):                   # storyboard: obrázky se složí ffmpegem do krátkého MP4
+                name = await asyncio.to_thread(storyboard.build, self.folder(), row["id"], row["anim_url"], self.ffmpeg(), max_bytes, referer, self.proxy())
+            else:
+                name = await asyncio.to_thread(download_anim, self.folder(), row["id"], row["anim_url"], max_bytes, referer, self.proxy())
+        except Exception:  # noqa: BLE001 - jedna vadná animace nesmí zastavit všechny ostatní
+            log.exception("katalog: animace %s", row["id"])
+            name = None
         with self.db.conn() as c:
             n = c.execute("update catalog_items set anim_file=?, updated_at=? where id=? and anim_file is null and state in ('new','queued')",
                           (name if name else "", time.time(), row["id"])).rowcount
@@ -416,6 +427,9 @@ class DetailWorker:
     async def process_page_scan(self, item: dict) -> None:
         """Stáhne stránku videa a najde na ní náhledový klip nebo animaci; nic nenalezeno = `anim_url=''` (znovu až „Doplnit“)."""
         host = item.get("host") or ""
+        if not await asyncio.to_thread(netsafe.host_ok, item["url"]):          # adresa videa pochází z cizí stránky: do vnitřní sítě se nesahá
+            self._mark_anim(item, "")
+            return
         self.page_hosts.add(host)                                      # během skenu na tento web nesmí sahat ani worker podrobností
         try:
             text, final = await pagelist.fetch(item["url"], self.st.settings.all())
@@ -475,6 +489,8 @@ class DetailWorker:
         try:
             while url and url not in visited and page_no <= SRC_SCAN_PAGES:
                 visited.add(url)
+                if page_no > 1 and not await asyncio.to_thread(netsafe.host_ok, url):      # odkaz na další stránku je z cizího HTML
+                    break
                 try:
                     if rd is not None:                                  # web už jednou odmítl prostý dotaz: dál jen prohlížečem
                         text, final = await rd.render(url, scrolls=1)

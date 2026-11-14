@@ -22,22 +22,46 @@ def allow_private() -> bool:
     return env_flag("VIDDOWN_ALLOW_PRIVATE_PREVIEW")
 
 
+def _connect_host(url: str) -> str | None:
+    """Jméno, na které se `httpx` skutečně připojí (IDNA 2008, malá písmena); jiný převod než v `getaddrinfo` (IDNA 2003) by dovolil
+    obejít kontrolu (`evilß.com` → `evilss.com` při kontrole, `xn--evil-yna.com` při připojení). Neplatná adresa → None."""
+    try:
+        return httpx.URL(url).raw_host.decode("ascii").lower() or None
+    except (httpx.InvalidURL, UnicodeError, ValueError):
+        return None
+
+
+def _global_ip(addr: ipaddress._BaseAddress) -> bool:
+    """Veřejná adresa; u IPv6 s vloženou IPv4 (mapovaná, NAT64 64:ff9b::/96, 6to4 2002::/16) musí být veřejná i ta vložená."""
+    if not addr.is_global:
+        return False
+    if isinstance(addr, ipaddress.IPv6Address):
+        if addr.ipv4_mapped is not None:
+            return _global_ip(addr.ipv4_mapped)
+        packed = addr.packed
+        if packed[:12] == bytes.fromhex("0064ff9b0000000000000000"):
+            return _global_ip(ipaddress.IPv4Address(packed[12:]))
+        if packed[:2] == b"\x20\x02":
+            return _global_ip(ipaddress.IPv4Address(packed[2:6]))
+    return True
+
+
 def literal_ok(url: str) -> bool:
     """Bez DNS: http(s), hostitel se jménem nebo veřejnou IP. Zakázané: localhost, jména bez tečky nebo s koncovou tečkou, `.local`,
     `.internal`, `.lan`, jakýkoli tvar IP, který není přesně zapsaná veřejná adresa (127.1, osmičková čísla…)."""
     try:
         u = urlsplit(url)
-        host = (u.hostname or "").lower()
     except ValueError:
         return False
-    if u.scheme not in ("http", "https") or not host:
+    host = _connect_host(url) if u.scheme in ("http", "https") else None
+    if not host:
         return False
     if allow_private():
         return True
     if host == "localhost" or host.endswith(".") or host.endswith((".local", ".localhost", ".internal", ".lan", ".home", ".corp")):
         return False
     try:
-        return ipaddress.ip_address(host).is_global
+        return _global_ip(ipaddress.ip_address(host))
     except ValueError:
         pass
     if _EXOTIC_IP.match(host):                               # vypadá jako číslo, ale není to přesná IP: odmítnout
@@ -51,7 +75,7 @@ def host_ok(url: str) -> bool:
         return False
     if allow_private():
         return True
-    host = urlsplit(url).hostname or ""
+    host = _connect_host(url) or ""
     try:
         ipaddress.ip_address(host)
         return True                                          # IP už ověřil literal_ok
@@ -59,11 +83,11 @@ def host_ok(url: str) -> bool:
         pass
     try:
         infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
-    except OSError:
+    except (OSError, UnicodeError):
         return False
     addrs = {i[4][0].split("%")[0] for i in infos}
     try:
-        return bool(addrs) and all(ipaddress.ip_address(a).is_global for a in addrs)
+        return bool(addrs) and all(_global_ip(ipaddress.ip_address(a)) for a in addrs)
     except ValueError:
         return False
 
@@ -73,6 +97,13 @@ def fetch_limited(url: str, headers: dict, max_bytes: int, proxy: str | None = N
     Vrací (stav, hlavičky, tělo), nebo None, když adresa není veřejná, přesměrování je moc, tělo přesáhne `max_bytes`
     nebo vyprší čas. Těla přesměrování se nečtou."""
     deadline = time.monotonic() + total_timeout
+    try:
+        return _fetch_limited(url, headers, max_bytes, proxy, deadline, total_timeout)
+    except (httpx.InvalidURL, UnicodeError):                 # vadná adresa z cizího HTML nesmí shodit volající smyčku
+        return None
+
+
+def _fetch_limited(url: str, headers: dict, max_bytes: int, proxy: str | None, deadline: float, total_timeout: float):
     kw = {"proxy": proxy} if proxy and proxy.startswith("http") else {}
     with httpx.Client(follow_redirects=False, timeout=min(30.0, total_timeout), headers=headers, **kw) as c:
         for _ in range(MAX_HOPS + 1):
