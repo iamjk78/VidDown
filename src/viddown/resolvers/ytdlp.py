@@ -12,6 +12,18 @@ from .. import container
 from ..util import classify_error
 from . import Cancelled, Ctx, ProcHolder, ResolveError, subprocess_kwargs
 
+PENDING = ".viddown-pending.json"      # hotové stažení čekající na přesun do cílové složky (nebo přerušené po zápisu do archivu yt-dlp)
+
+
+def save_pending(staging: Path, file: Path, thumb: Path | None, log_text: str, method: str = "ytdlp") -> None:
+    """Zapíše značku, že `file` je hotové: další spuštění úlohy ho jen přesune, místo aby ho yt-dlp označil za „už staženo“ (archiv)
+    a úloha pak smazala dočasnou složku i s videem."""
+    try:
+        (staging / PENDING).write_text(json.dumps({"file": str(file), "thumb": str(thumb) if thumb else None, "method": method, "log": log_text or ""}))
+    except OSError as e:
+        log.warning("značku hotového souboru %s nelze zapsat: %s", file, e)
+
+
 log = logging.getLogger("viddown.ytdlp")
 
 PROG = ("download:VDPROG %(progress.status)s|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|"
@@ -198,6 +210,8 @@ async def download(url: str, info: dict | None, ctx: Ctx, staging: Path, name: s
     code = await proc.wait()
     holder.proc = None
     if holder.stopped:
+        if filepath and Path(filepath).is_file():                       # yt-dlp už video zapsal do archivu: soubor se musí dokončit později
+            save_pending(staging, Path(filepath), None, "\n".join(tail))
         raise Cancelled()
     if skipped:
         return {"skipped": skipped}
@@ -222,10 +236,11 @@ async def download(url: str, info: dict | None, ctx: Ctx, staging: Path, name: s
         except Exception:  # noqa: BLE001
             ff = None
         remuxed = await container.remux_mkv_to_mp4(str(ff) if ff else shutil.which("ffmpeg"), fp, holder, MODES.get(s.get("perf_mode", "full"), MODES["full"])[1] or None)
-        if holder.stopped:
-            raise Cancelled()
         if remuxed:
             fp = remuxed
+        if holder.stopped:
+            save_pending(staging, fp if fp.is_file() else Path(filepath), None, "\n".join(tail))       # přebalení přerušeno: video je v archivu, soubor zůstane k dokončení
+            raise Cancelled()
     thumb = fp.with_suffix(".jpg")
     if not thumb.exists():
         jpgs = [p for p in staging.glob("*.jpg")]

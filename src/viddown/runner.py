@@ -6,6 +6,7 @@ takže funguje i když úlohu přidá jiný proces.
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import logging
 import os
@@ -25,7 +26,7 @@ from .resolvers import pages, sniffer, ytdlp
 from .util import (classify_error, fallback_allowed, free_space, in_schedule, render_template, retry_allowed,
                    sanitize_filename, unique_target)
 
-PENDING = ".viddown-pending.json"  # hotové stažení čekající na přesun do cílové složky
+PENDING = ytdlp.PENDING  # hotové stažení čekající na přesun do cílové složky
 
 
 def target_available(path: str) -> tuple[bool, str]:
@@ -43,6 +44,7 @@ def target_available(path: str) -> tuple[bool, str]:
 
 log = logging.getLogger("viddown.runner")
 RETRY_DELAYS = [60, 300, 900]
+DISK_TIMEOUT = 8.0          # nejdéle tak dlouho čeká tick na zjištění volného místa (zaseknutý síťový disk)
 
 
 class Runner:
@@ -56,6 +58,8 @@ class Runner:
         self._prev_task: asyncio.Task | None = None
         self._prev_next = 0.0
         self._temp_cache: tuple[float, int] = (-1e9, 0)
+        self._disk_cache: tuple[float, dict | None] = (-1e9, None)
+        self._disk_task: asyncio.Future | None = None
         self.running: dict[int, tuple[asyncio.Task, ProcHolder]] = {}
         self.probing: dict[int, asyncio.Task] = {}
         self.stop_reason: dict[int, str] = {}
@@ -170,7 +174,7 @@ class Runner:
         await self._check_target(s)
 
         # 3) dohled nad běžícími stahováními
-        disk = self.disk_status(s)
+        disk = await self.disk_status_async(s)
         disk_low = disk["low"] is not None
         qpaused = self.queue_paused()
         hard = self.pause_is_hard()
@@ -273,6 +277,30 @@ class Runner:
             pass
         self._temp_cache = (now, total)
         return total
+
+    def disk_cached(self, s: dict | None = None) -> dict:
+        """Naposledy zjištěný stav disků (obnovuje ho `tick`); pro GUI, aby dotaz na stav nezávisel na zaseknutém síťovém disku."""
+        return self._disk_cache[1] if self._disk_cache[1] is not None else self.disk_status(s)
+
+    async def disk_status_async(self, s: dict | None = None) -> dict:
+        """`disk_status` ve vlákně s časovým limitem: zaseknutý NFS/SMB disk nezastaví celou aplikaci (použije se poslední známý stav).
+        Dokud předchozí dotaz neskončí, nový se nespouští."""
+        now = time.monotonic()
+        task = self._disk_task
+        if task is None or task.done():
+            if now - self._disk_cache[0] >= 1.0 or self._disk_cache[1] is None:
+                self._disk_task = task = asyncio.ensure_future(asyncio.to_thread(self.disk_status, s))
+        if task is not None and not task.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(task), DISK_TIMEOUT)
+            except asyncio.TimeoutError:
+                log.warning("zjištění volného místa trvá příliš dlouho (zaseknutý disk?)")
+        if task is not None and task.done() and not task.cancelled() and task.exception() is None:
+            self._disk_cache = (time.monotonic(), task.result())
+        if self._disk_cache[1] is None:
+            return {"target_free": None, "target_reliable": False, "temp_free": None, "temp_dir": str(self.staging(0).parent),
+                    "same_disk": False, "low": None, "temp_used": 0}
+        return self._disk_cache[1]
 
     def disk_status(self, s: dict | None = None) -> dict:
         """Volné místo v dočasné složce (tam vznikají rozpracovaná stahování) a v cílové složce.
@@ -424,10 +452,17 @@ class Runner:
                            size_est=res.get("size_est"), **common)
         else:
             entries = res["entries"]
-            st = "confirm" if self.needs_confirm(job, len(entries)) else "expanded"
-            self.db.update(jid, status=st, kind=res["type"], info={"entries": entries, "count": len(entries)}, **common)
-            if st == "expanded":
-                self._expand(self.db.get(jid), entries)
+            confirm = self.needs_confirm(job, len(entries))
+            # „rozbalený“ se z playlistu stane až v `_expand`, po vložení videí (výjimka nebo pád mezi tím by nechal rodiče bez dětí)
+            self.db.update(jid, status="confirm" if confirm else "probing", kind=res["type"], info={"entries": entries, "count": len(entries)}, **common)
+            if not confirm:
+                try:
+                    self._expand(self.db.get(jid), entries)
+                except Exception as e:  # noqa: BLE001
+                    log.exception("rozbalení playlistu %s", jid)
+                    self.db.update(jid, status="failed", error=f"Playlist se nepodařilo rozbalit: {e}", error_kind="other", finished_at=time.time())
+                    self.emit("on_error", self.db.get(jid), str(e))
+                    return
         self.emit("on_probe", self.db.get(jid), res)
 
     def _expand(self, job: dict, entries: list[dict] | None = None) -> None:
@@ -456,6 +491,10 @@ class Runner:
             e.setdefault("info", {})
             if e["info"] is not None:
                 e["info"]["playlist_index"] = i
+        if not entries:                                              # všechna videa už jsou ve frontě: není co čekat ani shrnovat
+            self.db.update(job["id"], status="skipped", error="Všechna videa playlistu už jsou ve frontě", error_kind="duplicate",
+                           finished_at=time.time(), info={"count": 0, "duplicates": total})
+            return
         self.db.add_children(job["id"], entries, subdir, job["source"])
         self.db.update(job["id"], status="expanded", info={"count": len(entries), "duplicates": total - len(entries)})
 
@@ -552,7 +591,7 @@ class Runner:
                 raise ResolveError(msg, first.kind)
             ph["end"] = time.monotonic()
             self.db.update(jid, stage="move")
-            self._finalize(jid, result, used, staging)
+            await self._finalize_async(jid, result, used, staging)
         except Cancelled:
             reason = self.stop_reason.pop(jid, "cancel")
             cur = self.db.get(jid)
@@ -612,34 +651,63 @@ class Runner:
         name = self._name(job, {"title": job["title"] or sn.get("title") or "video"})
         return await sniffer.download(sn, ctx, staging, name, on_progress, holder)
 
-    def _finalize(self, jid: int, result: dict, method: str, staging: Path) -> None:
+    def _skip_result(self, jid: int, result: dict, method: str, staging: Path) -> bool:
+        if not result.get("skipped"):
+            return False
+        msg = {"archive": "Již staženo dříve (archiv)", "live": t(self.lang(), "live_skip")}.get(result["skipped"], result["skipped"])
+        self.db.update(jid, status="skipped", error=msg, error_kind=result["skipped"], finished_at=time.time(),
+                       speed=None, eta=None, method=method)
+        shutil.rmtree(staging, ignore_errors=True)
+        return True
+
+    def _place(self, jid: int, result: dict, method: str, staging: Path) -> Path:
+        """Vstupně-výstupní část dokončení (běží ve vlákně, ať velký přesun na NAS nezastaví aplikaci): přesune soubor do cíle pod
+        dočasným názvem a teprve hotový ho přejmenuje, takže po výpadku uprostřed kopie nezůstane v cíli poloviční video."""
         job = self.db.get(jid)
-        if result.get("skipped"):
-            msg = {"archive": "Již staženo dříve (archiv)", "live": t(self.lang(), "live_skip")}.get(result["skipped"], result["skipped"])
-            self.db.update(jid, status="skipped", error=msg, error_kind=result["skipped"], finished_at=time.time(),
-                           speed=None, eta=None, method=method)
-            shutil.rmtree(staging, ignore_errors=True)
-            return
         s = self.settings.all()
         src: Path = result["file"]
         # úloha z odběru má vlastní cílovou složku, ostatní ukládá do download_dir (případně do podsložky playlistu)
         target_dir = Path(job["target_dir"]) if job.get("target_dir") else Path(s["download_dir"]) / (job["subdir"] or "")
+        part = None
         try:
             target_dir.mkdir(parents=True, exist_ok=True)
             dest = unique_target(target_dir, src.stem, src.suffix)
-            shutil.move(str(src), dest)
+            part = dest.with_name(dest.name + ".viddown-part")
+            part.unlink(missing_ok=True)
+            shutil.move(str(src), part)
+            os.replace(part, dest)
+            part = None
         except OSError as e:
+            if part is not None:
+                try:
+                    part.unlink(missing_ok=True)                       # poloviční kopie se v cíli nenechává
+                except OSError:
+                    pass
             # cíl nedostupný (např. odpojený NAS) – hotový soubor zůstane v dočasné složce a přesune se později
-            (staging / PENDING).write_text(json.dumps({"file": str(src), "thumb": str(result["thumb"]) if result.get("thumb") else None,
-                                                       "method": method, "log": result.get("log") or ""}))
+            ytdlp.save_pending(staging, src if src.exists() else Path(str(part or src)), result.get("thumb"), result.get("log") or "", method)
             self._target_checked = -1e9
+            if e.errno in (errno.ENOSPC, errno.EDQUOT):
+                self.db.kv_set("queue_paused", True)
+                self.db.kv_set("queue_pause_reason", "disk")
+                raise ResolveError(f"V cílové složce není místo ({target_dir}): {e.strerror or e}", "disk")
             raise ResolveError(f"Cílová složka není dostupná ({target_dir}): {e.strerror or e}", "target")
-        thumbs.final_jpg(self.data, job, dest, result.get("thumb"), dest.with_suffix(".jpg"),
-                         self.engines.get("ffmpeg").bin_path())
-        size = dest.stat().st_size
+        try:
+            thumbs.final_jpg(self.data, job, dest, result.get("thumb"), dest.with_suffix(".jpg"), self.engines.get("ffmpeg").bin_path())
+        except Exception as e:  # noqa: BLE001 - chybějící miniatura nesmí shodit úlohu, když je video už v cíli
+            log.warning("miniaturu k %s se nepodařilo vytvořit: %s", dest.name, e)
+        return dest
+
+    def _complete(self, jid: int, dest: Path, result: dict, method: str, staging: Path) -> None:
+        try:
+            size = dest.stat().st_size
+        except OSError:
+            size = 0
         logf = self.data / "logs"
-        logf.mkdir(exist_ok=True)
-        (logf / f"job-{jid}.log").write_text(result.get("log") or "", encoding="utf-8")
+        try:
+            logf.mkdir(exist_ok=True)
+            (logf / f"job-{jid}.log").write_text(result.get("log") or "", encoding="utf-8")
+        except OSError as e:
+            log.warning("log úlohy %s nelze zapsat: %s", jid, e)
         self.db.update(jid, status="done", filepath=str(dest), filesize=size, finished_at=time.time(), progress=1.0,
                        downloaded=size, total=size, speed=None, eta=None, method=method, error=None, error_kind=None)
         shutil.rmtree(staging, ignore_errors=True)
@@ -653,6 +721,17 @@ class Runner:
             self.db.record_download(done, True)
         self.emit("on_done", done)
 
+    def _finalize(self, jid: int, result: dict, method: str, staging: Path) -> None:
+        if self._skip_result(jid, result, method, staging):
+            return
+        self._complete(jid, self._place(jid, result, method, staging), result, method, staging)
+
+    async def _finalize_async(self, jid: int, result: dict, method: str, staging: Path) -> None:
+        if self._skip_result(jid, result, method, staging):
+            return
+        dest = await asyncio.to_thread(self._place, jid, result, method, staging)
+        self._complete(jid, dest, result, method, staging)
+
     def _failed(self, jid: int, msg: str, kind: str, staging: Path) -> None:
         job = self.db.get(jid)
         s = self.settings.all()
@@ -660,8 +739,26 @@ class Runner:
             self.db.update(jid, status="queued", error=msg, error_kind=kind, speed=None, eta=None)
             self._pause_for_cookies(msg)
             return
-        if kind == "target":  # počká na dostupnost cílové složky, pokusy se nepočítají
+        if kind == "disk":  # cíl je plný: fronta je pozastavená (důvod „disk“), hotový soubor zůstává v dočasné složce
             self.db.update(jid, status="queued", not_before=time.time() + 30, error=msg, error_kind=kind, speed=None, eta=None)
+            return
+        if kind == "target":
+            # nedostupný cíl (odpojený NAS) hlídá `_check_target`: fronta se pozastaví a po návratu cíle pustí, pokusy se nepočítají.
+            # Když je fronta v chodu a přesun přesto selhává (trvale chybná složka odběru, oprávnění…), po pěti pokusech úloha selže,
+            # ale hotové video zůstane v dočasné složce (nemaže se).
+            info = json.loads(job["info"]) if job["info"] else {}
+            tries = int(info.get("target_tries", 0))
+            if self.queue_paused() or tries + 1 < 5:                 # při pozastavené frontě (cíl nedostupný) se pokusy nepočítají
+                if not self.queue_paused():
+                    info["target_tries"] = tries + 1
+                self.db.update(jid, status="queued", not_before=time.time() + 30, error=msg, error_kind=kind, speed=None, eta=None, info=info)
+                return
+            self.db.update(jid, status="failed", error=f"{msg}. Hotové video zůstalo v dočasné složce: {staging}", error_kind=kind,
+                           finished_at=time.time(), speed=None, eta=None)
+            failed_job = self.db.get(jid)
+            self.db.record_download(failed_job, False)
+            if not failed_job["parent_id"]:
+                self.emit("on_error", failed_job, msg)
             return
         attempts = (job["attempts"] or 0) + 1
         if retry_allowed(kind) and attempts <= int(s.get("auto_retry_attempts", 2)):

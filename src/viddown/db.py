@@ -428,21 +428,28 @@ class DB:
         return self.query("select * from jobs where parent_id=? order by pos", (parent_id,))
 
     def move(self, jid: int, before_id: int | None) -> None:
-        """Přesune úlohu před úlohu before_id (None = na konec fronty)."""
+        """Přesune úlohu před úlohu before_id (None = na konec fronty). Děti playlistu se stěhují s rodičem a vejdou se do mezery
+        před cílovou úlohou (jinak by se promíchaly s cizími); když je mezera mezi pozicemi příliš malá, pozice se přečíslují."""
         with self.conn() as c:
             c.execute("begin immediate")
-            if before_id is None:
-                pos = (c.execute("select max(pos) from jobs").fetchone()[0] or 0) + 1
-            else:
+            kids = c.execute("select id from jobs where parent_id=? order by pos", (jid,)).fetchall()
+            for attempt in (0, 1):
+                if before_id is None:
+                    pos = (c.execute("select max(pos) from jobs").fetchone()[0] or 0) + 1
+                    step = 1.0
+                    break
                 b = c.execute("select pos from jobs where id=?", (before_id,)).fetchone()["pos"]
-                prev = c.execute("select max(pos) from jobs where pos<? and id<>?", (b, jid)).fetchone()[0]
+                prev = c.execute("select max(pos) from jobs where pos<? and id<>? and parent_id is not ?", (b, jid, jid)).fetchone()[0]
                 prev = prev if prev is not None else b - 1
                 pos = (prev + b) / 2
+                step = (b - pos) / (len(kids) + 1)
+                if step > 1e-9 or attempt:                       # dost místa pro rodiče i děti
+                    break
+                for i, r in enumerate(c.execute("select id from jobs order by pos, id").fetchall(), 1):
+                    c.execute("update jobs set pos=? where id=?", (float(i), r["id"]))
             c.execute("update jobs set pos=?, updated_at=? where id=?", (pos, time.time(), jid))
-            # děti playlistu se stěhují s rodičem
-            kids = c.execute("select id from jobs where parent_id=? order by pos", (jid,)).fetchall()
             for i, k in enumerate(kids):
-                c.execute("update jobs set pos=? where id=?", (pos + (i + 1) * 1e-6, k["id"]))
+                c.execute("update jobs set pos=? where id=?", (pos + (i + 1) * step, k["id"]))
             c.execute("commit")
 
     def recover(self) -> None:

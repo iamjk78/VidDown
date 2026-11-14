@@ -169,7 +169,7 @@ def create_app(app_state) -> FastAPI:
             "cookies_error": S.db.kv_get("cookies_error"),
             "schedule": {"start": s["schedule_start"], "end": s["schedule_end"], **schedule.describe(s, S.db)},
             "in_window": schedule.allowed(s, "queue", db=S.db),
-            "disk": dict(S.runner.disk_status(s), dir=s["download_dir"], min_gb=s["min_free_gb"],
+            "disk": dict(S.runner.disk_cached(s), dir=s["download_dir"], min_gb=s["min_free_gb"],
                          low_kind=S.db.kv_get("disk_low")),
             "telegram": S.bot.status() if S.bot else {"state": "off"},
             "engines": {e["name"]: (e["current"] or (f"{e['system']} (systém)" if e["system"] else None))
