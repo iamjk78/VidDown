@@ -20,6 +20,14 @@ def data(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_min_gap(monkeypatch):
+    """Zkoušky Katalogu nastavují pauzu 0, aby běžely rychle; skutečné minimum (1 s) ověřuje samostatná zkouška."""
+    import viddown.catalogdetails as cd
+    monkeypatch.setattr(cd, "MIN_GAP", 0.0)
+    monkeypatch.setattr(cd, "THUMB_GAP", 0.0)
+
+
+@pytest.fixture(autouse=True)
 def _clean_viddown_env(monkeypatch):
     """Proměnné VIDDOWN_* exportované v shellu (např. VIDDOWN_ALLOW_PRIVATE_PREVIEW) se nesmí dostat do žádného testu."""
     for k in list(os.environ):

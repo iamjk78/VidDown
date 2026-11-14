@@ -115,6 +115,8 @@ DEFAULTS: dict = {
     "auto_backup_keep": 5,          # kolik záloh uchovat; po úspěšné záloze se starší smažou
     # katalog (PLAN.md kap. 20)
     "catalog_thumbs_dir": "",               # složka miniatur katalogu; prázdné = <data>/catalog/thumbs
+    "catalog_proxy_fallback": "",           # záložní proxy pro Katalog: zkusí se jednou po chybě spojení nebo serveru (ne po omezení 429)
+    "catalog_hour_limit": 600,              # nejvýš tolik dotazů na jeden web za hodinu při zjišťování podrobností a stránek (0 = bez stropu)
     "catalog_gap": 3,                       # pauza mezi dotazy na stejný web při zjišťování podrobností (s, 0–60)
     "catalog_auto": False,                  # automaticky hledat nová videa ve zdrojích (jen nenabídnutá; v rozvrhu, je-li zapnutý)
     "catalog_auto_hours": 24,               # jak často (hodiny): 6 | 12 | 24 | 72 | 168
@@ -262,6 +264,12 @@ class Settings:
                     raise ValueError("catalog_anim_max_mb must be 1-20")
                 if k == "catalog_gap" and not 0 <= val <= 60:
                     raise ValueError("catalog_gap must be 0-60")
+                if k == "catalog_hour_limit" and not (val == 0 or 60 <= val <= 5000):
+                    raise ValueError("catalog_hour_limit must be 0 or 60-5000")
+                if k == "catalog_proxy_fallback":
+                    val = str(val or "").strip()
+                    if val and not re.fullmatch(r"(?:(?:https?|socks5h?|socks4)://)?[^\s/]+(?::\d{1,5})?/?", val):
+                        raise ValueError("catalog_proxy_fallback must look like socks5://host:port or http://host:port")
                 if k == "app_update_hours" and val not in APP_UPDATE_HOURS:
                     raise ValueError(f"app_update_hours must be one of {APP_UPDATE_HOURS}")
                 if k == "auto_backup_hours" and val not in AUTO_BACKUP_HOURS:

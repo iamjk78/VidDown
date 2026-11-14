@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import collections
 import copy
 import dataclasses
 import json
@@ -20,6 +21,7 @@ import shutil
 import time
 import uuid
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -34,16 +36,23 @@ BACKOFF_MAX = 7200.0
 BACKOFF_LOGIN = 3600.0              # web vyžaduje přihlášení/ověření: zkusit až za hodinu
 PERF_MULT = {"full": 1.0, "balanced": 2.0, "eco": 4.0}
 THUMB_BATCH = 4
+THUMB_GAP = 0.6                     # pauza mezi miniaturami/animacemi z téhož serveru (s)
+MIN_GAP = 1.0                       # nejmenší pauza mezi dotazy na stejný web (s), i když je v nastavení méně
+HOUR = 3600.0
+RATE_RE = re.compile(r"\b429\b|too many requests|rate.?limit|slow down", re.I)      # omezení dotazů: čekat, ne měnit adresu
 BLOCKED_RE = catalog.BLOCKED_RE
 SRC_SCAN_PAGES = 30                 # nejvýš tolik stránek výpisu zdroje při hledání animací
 THUMB_CANDIDATES = 10               # kolik kandidátů miniatury se zkusí, než se vzdá (největší varianty starším videím chybějí)
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".gif")
 
 
-def detail_ctx(st):
-    """Kontext pro zjišťování podrobností: vždy video v nejlepší kvalitě, bez ohledu na „jen zvuk“ v nastavení."""
+def detail_ctx(st, proxy: str | None = None):
+    """Kontext pro zjišťování podrobností: vždy video v nejlepší kvalitě, bez ohledu na „jen zvuk“ v nastavení. `proxy` přepíše
+    nastavenou proxy (záložní adresa)."""
     c = st.runner.ctx()
     settings = {**c.settings, "audio_only": False, "quality": "max"}
+    if proxy:
+        settings["proxy"] = proxy
     try:
         return dataclasses.replace(c, settings=settings)
     except TypeError:
@@ -140,6 +149,9 @@ class DetailWorker:
         self.backoff: dict[str, dict] = {}           # web -> {until, delay, reason}
         self.active: dict[str, asyncio.Task] = {}
         self._thumb_locks: dict[int, asyncio.Lock] = {}
+        self.hits: dict[str, collections.deque] = {}  # web -> časy dotazů za poslední hodinu (strop dotazů)
+        self.used_fallback: dict[str, float] = {}     # web -> kdy naposledy pomohla záložní proxy
+        self.cdn_next: dict[str, float] = {}          # server miniatur -> nejdřív kdy další stažení
         self.src_scanned: dict[int, int] = {}        # zdroj -> nejvyšší číslo videa bez animace při prohledání jeho stránek (nová videa = znovu)
         self.page_hosts: set[str] = set()            # weby, na kterých právě běží sken stránky videa
         self.slow_task: asyncio.Task | None = None   # pomalá vrstva (prohlížeč): nejvýš jedno video najednou
@@ -155,7 +167,53 @@ class DetailWorker:
     def gap(self) -> float:
         """Pauza mezi dotazy na stejný web: nastavení × režim výkonu × náhodný rozptyl ±30 %."""
         s = self.st.settings
-        return float(s.get("catalog_gap") or 0) * PERF_MULT.get(s.get("perf_mode"), 1.0) * random.uniform(0.7, 1.3)
+        base = max(MIN_GAP, float(s.get("catalog_gap") or 0)) * PERF_MULT.get(s.get("perf_mode"), 1.0)
+        return base * random.uniform(0.7, 1.3)
+
+    # --- slušnost k cizím serverům: strop dotazů za hodinu a záložní proxy ------------------------------
+    def note_request(self, host: str) -> None:
+        self.hits.setdefault(host, collections.deque()).append(time.monotonic())
+
+    def over_budget(self, host: str) -> bool:
+        limit = int(self.st.settings.get("catalog_hour_limit") or 0)
+        q = self.hits.get(host)
+        if not limit or not q:
+            return False
+        cutoff = time.monotonic() - HOUR
+        while q and q[0] < cutoff:
+            q.popleft()
+        return len(q) >= limit
+
+    def limited_hosts(self) -> set[str]:
+        return {h for h in list(self.hits) if self.over_budget(h)}
+
+    def fallback_proxy(self) -> str | None:
+        fb = str(self.st.settings.get("catalog_proxy_fallback") or "").strip()
+        return fb if fb and fb != (self.st.settings.get("proxy") or "") else None
+
+    @staticmethod
+    def fallback_worthy(msg: str) -> bool:
+        """Chyba spojení nebo serveru, kde může pomoci jiná adresa; omezení (429) ne: tam se čeká."""
+        low = (msg or "").lower()
+        return not RATE_RE.search(low) and bool(re.search(r"timed out|timeout|connection|connect|reset|refused|unreachable|http 5|se nepodařilo načíst|failed to perform|temporary failure|network", low))
+
+    async def _fetch_page(self, url: str, host: str, public_only: bool) -> tuple[str, str]:
+        """`pagelist.fetch` se započtením do stropu a jedním pokusem přes záložní proxy po chybě spojení (po pauze, ne při 429)."""
+        self.note_request(host)
+        try:
+            return await pagelist.fetch(url, self.st.settings.all(), public_only=public_only)
+        except pagelist.PageError as e:
+            fb = self.fallback_proxy()
+            if not (fb and self.fallback_worthy(str(e))):
+                raise
+            await asyncio.sleep(self.gap())
+            self.note_request(host)
+            try:
+                res = await pagelist.fetch(url, {**self.st.settings.all(), "proxy": fb}, public_only=public_only)
+            except pagelist.PageError as e2:
+                raise pagelist.PageError(f"{e}; přes záložní proxy: {e2}") from e2
+            self.used_fallback[host] = time.monotonic()
+            return res
 
     def listing_busy(self) -> bool:
         return bool(self.db.query("select 1 from catalog_sources where status in ('queued','scanning') limit 1"))
@@ -171,7 +229,8 @@ class DetailWorker:
     def excluded_hosts(self) -> set[str]:
         """Weby, na které se teď nesmí sahat: právě zpracovávané, ve vychlazení po dotazu nebo odložené po omezení."""
         now = time.monotonic()
-        return set(self.active) | self.page_hosts | {h for h, t in self.next_at.items() if t > now} | {h for h, b in self.backoff.items() if b["until"] > now}
+        return (set(self.active) | self.page_hosts | {h for h, t in self.next_at.items() if t > now} | {h for h, b in self.backoff.items() if b["until"] > now}
+                | self.limited_hosts())
 
     def pick(self, excluded: set[str] | None = None) -> dict | None:
         """Další video k zjištění podrobností (v pořadí zdrojů a videí) z webu, který je právě volný."""
@@ -187,8 +246,21 @@ class DetailWorker:
     # --- zpracování jednoho videa -----------------------------------------------------------------
     async def process(self, item: dict) -> None:
         host = item.get("host") or ""
+        self.note_request(host)
         try:
-            info = await ytdlp.full_info(item["url"], detail_ctx(self.st), timeout=90)
+            try:
+                info = await ytdlp.full_info(item["url"], detail_ctx(self.st), timeout=90)
+            except ResolveError as e:
+                fb = self.fallback_proxy()
+                if not (e.kind == "network" and fb and self.fallback_worthy(str(e))):
+                    raise
+                await asyncio.sleep(self.gap())                           # pauza i před druhým pokusem; omezení (429) se touto cestou neobchází
+                self.note_request(host)
+                try:
+                    info = await ytdlp.full_info(item["url"], detail_ctx(self.st, proxy=fb), timeout=90)
+                except ResolveError as e2:
+                    raise ResolveError(f"{e}; přes záložní proxy: {e2}", e2.kind) from e2
+                self.used_fallback[host] = time.monotonic()
         except ResolveError as e:
             self._on_error(item, e.kind, str(e))
         except asyncio.CancelledError:
@@ -281,8 +353,18 @@ class DetailWorker:
         if not await asyncio.to_thread(netsafe.host_ok, item["url"]):          # prohlížeč ani ffmpeg nesmí z cizí stránky na vnitřní síť
             self._finish_slow(item, "failed", "adresa vede do vnitřní sítě")
             return
+        self.note_request(host)
         try:
-            sn = await sniffer.sniff(item["url"], detail_ctx(self.st))
+            try:
+                sn = await sniffer.sniff(item["url"], detail_ctx(self.st))
+            except ResolveError as e0:
+                fb = self.fallback_proxy()
+                if not (e0.kind == "network" and fb and self.fallback_worthy(str(e0))):
+                    raise
+                await asyncio.sleep(self.gap())
+                self.note_request(host)
+                sn = await sniffer.sniff(item["url"], detail_ctx(self.st, proxy=fb))
+                self.used_fallback[host] = time.monotonic()
         except ResolveError as e:
             if e.kind == "network":
                 self._back_off(host, BACKOFF_FIRST, f"prohlížeč: {e}"[:140])
@@ -370,6 +452,20 @@ class DetailWorker:
             c.execute("update catalog_items set thumb_file=?, updated_at=? where id=? and thumb_file is null",
                       (name if name else "", time.time(), row["id"]))
 
+    async def _cdn_wait(self, url: str | None) -> None:
+        """Pauza mezi dvěma staženími ze stejného serveru miniatur nebo animací (`THUMB_GAP` ± rozptyl)."""
+        try:
+            host = (urlsplit(url or "").hostname or "").lower() if not str(url or "").startswith("sb:") else "storyboard"
+        except ValueError:
+            host = ""
+        now = time.monotonic()
+        wait = self.cdn_next.get(host, 0.0) - now
+        self.cdn_next[host] = max(now, self.cdn_next.get(host, 0.0)) + THUMB_GAP * random.uniform(0.7, 1.3)
+        if len(self.cdn_next) > 500:
+            self.cdn_next = {h: t for h, t in self.cdn_next.items() if t > now}
+        if wait > 0:
+            await asyncio.sleep(wait)
+
     def _thumb_lock(self, item_id: int) -> asyncio.Lock:
         if len(self._thumb_locks) > 2000:                              # nepoužívané zámky se uklidí
             self._thumb_locks = {k: v for k, v in self._thumb_locks.items() if v.locked()}
@@ -444,7 +540,7 @@ class DetailWorker:
         self.page_hosts.add(host)                                      # během skenu na tento web nesmí sahat ani worker podrobností
         backoff_before = self.backoff.get(host)
         try:
-            text, final = await pagelist.fetch(item["url"], self.st.settings.all(), public_only=True)
+            text, final = await self._fetch_page(item["url"], host, True)
         except pagelist.PageError as e:
             msg = str(e)
             if "HTTP 429" in msg or "HTTP 5" in msg or "se nepodařilo načíst" in msg:       # omezení nebo výpadek: web odložit, video zůstane čekat
@@ -476,7 +572,7 @@ class DetailWorker:
         """Weby, kterým se prohledání zdroje odloží: jen odložené po omezení a ty, kde už jiný sken stránky běží. Pauza mezi dotazy
         podrobností (`next_at`) se nezohledňuje, jinak by nepřetržitá práce na podrobnostech hledání animací nikdy nepustila."""
         now = time.monotonic()
-        return set(self.page_hosts) | {h for h, b in self.backoff.items() if b["until"] > now}
+        return set(self.page_hosts) | {h for h, b in self.backoff.items() if b["until"] > now} | self.limited_hosts()
 
     def pick_source_scan(self, excluded: set[str]) -> dict | None:
         for r in self.db.query(
@@ -509,7 +605,7 @@ class DetailWorker:
                     if rd is not None:                                  # web už jednou odmítl prostý dotaz: dál jen prohlížečem
                         text, final = await rd.render(url, scrolls=1)
                     else:
-                        text, final = await pagelist.fetch(url, self.st.settings.all(), public_only=page_no > 1)
+                        text, final = await self._fetch_page(url, host, page_no > 1)
                 except pagelist.PageError as e:
                     msg = str(e)
                     if "HTTP 429" in msg or "HTTP 5" in msg or "se nepodařilo načíst" in msg:
@@ -595,14 +691,16 @@ class DetailWorker:
                     self.db.query, "select id, url, thumb_url, thumb_alts from catalog_items where thumb_file is null and thumb_url is not null "
                     "and state in ('new','queued') order by source_id, pos limit ?", (THUMB_BATCH,))
                 if rows:
-                    await asyncio.gather(*(self._thumb_one(r) for r in rows))
-                    await _sleep(stop, 0.2)
+                    for r in rows:                                          # po jedné, s pauzou mezi dotazy na stejný server (nezahlcovat CDN)
+                        await self._cdn_wait(r.get("thumb_url"))
+                        await self._thumb_one(r)
                     continue
                 if self.st.settings.get("catalog_anim") and self.allowed_now() and not self.paused():     # animace až po všech miniaturách
                     arows = await asyncio.to_thread(self.pending_anims, 2)
                     if arows:
-                        await asyncio.gather(*(self._anim_one(r) for r in arows))
-                        await _sleep(stop, 0.5)
+                        for r in arows:
+                            await self._cdn_wait(r.get("anim_url"))
+                            await self._anim_one(r)
                         continue
             except asyncio.CancelledError:
                 raise
@@ -625,6 +723,8 @@ class DetailWorker:
                 "thumbs_pending": r["thumbs_pending"] or 0, "thumbs_failed": r["thumbs_failed"] or 0,
                 "anim_pending": r["anim_pending"] or 0, "anim_scan": r["anim_scan"] or 0, "anim_have": r["anim_have"] or 0, "anim_failed": r["anim_failed"] or 0, "no_date": r["no_date"] or 0, "have_date": r["have_date"] or 0,
                 "paused": self.paused(), "waiting_for_lists": self.listing_busy(), "active_hosts": sorted(self.active),
+                "limited": sorted(self.limited_hosts()),
+                "fallback_hosts": sorted(h for h, t in self.used_fallback.items() if now - t < 600),
                 "backoff": [{"host": h, "seconds": int(b["until"] - now), "reason": b["reason"]} for h, b in sorted(self.backoff.items())
                             if b["until"] > now]}
 
