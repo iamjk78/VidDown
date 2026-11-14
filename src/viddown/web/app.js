@@ -1273,6 +1273,7 @@ function renderCatalog() {
   $('#catside').onclick = catSrcClick;
   $('#catsrc').onmouseover = catTipShow; $('#catsrc').onmouseout = catTipHide; $('#catsrc').onfocusin = catTipShow; $('#catsrc').onfocusout = catTipHide;
   $('#catgrid').onclick = catGridClick;
+  catAnimTrack();
   $('#catgrid').onmouseover = catAnimHover; $('#catgrid').onmouseout = catAnimHover;
   $('#catgrid').onchange = e => { const c = e.target.closest('[data-csel]'); if (c) catToggle(+c.dataset.csel, c.checked); };
   $('#catsel').onclick = catSelClick;
@@ -1452,6 +1453,7 @@ function catPaintGrid() {
   g.style.setProperty('--cw', CAT_WIDTH[CAT.thumb] + 'px');
   morphHtml(g, d.items.length ? d.items.map(catCard).join('')
     : `<div class="card empty" style="grid-column:1/-1">${ic('search', 28)}<h3>${CAT.ov && CAT.ov.items ? T('Nic nevyhovuje filtru', 'Nothing matches the filter') : T('Zatím tu nejsou žádná videa', 'No videos yet')}</h3></div>`);
+  catAnimSync();
 }
 function catPaintSel() {
   const box = $('#catsel'), d = CAT.data; if (!box || !d) return;
@@ -1517,7 +1519,7 @@ function catAnimOn(th, on) {
     const shown = () => { if (th.dataset.want === '1') th.classList.add('anim-on'); };
     el.addEventListener(ev, shown, { once: true });
     el.addEventListener('error', () => { th.classList.remove('anim-on'); }, { once: true });
-    if (!el.getAttribute('src')) el.src = el.dataset.asrc;
+    if (el.getAttribute('src') !== el.dataset.asrc) el.src = el.dataset.asrc;            // i když si karta po překreslení nechala cizí zdroj
     if (video) { const p = el.play(); if (p && p.catch) p.catch(() => {}); if (!el.paused && el.readyState >= 3) shown(); }
     else if (el.complete && el.naturalWidth) shown();
   } else {
@@ -1525,6 +1527,22 @@ function catAnimOn(th, on) {
     th.classList.remove('anim-on');
     if (el.tagName === 'VIDEO') el.pause(); else el.removeAttribute('src');            // obrázek: odpojením se animace zastaví a uvolní paměť
   }
+}
+/* Po překreslení mřížky (odstranění videa, nové pořadí, obnova) se pod nehybným kurzorem objeví jiná karta a prohlížeč o tom neposílá
+   žádnou událost myši: stav animací se proto srovná podle skutečné karty pod posledním známým místem kurzoru. */
+function catAnimSync() {
+  if (App.view !== 'catalog' || CAT.mx == null || matchMedia('(hover: none)').matches) return;
+  const under = document.elementFromPoint(CAT.mx, CAT.my), card = under && under.closest ? under.closest('#catgrid .vcard') : null;
+  $$('#catgrid .vth.has-anim').forEach(th => { if (th.dataset.want === '1' && th.closest('.vcard') !== card) catAnimOn(th, false); });
+  const th = card && $('.vth.has-anim', card);
+  if (th && (th.dataset.want !== '1' || !th.classList.contains('anim-on'))) catAnimOn(th, true);
+}
+function catAnimTrack() {
+  if (CAT.tracking) return; CAT.tracking = true;
+  let raf = 0;
+  document.addEventListener('mousemove', e => { CAT.mx = e.clientX; CAT.my = e.clientY; }, { passive: true });
+  document.documentElement.addEventListener('mouseleave', () => { CAT.mx = null; });
+  window.addEventListener('scroll', () => { if (!raf) raf = requestAnimationFrame(() => { raf = 0; catAnimSync(); }); }, { passive: true });
 }
 function catAnimHover(e) {
   if (matchMedia('(hover: none)').matches) return;                                    // dotyk: přepíná jen klepnutí (jinak by emulované najetí animaci hned vypnulo)
