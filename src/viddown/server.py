@@ -725,10 +725,10 @@ def create_app(app_state) -> FastAPI:
 
     @app.get("/api/catalog/items")
     async def catalog_items(source: int = 0, q: str = "", res: str = "", state: str = "", sort: str = "pos", dir: str = "asc",
-                            limit: int = 100, offset: int = 0):
+                            limit: int = 100, offset: int = 0, anim: str = ""):
         split = lambda v: [x for x in v.split(",") if x]  # noqa: E731
         source = source if source < 2 ** 62 else -1          # mimo rozsah databáze: nic nevyhovuje
-        return await asyncio.to_thread(catalog.query_items, S.db, source or None, q, split(res), split(state), sort, dir, limit, offset)
+        return await asyncio.to_thread(catalog.query_items, S.db, source or None, q, split(res), split(state), sort, dir, limit, offset, split(anim))
 
     # --- aktualizace aplikace zevnitř -----------------------------------------------------------
     async def _app_call(fn, *a, **kw):

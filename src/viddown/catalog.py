@@ -457,7 +457,7 @@ def _like(tok: str) -> str:
     return "%" + tok.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
 
 
-def _where(source: int | None, q: str, res: list[str] | None, state: list[str] | None) -> tuple[str, list]:
+def _where(source: int | None, q: str, res: list[str] | None, state: list[str] | None, anim: list[str] | None = None) -> tuple[str, list]:
     """Společná část dotazů (FROM … WHERE …) pro zobrazení i výběr položek. `state` (sjednocení): new, queued, downloaded,
     rejected, gone (výchozí jsou viditelné new a queued)."""
     where, args = [], []
@@ -481,6 +481,11 @@ def _where(source: int | None, q: str, res: list[str] | None, state: list[str] |
     for tok in norm((q or "")[:MAX_QUERY_CHARS]).split()[:MAX_QUERY_TOKENS]:
         where.append("(i.search || ' ' || coalesce(s.title_search, '')) like ? escape '\\'")
         args.append(_like(tok))
+    want = {x for x in (anim or []) if x in ("yes", "no")}
+    if want == {"yes"}:                                                       # s animací / bez animace (obojí = bez filtru)
+        where.append("(i.anim_file is not null and i.anim_file != '')")
+    elif want == {"no"}:
+        where.append("(i.anim_file is null or i.anim_file = '')")
     buckets = [RES_BUCKETS[r] for r in (res or []) if r in RES_BUCKETS]
     if buckets:
         where.append("(" + " or ".join(f"({b})" for b in buckets) + ")")
@@ -488,9 +493,9 @@ def _where(source: int | None, q: str, res: list[str] | None, state: list[str] |
 
 
 def query_items(db, source: int | None = None, q: str = "", res: list[str] | None = None, state: list[str] | None = None,
-                sort: str = "pos", direction: str = "asc", limit: int = 100, offset: int = 0) -> dict:
+                sort: str = "pos", direction: str = "asc", limit: int = 100, offset: int = 0, anim: list[str] | None = None) -> dict:
     """Položky katalogu s filtry, řazením a stránkováním."""
-    sql_from, args = _where(source, q, res, state)
+    sql_from, args = _where(source, q, res, state, anim)
     d = "desc" if str(direction).lower() == "desc" else "asc"
     col = SORT_COLUMNS.get(sort)
     if col:       # čísla: neznámé hodnoty vždy nakonec
@@ -513,7 +518,7 @@ def _id_list(v, what: str) -> list[int]:
 
 
 def select_ids(db, spec) -> list[int]:
-    """Položky vybrané buď výčtem čísel (`ids`), nebo popisem filtru (`filter`: source, q, res, state) s výjimkami
+    """Položky vybrané buď výčtem čísel (`ids`), nebo popisem filtru (`filter`: source, q, res, state, anim) s výjimkami
     (`exclude`). Hromadné akce se tak posílají jako filtr, ne jako tisíce čísel."""
     if not isinstance(spec, dict):
         raise ValueError("selection must be an object")
@@ -526,11 +531,12 @@ def select_ids(db, spec) -> list[int]:
     if not isinstance(f, dict):
         raise ValueError("selection needs ids or filter")
     src, q = f.get("source"), f.get("q", "")
-    res, state = f.get("res") or [], f.get("state") or []
+    res, state, anim = f.get("res") or [], f.get("state") or [], f.get("anim") or []
     if (src is not None and (isinstance(src, bool) or not isinstance(src, int))) or not isinstance(q, str) \
-            or not isinstance(res, list) or not isinstance(state, list) or not all(isinstance(x, str) for x in res + state):
+            or not isinstance(res, list) or not isinstance(state, list) or not isinstance(anim, list) \
+            or not all(isinstance(x, str) for x in res + state + anim):
         raise ValueError("invalid filter")
-    sql_from, args = _where(src, q, res, state)
+    sql_from, args = _where(src, q, res, state, anim)
     rows = db.query(f"select i.id {sql_from} order by i.id limit ?", [*args, MAX_SELECT + 1])
     if len(rows) > MAX_SELECT:
         raise ValueError("too many items")

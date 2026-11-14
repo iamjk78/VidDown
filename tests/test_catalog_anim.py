@@ -344,19 +344,19 @@ def seed_refill(st, fake):
 
 def test_refill_rechecks_only_visible_done_items_without_an_animation_url(st, fake):
     seed_refill(st, fake)
-    assert cd.refill_anims(st.db) == {"details": 1, "retry": 1}
+    assert cd.refill_anims(st.db) == {"details": 1, "retry": 1, "pages": 0}
     r = anim_rows(st)
     assert r["youtube a"]["detail_state"] == "pending"                                    # bez adresy animace: znovu zjistit podrobnosti
     assert r["youtube b"]["anim_file"] is None and r["youtube b"]["detail_state"] == "done"   # nad limit: nový pokus o stažení
     assert r["youtube c"]["anim_file"] == "7.anim.gif"                                    # hotovou nechá
     assert r["youtube d"]["detail_state"] == "done" and r["youtube f"]["detail_state"] == "failed"
-    assert cd.refill_anims(st.db) == {"details": 0, "retry": 0}                          # podruhé nic: položka už čeká na podrobnosti
+    assert cd.refill_anims(st.db) == {"details": 0, "retry": 0, "pages": 0}              # podruhé nic: položka už čeká na podrobnosti
 
 
 def test_refill_can_be_limited_to_one_source(st, fake):
     seed_refill(st, fake)
     other = st.db.query("select id from catalog_sources")[0]["id"] + 1
-    assert cd.refill_anims(st.db, other) == {"details": 0, "retry": 0}
+    assert cd.refill_anims(st.db, other) == {"details": 0, "retry": 0, "pages": 0}
     assert cd.refill_anims(st.db, st.db.query("select id from catalog_sources")[0]["id"])["details"] == 1
 
 
@@ -523,3 +523,204 @@ def test_loop_builds_a_storyboard_animation_end_to_end(st, fake, info, tmp_path,
     assert r["anim_url"].startswith("sb:") and r["anim_file"] == f"{r['id']}.anim.mp4"
     assert (catalog.thumbs_dir(st.data, st.settings) / r["anim_file"]).stat().st_size > 1000
     assert catalog.query_items(st.db)["items"][0]["anim_kind"] == "video"
+
+
+# ------------------------------------------------------------ etapa 4: náhled ze stránky videa (heuristika)
+from viddown import catalogpreview as cp
+from viddown import pagelist
+
+
+@pytest.mark.parametrize("html_,expected", [
+    ('<div data-preview="/p/prev.webm"></div><video src="https://cdn.x/main.mp4"></video>', "https://w.example/p/prev.webm"),
+    ('<meta property="og:video" content="https://cdn.x/full.mp4"><div data-mediabook="https://cdn.x/m.mp4"></div>', "https://cdn.x/m.mp4"),     # data-* před og:video
+    ('<video><source src="https://cdn.x/trailer.mp4"></video><video src="https://cdn.x/main.mp4">', "https://cdn.x/trailer.mp4"),                  # hlavní přehrávač ne
+    ('<script>var d={"previewUrl":"https:\\/\\/cdn.x\\/a\\/hover.gif?t=1"}</script>', "https://cdn.x/a/hover.gif?t=1"),                    # ve vloženém JSONu
+    ('<meta property="og:video" content="//cdn.x/o.mp4">', "https://cdn.x/o.mp4"),
+    ('<video src="https://cdn.x/main.mp4"></video><img src="https://cdn.x/logo.gif">', None),
+    ('<div data-preview="http://127.0.0.1/p.mp4"></div><div data-preview="http://192.168.1.5/p.mp4"></div><div data-preview="file:///etc/x.mp4"></div>', None),
+    ('<div data-preview="https://cdn.x/p.gif"></div><div data-preview="https://cdn.x/p.webm"></div>', None),                                       # dva různé: nejednoznačné
+    ("", None),
+])
+def test_find_preview(html_, expected):
+    assert cp.find_preview(html_, "https://w.example/v/1") == expected
+
+
+def test_is_public_url():
+    assert [cp.is_public_url(x) for x in ("https://a.example/x", "http://8.8.8.8/x", "http://localhost/x", "http://10.0.0.1/x", "http://[::1]/x",
+                                         "ftp://a.example/x", "https://intranet/x", "http://x.local/y", "javascript:alert(1)")] == \
+        [True, True, False, False, False, False, False, False, False]
+
+
+@pytest.fixture
+def pages(monkeypatch):
+    """Falešné stránky videí: adresa -> HTML nebo PageError; eviduje dotazy."""
+    answers, calls = {}, []
+
+    async def fetch(url, settings=None, timeout=30):
+        calls.append(url)
+        a = answers.get(url, pagelist.PageError("stránka vrací chybu HTTP 404"))
+        if isinstance(a, Exception):
+            raise a
+        return a, url
+    monkeypatch.setattr(cd.pagelist, "fetch", fetch)
+    return type("P", (), {"answers": answers, "calls": calls})
+
+
+def scan_items(st, fake, keys):
+    make(st, fake, [e(k) for k in keys])
+    with st.db.conn() as c:
+        c.execute("update catalog_items set detail_state='done'")
+
+
+def test_page_scan_stores_the_found_url_or_marks_nothing_found(st, fake, pages):
+    scan_items(st, fake, ["a", "b", "c"])
+    pages.answers["https://example.com/watch/a"] = '<div data-preview="https://cdn.x/a.mp4"></div>'
+    pages.answers["https://example.com/watch/b"] = "<html>nic</html>"
+    w = cd.DetailWorker(st)
+
+    async def go():
+        for _ in range(3):
+            await w.process_page_scan(w.pick_page_scan(set()))
+    asyncio.run(go())
+    got = {k: r["anim_url"] for k, r in anim_rows(st).items()}
+    assert got == {"youtube a": "https://cdn.x/a.mp4", "youtube b": "", "youtube c": ""}          # 404 = trvale nic
+    assert w.pick_page_scan(set()) is None                                                         # označené se nehledají znovu
+
+
+def test_page_scan_backs_off_on_transient_errors_and_keeps_the_item_waiting(st, fake, pages):
+    scan_items(st, fake, ["a"])
+    w = cd.DetailWorker(st)
+    for msg in ("stránka vrací chybu HTTP 429", "stránka vrací chybu HTTP 503", "stránku se nepodařilo načíst: timeout"):
+        pages.answers["https://example.com/watch/a"] = pagelist.PageError(msg)
+        w.backoff.clear()
+        asyncio.run(w.process_page_scan(w.pick_page_scan(set())))
+        assert anim_rows(st)["youtube a"]["anim_url"] is None and "example.com" in w.backoff, msg
+    assert w.pick_page_scan({"example.com"}) is None                                               # odložený web se přeskočí
+
+
+def test_pages_ready_conditions(st, fake, pages):
+    scan_items(st, fake, ["a"])
+    w = cd.DetailWorker(st)
+    assert w.pages_ready() is True
+    st.settings.update({"catalog_anim_pages": False})
+    assert w.pages_ready() is False
+    st.settings.update({"catalog_anim_pages": True, "catalog_anim": False})
+    assert w.pages_ready() is False
+    st.settings.update({"catalog_anim": True})
+    with st.db.conn() as c:
+        c.execute("update catalog_items set detail_state='pending'")                               # rychlá práce má přednost
+    assert w.pages_ready() is False
+    with st.db.conn() as c:
+        c.execute("update catalog_items set detail_state='done', anim_url='https://c/x.gif'")      # čeká stažení nalezené animace
+    assert w.pages_ready() is False
+    st.db.kv_set("catalog_paused", True)
+    assert w.pages_ready() is False
+
+
+def test_pages_loop_finds_and_downloads_a_preview_end_to_end(st, fake, info, pages, web):
+    scan_items(st, fake, ["a", "b"])
+    pages.answers["https://example.com/watch/a"] = '<div data-preview="https://cdn.x/a.gif"></div>'
+    web.pages["https://cdn.x/a.gif"] = (200, GIF, {})
+
+    async def go():
+        w = cd.DetailWorker(st)
+        stop = asyncio.Event()
+        tasks = [asyncio.create_task(w.thumbs_loop(stop)), asyncio.create_task(w.pages_loop(stop))]
+        end = asyncio.get_event_loop().time() + 8
+        while asyncio.get_event_loop().time() < end:
+            r = anim_rows(st)
+            if r["youtube a"]["anim_file"] and r["youtube b"]["anim_url"] == "":
+                break
+            await asyncio.sleep(0.05)
+        stop.set()
+        await asyncio.wait_for(asyncio.gather(*tasks), 5)
+    asyncio.run(go())
+    r = anim_rows(st)
+    assert r["youtube a"]["anim_file"].endswith(".anim.gif") and r["youtube b"]["anim_url"] == "" and r["youtube b"]["anim_file"] is None
+
+
+def test_refill_searches_the_video_pages_again_and_status_counts_pending_scans(st, fake):
+    scan_items(st, fake, ["a", "b", "c"])
+    with st.db.conn() as c:
+        c.execute("update catalog_items set anim_url='' where key in ('youtube a','youtube b')")
+        c.execute("update catalog_items set anim_file='7.anim.gif', anim_url='https://c/c.gif' where key='youtube c'")
+    w = cd.DetailWorker(st)
+    assert w.status()["anim_scan"] == 0 and w.status()["anim_pending"] == 0                         # '' není čekající animace
+    assert cd.refill_anims(st.db) == {"details": 0, "retry": 0, "pages": 2}
+    assert {k: r["anim_url"] for k, r in anim_rows(st).items()} == {"youtube a": None, "youtube b": None, "youtube c": "https://c/c.gif"}
+    assert w.status()["anim_scan"] == 2
+
+
+def test_empty_animation_url_is_never_downloaded(st, fake, info, web):
+    scan_items(st, fake, ["a"])
+    with st.db.conn() as c:
+        c.execute("update catalog_items set anim_url=''")
+    async def go():
+        w = cd.DetailWorker(st)
+        stop = asyncio.Event()
+        t = asyncio.create_task(w.thumbs_loop(stop))
+        await asyncio.sleep(0.8)
+        stop.set()
+        await asyncio.wait_for(t, 5)
+    asyncio.run(go())
+    assert anim_rows(st)["youtube a"]["anim_file"] is None and not web.hits
+
+
+def test_page_scan_setting_defaults():
+    assert DEFAULTS["catalog_anim_pages"] is True
+
+
+@pytest.mark.parametrize("page,html_,expected", [
+    # doporučená videa (mnoho různých náhledů) a žádný nepatří k tomuto videu: nic
+    ("https://w.example/view?viewkey=ab12cd34ef", "".join(f'<li data-mediabook="https://cdn.x/o{i}/p.webm"></li>' for i in range(5)), None),
+    # mezi nimi je klip s identifikátorem tohoto videa: ten
+    ("https://w.example/view?viewkey=ab12cd34ef", '<li data-mediabook="https://cdn.x/zz/p.webm"></li><li data-mediabook="https://cdn.x/AB12CD34EF/p.webm"></li><li data-mediabook="https://cdn.x/yy/p.webm"></li>', "https://cdn.x/AB12CD34EF/p.webm"),
+    # identifikátor v cestě stránky
+    ("https://w.example/video/987654321/nazev", '<div data-preview="https://cdn.x/987654321/a.mp4"></div><div data-preview="https://cdn.x/other/a.mp4"></div>', "https://cdn.x/987654321/a.mp4"),
+    # jediný kandidát bez identifikátoru: stačí
+    ("https://w.example/view?viewkey=ab12cd34ef", '<div data-preview="https://cdn.x/prev.webm"></div>', "https://cdn.x/prev.webm"),
+    # og:video vedle jediného data-preview: vyhraje data-preview; og:video se doporučeným nepočítá
+    ("https://w.example/v/1", '<meta property="og:video" content="https://cdn.x/full.mp4"><div data-preview="https://cdn.x/prev.webm"></div>', "https://cdn.x/prev.webm"),
+    # tentýž klip na více místech je jeden kandidát
+    ("https://w.example/v/1", '<div data-preview="https://cdn.x/prev.webm"></div><div data-preview="https://cdn.x/prev.webm"></div>', "https://cdn.x/prev.webm"),
+])
+def test_find_preview_never_picks_another_videos_clip(page, html_, expected):
+    assert cp.find_preview(html_, page) == expected
+
+
+# ------------------------------------------------------------ filtr podle animace
+def seed_filter(st, fake):
+    make(st, fake, [e("a"), e("b"), e("c"), e("d")])
+    with st.db.conn() as c:
+        c.execute("update catalog_items set anim_file='1.anim.mp4' where key='youtube a'")
+        c.execute("update catalog_items set anim_file='' where key='youtube b'")            # nepodařilo se: počítá se jako bez animace
+        c.execute("update catalog_items set anim_url='https://c/c.gif' where key='youtube c'")   # čeká na stažení: ještě bez animace
+
+
+def test_filter_by_animation(st, fake):
+    seed_filter(st, fake)
+    keys = lambda r: sorted(i["title"][-1] for i in r["items"])      # noqa: E731
+    assert keys(catalog.query_items(st.db, anim=["yes"])) == ["a"]
+    assert keys(catalog.query_items(st.db, anim=["no"])) == ["b", "c", "d"]
+    assert keys(catalog.query_items(st.db, anim=["yes", "no"])) == ["a", "b", "c", "d"]            # obojí = bez filtru
+    assert keys(catalog.query_items(st.db)) == ["a", "b", "c", "d"] and keys(catalog.query_items(st.db, anim=["x"])) == ["a", "b", "c", "d"]
+    assert catalog.query_items(st.db, anim=["yes"], state=["queued"])["total"] == 0               # kombinuje se s ostatními filtry
+
+
+def test_bulk_selection_respects_the_animation_filter(st, fake):
+    seed_filter(st, fake)
+    ids = catalog.select_ids(st.db, {"filter": {"anim": ["no"]}})
+    assert len(ids) == 3 and catalog.select_ids(st.db, {"filter": {"anim": ["yes"]}}) == [anim_rows(st)["youtube a"]["id"]]
+    for bad in ({"anim": "yes"}, {"anim": [1]}):
+        with pytest.raises(ValueError):
+            catalog.select_ids(st.db, {"filter": bad})
+
+
+def test_api_filters_by_animation(client):
+    c, s = client
+    with s.db.conn() as cx:
+        cx.execute("insert into catalog_sources(id,url,status,added_at,title,folder) values (1,'https://s.example/p','done',1,'Z','Z')")
+        cx.execute("insert into catalog_items(id,source_id,key,url,state,detail_state,added_at,updated_at,anim_file) values (1,1,'k1','https://s.example/v1','new','done',1,1,'1.anim.mp4')")
+        cx.execute("insert into catalog_items(id,source_id,key,url,state,detail_state,added_at,updated_at) values (2,1,'k2','https://s.example/v2','new','done',1,1)")
+    ids = lambda q: sorted(i["id"] for i in c.get("/api/catalog/items" + q).json()["items"])      # noqa: E731
+    assert ids("?anim=yes") == [1] and ids("?anim=no") == [2] and ids("?anim=yes,no") == [1, 2] and ids("") == [1, 2]

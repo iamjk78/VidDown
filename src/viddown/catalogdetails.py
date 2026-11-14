@@ -21,7 +21,7 @@ from pathlib import Path
 
 import httpx
 
-from . import catalog, schedule, storyboard, thumbs
+from . import catalog, catalogpreview, pagelist, schedule, storyboard, thumbs
 from .resolvers import ResolveError, sniffer, ytdlp
 
 log = logging.getLogger("viddown.catalogdetails")
@@ -376,6 +376,69 @@ class DetailWorker:
         if name and not n:                                        # položka mezitím zmizela: soubor je k ničemu
             catalog.remove_anim(self.folder(), name)
 
+    # --- animace ze stránky videa (zdroj C): nejnižší priorita, po jednom videu na web ------------------------
+    def pages_ready(self) -> bool:
+        """Smí se teď hledat náhled na stránkách videí? Zapnuté animace i hledání na stránkách, mimo pauzu, v rozvrhu, po dokončení
+        seznamů, rychlé práce a stahování nalezených animací."""
+        s = self.st.settings
+        if not (s.get("catalog_anim") and s.get("catalog_anim_pages")) or not self.allowed_now() or self.listing_busy() or self.fast_work_left():
+            return False
+        return not self.db.query("select 1 from catalog_items where anim_file is null and anim_url is not null and anim_url != '' "
+                                 "and state in ('new','queued') limit 1")
+
+    def pick_page_scan(self, excluded: set[str] | None = None) -> dict | None:
+        excluded = self.excluded_hosts() if excluded is None else excluded
+        sql = "select * from catalog_items where anim_url is null and detail_state='done' and state in ('new','queued')"
+        args: list = []
+        if excluded:
+            sql += " and coalesce(host,'') not in (%s)" % ",".join("?" * len(excluded))
+            args = sorted(excluded)
+        rows = self.db.query(sql + " order by source_id, pos limit 1", args)
+        return rows[0] if rows else None
+
+    def _mark_anim(self, item: dict, value: str) -> None:
+        with self.db.conn() as c:
+            c.execute("update catalog_items set anim_url=?, updated_at=? where id=? and anim_url is null and state in ('new','queued')",
+                      (value, time.time(), item["id"]))
+
+    async def process_page_scan(self, item: dict) -> None:
+        """Stáhne stránku videa a najde na ní náhledový klip nebo animaci; nic nenalezeno = `anim_url=''` (znovu až „Doplnit“)."""
+        host = item.get("host") or ""
+        try:
+            text, final = await pagelist.fetch(item["url"], self.st.settings.all())
+        except pagelist.PageError as e:
+            msg = str(e)
+            if "HTTP 429" in msg or "HTTP 5" in msg or "se nepodařilo načíst" in msg:       # omezení nebo výpadek: web odložit, video zůstane čekat
+                self._back_off(host, BACKOFF_FIRST, "stránka videa: " + msg[:120])
+            else:
+                self._mark_anim(item, "")
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            log.exception("katalog: stránka videa %s", item["id"])
+            self._mark_anim(item, "")
+        else:
+            self._mark_anim(item, catalogpreview.find_preview(text, final) or "")
+            self.backoff.pop(host, None)
+        finally:
+            self.next_at[host] = time.monotonic() + self.gap()
+
+    async def pages_loop(self, stop: asyncio.Event) -> None:
+        while not stop.is_set():
+            try:
+                if await asyncio.to_thread(self.pages_ready):
+                    item = await asyncio.to_thread(self.pick_page_scan, self.excluded_hosts())
+                    if item is not None:
+                        await self.process_page_scan(item)
+                        continue
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001
+                log.exception("katalog: hledání náhledů na stránkách")
+                await _sleep(stop, 5)
+                continue
+            await _sleep(stop, 2)
+
     async def thumbs_loop(self, stop: asyncio.Event) -> None:
         """Stahuje miniatury položkám, které ještě žádnou nemají (rychle, po dávkách; selhání se označí a nezkouší znovu)."""
         while not stop.is_set():
@@ -389,7 +452,7 @@ class DetailWorker:
                     continue
                 if self.st.settings.get("catalog_anim") and self.allowed_now() and not self.paused():     # animace až po všech miniaturách
                     arows = await asyncio.to_thread(
-                        self.db.query, "select id, url, anim_url from catalog_items where anim_file is null and anim_url is not null "
+                        self.db.query, "select id, url, anim_url from catalog_items where anim_file is null and anim_url is not null and anim_url != '' "
                         "and state in ('new','queued') order by source_id, pos limit 2")
                     if arows:
                         await asyncio.gather(*(self._anim_one(r) for r in arows))
@@ -408,13 +471,13 @@ class DetailWorker:
         r = self.db.query(
             "select sum(detail_state='pending') pending, sum(detail_state='slow') slow, sum(detail_state='done') done, sum(detail_state='failed') failed, "
             "sum(thumb_file is null and thumb_url is not null) thumbs_pending, sum(thumb_file = '') thumbs_failed, "
-            "sum(anim_file is null and anim_url is not null) anim_pending, sum(anim_file is not null and anim_file != '') anim_have, "
+            "sum(anim_file is null and anim_url is not null and anim_url != '') anim_pending, sum(anim_url is null and detail_state='done') anim_scan, sum(anim_file is not null and anim_file != '') anim_have, "
             "sum(anim_file = '') anim_failed "
             "from catalog_items where state in ('new','queued')")[0]
         now = time.monotonic()
         return {"pending": r["pending"] or 0, "slow": r["slow"] or 0, "done": r["done"] or 0, "failed": r["failed"] or 0,
                 "thumbs_pending": r["thumbs_pending"] or 0, "thumbs_failed": r["thumbs_failed"] or 0,
-                "anim_pending": r["anim_pending"] or 0, "anim_have": r["anim_have"] or 0, "anim_failed": r["anim_failed"] or 0,
+                "anim_pending": r["anim_pending"] or 0, "anim_scan": r["anim_scan"] or 0, "anim_have": r["anim_have"] or 0, "anim_failed": r["anim_failed"] or 0,
                 "paused": self.paused(), "waiting_for_lists": self.listing_busy(), "active_hosts": sorted(self.active),
                 "backoff": [{"host": h, "seconds": int(b["until"] - now), "reason": b["reason"]} for h, b in sorted(self.backoff.items())
                             if b["until"] > now]}
@@ -444,7 +507,8 @@ def retry_failed(db, source: int | None = None) -> dict:
 def refill_anims(db, source: int | None = None) -> dict:
     """„Doplnit animace“: viditelným videím bez adresy animace znovu zjistí podrobnosti (adresa se dřív neukládala; zjistí se
     spolu s ostatními podrobnostmi, po jednom na web s pauzou) a videím, kterým se animace nepodařilo stáhnout, dá další pokus
-    (třeba po zvýšení limitu velikosti). Vrací počty {"details", "retry"}."""
+    (třeba po zvýšení limitu velikosti) a znovu hledá náhled na stránkách videí, kde se dřív nic nenašlo.
+    Vrací počty {"details", "retry", "pages"}."""
     where, args = "", []
     if source:
         where, args = " and source_id=?", [int(source)]
@@ -452,12 +516,15 @@ def refill_anims(db, source: int | None = None) -> dict:
         c.execute("begin immediate")
         d = c.execute("update catalog_items set detail_state='pending', detail_error=null where detail_state='done' "
                       "and anim_url is null and anim_file is null and state in ('new','queued')" + where, args).rowcount
-        r = c.execute("update catalog_items set anim_file=null where anim_file='' and anim_url is not null and state in ('new','queued')" + where, args).rowcount
+        r = c.execute("update catalog_items set anim_file=null where anim_file='' and anim_url is not null and anim_url != '' "
+                      "and state in ('new','queued')" + where, args).rowcount
+        g = c.execute("update catalog_items set anim_url=null where anim_url='' and anim_file is null and detail_state='done' "
+                      "and state in ('new','queued')" + where, args).rowcount            # hledání na stránkách videí znovu
         c.execute("commit")
-    return {"details": d, "retry": r}
+    return {"details": d, "retry": r, "pages": g}
 
 
 async def task(st, stop: asyncio.Event) -> None:
     w = getattr(st, "catalog_details", None) or DetailWorker(st)
     st.catalog_details = w
-    await asyncio.gather(w.run(stop), w.thumbs_loop(stop))
+    await asyncio.gather(w.run(stop), w.thumbs_loop(stop), w.pages_loop(stop))
