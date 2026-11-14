@@ -42,6 +42,19 @@ ACTIVE_JOB = ("new", "probing", "confirm", "queued", "running", "cancelling", "e
 THUMB_ALTS_MAX = 9
 UNAVAILABLE_TITLES = ("[private video]", "[deleted video]")
 
+# Délka videa v sekundách: navazující intervaly (horní mez včetně), „over“ je nad hodinu, „unknown“ bez zjištěné délky.
+DUR_BUCKETS = {
+    "20": "i.duration <= 20",
+    "60": "i.duration > 20 and i.duration <= 60",
+    "120": "i.duration > 60 and i.duration <= 120",
+    "300": "i.duration > 120 and i.duration <= 300",
+    "600": "i.duration > 300 and i.duration <= 600",
+    "1800": "i.duration > 600 and i.duration <= 1800",
+    "3600": "i.duration > 1800 and i.duration <= 3600",
+    "over": "i.duration > 3600",
+    "unknown": "i.duration is null",
+}
+
 # Rozlišení podle nejbližší běžné hodnoty (výška obrazu).
 RES_BUCKETS = {
     "2160": "i.height >= 2000",
@@ -543,7 +556,7 @@ def _like(tok: str) -> str:
 
 
 def _where(source: int | None, q: str, res: list[str] | None, state: list[str] | None, anim: list[str] | None = None,
-           age: str = "") -> tuple[str, list]:
+           age: str = "", dur: list[str] | None = None) -> tuple[str, list]:
     """Společná část dotazů (FROM … WHERE …) pro zobrazení i výběr položek. `state` (sjednocení): new, queued, downloaded,
     rejected, gone (výchozí jsou viditelné new a queued)."""
     where, args = [], []
@@ -575,6 +588,9 @@ def _where(source: int | None, q: str, res: list[str] | None, state: list[str] |
     if age in AGE_DAYS:                                                       # jen videa se známým datem zveřejnění
         where.append("(i.published_at > ?)")
         args.append(time.time() - AGE_DAYS[age] * 86400)
+    lengths = [DUR_BUCKETS[d] for d in (dur or []) if d in DUR_BUCKETS]
+    if lengths:                                                               # délka: sjednocení vybraných intervalů
+        where.append("(" + " or ".join(f"({b})" for b in lengths) + ")")
     buckets = [RES_BUCKETS[r] for r in (res or []) if r in RES_BUCKETS]
     if buckets:
         where.append("(" + " or ".join(f"({b})" for b in buckets) + ")")
@@ -583,9 +599,9 @@ def _where(source: int | None, q: str, res: list[str] | None, state: list[str] |
 
 def query_items(db, source: int | None = None, q: str = "", res: list[str] | None = None, state: list[str] | None = None,
                 sort: str = "pos", direction: str = "asc", limit: int = 100, offset: int = 0, anim: list[str] | None = None,
-                age: str = "") -> dict:
+                age: str = "", dur: list[str] | None = None) -> dict:
     """Položky katalogu s filtry, řazením a stránkováním."""
-    sql_from, args = _where(source, q, res, state, anim, age)
+    sql_from, args = _where(source, q, res, state, anim, age, dur)
     d = "desc" if str(direction).lower() == "desc" else "asc"
     col = SORT_COLUMNS.get(sort)
     if sort == "published":      # neznámé datum (null i 0) vždy nakonec
@@ -628,7 +644,10 @@ def select_ids(db, spec) -> list[int]:
             or not isinstance(res, list) or not isinstance(state, list) or not isinstance(anim, list) \
             or not all(isinstance(x, str) for x in res + state + anim):
         raise ValueError("invalid filter")
-    sql_from, args = _where(src, q, res, state, anim, f.get("age") if isinstance(f.get("age"), str) else "")
+    dur = f.get("dur") or []
+    if not isinstance(dur, list) or not all(isinstance(x, str) for x in dur):
+        raise ValueError("invalid filter")
+    sql_from, args = _where(src, q, res, state, anim, f.get("age") if isinstance(f.get("age"), str) else "", dur)
     rows = db.query(f"select i.id {sql_from} order by i.id limit ?", [*args, MAX_SELECT + 1])
     if len(rows) > MAX_SELECT:
         raise ValueError("too many items")

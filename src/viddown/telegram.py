@@ -313,11 +313,15 @@ class TelegramBot:
             await self.edit(job["tg_chat"], job["tg_msg"], f"{head}\n{body}\n{t(L, 'queued')}")
 
     async def on_error(self, job: dict, msg: str) -> None:
+        if job.get("source") != "telegram":
+            return  # chyby videí přidaných jinak (GUI, katalog, odběr, CLI) se do Telegramu neposílají, jsou v GUI
         if job.get("source") == "telegram" and job.get("status") == "failed" and not job.get("method") and job.get("tg_msg"):
             return  # chyba kontroly už je v upravené odpovědi na URL
         await self.send(t(self.lang(), "err_job", title=job.get("title") or job["url"], err=msg))
 
     async def on_summary(self, parent: dict, failed: list[dict], total: int) -> None:
+        if parent.get("source") != "telegram":
+            return  # souhrn selhání playlistu jen u playlistů zadaných přes Telegram
         lines = "\n".join(f"• {(f['title'] or f['url'])[:60]}: {(f['error'] or '')[:120]}" for f in failed[:10])
         if len(failed) > 10:
             lines += f"\n… +{len(failed) - 10}"

@@ -8,7 +8,7 @@ Běží na **macOS, Windows i v Dockeru**. Ovládá se **webovým GUI**, **Teleg
 - **Jedna fronta**, stahuje se v pořadí přidání. V GUI jde měnit pořadí přetažením, pozastavit a odstranit položky.
 - **Nejvyšší kvalita** je výchozí. Vedle každého videa se uloží miniatura `Název videa.jpg`.
 - **Playlisty a kanály** se stáhnou celé (u kanálu jen záložka Videa, Shorts a živé přenosy volitelně), do vlastní složky.
-- **Telegram:** pošlete botovi odkaz, odpoví počtem nalezených videí a rozlišením prvního. Pak hlásí jen chyby.
+- **Telegram:** pošlete botovi odkaz, odpoví počtem nalezených videí a rozlišením prvního. Pak hlásí jen chyby videí, která jste zadali přes Telegram, a důležitá systémová oznámení (pozastavená fronta, záloha, aktualizace); chyby videí z GUI, Katalogu, odběrů nebo terminálu se do Telegramu neposílají, najdete je v GUI.
 - **Enginy** (yt-dlp, Deno, ffmpeg) se aktualizují s testem. Když nová verze nefunguje, zůstane předchozí.
 - Nastavení: souběžná stahování, limit rychlosti, časový rozvrh, šablona názvů, cookies, proxy, heslo do GUI, čeština i angličtina, světlý i tmavý režim.
 - V GUI je **nápověda** a **průvodce prvním spuštěním**.
@@ -133,7 +133,7 @@ Menu **Katalog** slouží k třídění videí před stahováním: přidáte zdr
   (Nastavení › Katalog), a až po dokončení seznamů všech zdrojů. U každého zdroje jde zdroj **Obnovit** (najde jen nová videa),
   **Načíst znovu vše** (nabídne znovu i odmítnutá a stažená) a **Odebrat** (smaže i paměť o jeho videích).
 - **Procházení:** hledání v názvu videa, kanálu i zdroje (bez ohledu na diakritiku, tlačítko × a klávesa Esc), filtr podle zdroje,
-  rozlišení (2160p až ≤360p, neznámé) a stavu (nové, ve frontě, staženo dříve, dříve odmítnuté, nedostupné); řazení podle pořadí
+  rozlišení (2160p až ≤360p, neznámé), délky (do 20 s, 1, 2, 5, 10, 30 min, 1 h, nad 1 h, neznámá; navazující intervaly) a stavu (nové, ve frontě, staženo dříve, dříve odmítnuté, nedostupné); řazení podle pořadí
   ve zdroji, zdroje, rozlišení, velikosti, délky, **data zveřejnění** (od nejnovějšího nebo od nejstaršího, i uvnitř zvoleného zdroje; datum se zjišťuje spolu s podrobnostmi, u starších videí ho doplní tlačítko Doplnit data) nebo data přidání; filtr „zveřejněno za poslední týden / měsíc / rok“; když ve zdroji nezbude žádné video (odstraněním nebo stažením), aplikace se zeptá, jestli zdroj odebrat, nebo ponechat pro budoucí videa; zdroj, který je seznamem playlistů (např. záložka „Playlisty“ kanálu YouTube), nabídne playlisty k výběru a vybrané přidá jako samostatné zdroje (ve frontě se z nich stáhnou videa do podsložek podle názvu playlistu); 25 až 500 videí na stránku; velikost miniatur S, M, L (pamatuje
   se v prohlížeči).
 - **Výběr:** zaškrtnutím karet, **Vybrat zobrazené** (stránka) nebo **Vybrat všech vyhovujících** (i na dalších stránkách; jednotlivé

@@ -1195,15 +1195,17 @@ const CAT_STATES = () => [['new', T('nové', 'new')], ['queued', T('ve frontě',
   ['rejected', T('dříve odmítnuté', 'rejected before')], ['gone', T('nedostupné', 'unavailable')]];
 const CAT_SORTS = () => [['pos', T('pořadí ve zdroji', 'order in source')], ['source', T('zdroj', 'source')], ['height', T('rozlišení', 'resolution')],
   ['size', T('velikost', 'size')], ['duration', T('délka', 'duration')], ['published', T('datum zveřejnění', 'publication date')], ['added', T('přidáno do katalogu', 'added to catalog')]];
+const CAT_DURS = () => [['20', T('do 20 s', 'up to 20 s')], ['60', T('do 1 min', 'up to 1 min')], ['120', T('do 2 min', 'up to 2 min')], ['300', T('do 5 min', 'up to 5 min')],
+  ['600', T('do 10 min', 'up to 10 min')], ['1800', T('do 30 min', 'up to 30 min')], ['3600', T('do 1 h', 'up to 1 h')], ['over', T('nad 1 h', 'over 1 h')], ['unknown', T('neznámá', 'unknown')]];
 const CAT_AGES = () => [['week', T('týden', 'week')], ['month', T('měsíc', 'month')], ['year', T('rok', 'year')]];
 const CAT_WIDTH = { S: 180, M: 280, L: 420 };
 const CAT_LIMITS = [25, 50, 100, 200, 500];
 function catPref(k, def, allowed) { try { const v = localStorage.getItem('vd_cat_' + k); return v != null && (!allowed || allowed.map(String).includes(v)) ? v : def; } catch (e) { return def; } }
 function catSetPref(k, v) { try { localStorage.setItem('vd_cat_' + k, v); } catch (e) { /* bez úložiště */ } }
-const CAT = { q: '', source: 0, res: [], state: [], anim: [], age: '', done: new Set(), offset: 0, sel: new Set(), selAll: null, exclude: new Set(), data: null, ov: null, sig: '', seq: 0, qt: null,
+const CAT = { q: '', source: 0, res: [], state: [], anim: [], age: '', dur: [], done: new Set(), offset: 0, sel: new Set(), selAll: null, exclude: new Set(), data: null, ov: null, sig: '', seq: 0, qt: null,
   sort: catPref('sort', 'pos', CAT_SORTS().map(x => x[0])), dir: catPref('dir', 'asc', ['asc', 'desc']), limit: +catPref('limit', 100, CAT_LIMITS), thumb: catPref('thumb', 'M', ['S', 'M', 'L']) };
 
-function catFilter() { return { source: CAT.source || null, q: CAT.q, res: CAT.res.slice(), state: CAT.state.slice(), anim: CAT.anim.slice(), age: CAT.age }; }
+function catFilter() { return { source: CAT.source || null, q: CAT.q, res: CAT.res.slice(), state: CAT.state.slice(), anim: CAT.anim.slice(), age: CAT.age, dur: CAT.dur.slice() }; }
 function catQuery() {
   const p = new URLSearchParams({ sort: CAT.sort, dir: CAT.dir, limit: CAT.limit, offset: CAT.offset });
   if (CAT.source) p.set('source', CAT.source);
@@ -1212,6 +1214,7 @@ function catQuery() {
   if (CAT.state.length) p.set('state', CAT.state.join(','));
   if (CAT.anim.length) p.set('anim', CAT.anim.join(','));
   if (CAT.age) p.set('age', CAT.age);
+  if (CAT.dur.length) p.set('dur', CAT.dur.join(','));
   return p.toString();
 }
 const catTotal = () => (CAT.data ? CAT.data.total : 0);
@@ -1231,6 +1234,7 @@ function renderCatalog() {
       <button class="btn sm" id="catdir" title="${T('Směr řazení: ↑ vzestupně (u data od nejstaršího), ↓ sestupně (u data od nejnovějšího)', 'Sort direction: ↑ ascending (oldest first for dates), ↓ descending (newest first for dates)')}">${CAT.dir === 'desc' ? '↓' : '↑'}</button>
       <select class="input sm" id="catlimit">${CAT_LIMITS.map(n => `<option value="${n}" ${CAT.limit === n ? 'selected' : ''}>${T('Na stránku', 'Per page')}: ${n}</option>`).join('')}</select>
       <span class="seg" id="catsize" title="${T('Velikost miniatur', 'Thumbnail size')}">${['S', 'M', 'L'].map(s => `<button data-size="${s}" class="${CAT.thumb === s ? 'on' : ''}">${s}</button>`).join('')}</span></div>
+      <div class="row gap6 wrap" style="margin-top:8px"><span class="t2 fs12">${T('Délka', 'Length')}:</span><span id="catdur" class="row gap4 wrap"></span></div>
       <div class="row gap6 wrap" style="margin-top:8px"><span class="t2 fs12">${T('Rozlišení', 'Resolution')}:</span><span id="catres" class="row gap4 wrap"></span>
         <span class="t2 fs12" style="margin-left:10px">${T('Stav', 'State')}:</span><span id="catstate" class="row gap4 wrap"></span>
         <span class="t2 fs12" style="margin-left:10px">${T('Animace', 'Animation')}:</span><span id="catanimf" class="row gap4 wrap"></span>
@@ -1251,6 +1255,7 @@ function renderCatalog() {
   $('#catlimit').onchange = e => { CAT.limit = +e.target.value; catSetPref('limit', CAT.limit); reload(() => {}); };
   $$('#catsize [data-size]').forEach(b => b.onclick = () => { CAT.thumb = b.dataset.size; catSetPref('thumb', CAT.thumb); $$('#catsize [data-size]').forEach(x => x.classList.toggle('on', x === b)); catPaintGrid(); });
   $('#catres').onclick = e => { const b = e.target.closest('[data-res]'); if (b) reload(() => { const v = b.dataset.res, i = CAT.res.indexOf(v); i >= 0 ? CAT.res.splice(i, 1) : CAT.res.push(v); }); };
+  $('#catdur').onclick = e => { const b = e.target.closest('[data-dur]'); if (b) reload(() => { const v = b.dataset.dur, i = CAT.dur.indexOf(v); i >= 0 ? CAT.dur.splice(i, 1) : CAT.dur.push(v); }); };
   $('#catagef').onclick = e => { const b = e.target.closest('[data-age]'); if (b) reload(() => { CAT.age = CAT.age === b.dataset.age ? '' : b.dataset.age; }); };
   $('#catanimf').onclick = e => { const b = e.target.closest('[data-an]'); if (b) reload(() => { const v = b.dataset.an, i = CAT.anim.indexOf(v); i >= 0 ? CAT.anim.splice(i, 1) : CAT.anim.push(v); }); };
   $('#catstate').onclick = e => { const b = e.target.closest('[data-st]'); if (b) reload(() => { const v = b.dataset.st, i = CAT.state.indexOf(v); i >= 0 ? CAT.state.splice(i, 1) : CAT.state.push(v); }); };
@@ -1320,6 +1325,7 @@ function catPaintBanner() {
 function catPaintTools() {
   const ov = CAT.ov; if (!$('#catres')) return;
   $('#catres').innerHTML = CAT_RES().map(([v, l]) => `<button class="chip ${CAT.res.includes(v) ? 'on' : ''}" data-res="${v}">${l}</button>`).join('');
+  $('#catdur').innerHTML = CAT_DURS().map(([v, l]) => `<button class="chip ${CAT.dur.includes(v) ? 'on' : ''}" data-dur="${v}">${l}</button>`).join('');
   $('#catagef').innerHTML = CAT_AGES().map(([v, l]) => `<button class="chip ${CAT.age === v ? 'on' : ''}" data-age="${v}">${l}</button>`).join('');
   $('#catanimf').innerHTML = [['yes', T('s animací', 'with animation')], ['no', T('bez animace', 'without animation')]].map(([v, l]) => `<button class="chip ${CAT.anim.includes(v) ? 'on' : ''}" data-an="${v}">${l}</button>`).join('');
   $('#catstate').innerHTML = CAT_STATES().map(([v, l]) => `<button class="chip ${CAT.state.includes(v) ? 'on' : ''}" data-st="${v}">${l}</button>`).join('');

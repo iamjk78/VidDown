@@ -156,3 +156,26 @@ def test_api_keep_and_dates_refill_and_age_param(client):
     assert c.get("/api/catalog/items?sort=published&dir=desc&age=month").status_code == 200
     st_ = c.get("/api/catalog").json()["details"]
     assert "no_date" in st_ and "have_date" in st_
+
+
+# --- filtr délky -----------------------------------------------------------------------------------
+def test_duration_filter_uses_adjoining_intervals_union_and_selection(st, fake):
+    lens = {"d1": 5, "d2": 20, "d3": 21, "d4": 60, "d5": 61, "d6": 300, "d7": 3600, "d8": 3601, "d9": None}
+    make(st, fake, [e(k, duration=v) for k, v in lens.items()])
+    got = lambda *d: sorted(i["title"][-2:] for i in catalog.query_items(st.db, dur=list(d))["items"])  # noqa: E731
+    assert got("20") == ["d1", "d2"]                                    # do 20 s včetně 20
+    assert got("60") == ["d3", "d4"]                                    # navazující: 20 s < délka ≤ 60 s
+    assert got("120") == ["d5"] and got("300") == ["d6"]
+    assert got("3600") == ["d7"] and got("over") == ["d8"] and got("unknown") == ["d9"]
+    assert got("20", "over", "unknown") == ["d1", "d2", "d8", "d9"]       # více tlačítek = sjednocení
+    assert len(got()) == 9 and len(got("nesmysl")) == 9                  # bez filtru / neznámá hodnota
+    assert len(catalog.select_ids(st.db, {"filter": {"dur": ["60", "over"]}})) == 3
+    import pytest
+    with pytest.raises(ValueError):
+        catalog.select_ids(st.db, {"filter": {"dur": "60"}})
+    assert catalog.query_items(st.db, sort="duration", dur=["60"])["total"] == 2
+
+
+def test_api_dur_param(client):
+    c, s = client
+    assert c.get("/api/catalog/items?dur=20,60,over").status_code == 200

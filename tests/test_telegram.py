@@ -69,11 +69,23 @@ def test_probe_reply_and_confirm_buttons(bot):
 
 
 def test_playlist_summary_text(bot):
-    parent = {"id": 1, "title": "Kurz", "url": "https://x"}
+    parent = {"id": 1, "title": "Kurz", "url": "https://x", "source": "telegram"}
     failed = [{"title": "Díl 3", "url": "https://x/3", "error": "Video unavailable"}]
     asyncio.run(bot.on_summary(parent, failed, 12))
     t = bot.sent[-1][1]["text"]
     assert "Kurz" in t and "1 z 12" in t and "Díl 3" in t
+
+
+def test_failures_of_videos_added_elsewhere_are_not_sent_to_telegram(bot):
+    n = len(bot.sent)
+    for source in ("gui", "catalog", "subscription", "cli", None):
+        asyncio.run(bot.on_error({"id": 5, "url": "https://x/a", "title": "A", "source": source, "status": "failed", "method": "ytdlp"}, "HTTP 403"))
+        asyncio.run(bot.on_summary({"id": 1, "title": "Kurz", "url": "https://x", "source": source}, [{"title": "D", "url": "https://x/3", "error": "e"}], 2))
+    assert len(bot.sent) == n                                                      # z jiných zdrojů nic
+    asyncio.run(bot.on_error({"id": 6, "url": "https://x/b", "title": "B", "source": "telegram", "status": "failed", "method": "ytdlp"}, "HTTP 403"))
+    assert len(bot.sent) == n + 1 and "HTTP 403" in bot.sent[-1][1]["text"]        # z Telegramu ano
+    asyncio.run(bot.on_notice("target", error="NAS nedostupný"))
+    assert len(bot.sent) == n + 2                                                  # systémová oznámení zůstávají
 
 
 def test_commands(bot):
