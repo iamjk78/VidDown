@@ -279,12 +279,12 @@ def test_auto_refresh_queues_only_old_idle_sources_as_automatic(pst):
     with pst.db.conn() as c:
         c.execute("update catalog_sources set status='done', last_scan=?, manual=1, scan_mode='all' where url like '%/1'", (now - 25 * 3600,))
         c.execute("update catalog_sources set status='done', last_scan=? where url like '%/2'", (now - 3600,))
-        c.execute("update catalog_sources set status='error', last_scan=? where url like '%/3'", (now - 48 * 3600,))
+        c.execute("update catalog_sources set status='error', last_scan=?, scan_mode='all' where url like '%/3'", (now - 48 * 3600,))
         c.execute("update catalog_sources set status='scanning', last_scan=? where url like '%/4'", (now - 99 * 3600,))
     assert catalog.auto_refresh(pst.db, 24, now) == 2
     got = {r["url"][-1]: (r["status"], r["scan_mode"], r["manual"]) for r in pst.db.query("select * from catalog_sources")}
     assert got["1"] == ("queued", "all", 0)                                             # nevyřízené „načíst znovu vše“ se nezmění na „jen nová“
-    assert got["3"] == ("queued", "new", 0)                                             # automatické, jen nová videa
+    assert got["3"] == ("queued", "new", 0)                                             # automatické, jen nová videa (i po chybě „načíst znovu vše“)
     assert got["2"][0] == "done" and got["4"][0] == "scanning"                          # čerstvý a právě zjišťovaný zdroj se nechá
     assert catalog.auto_refresh(pst.db, 24, now) == 0                       # podruhé nic (už jsou ve frontě)
 

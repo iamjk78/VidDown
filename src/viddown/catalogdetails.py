@@ -27,6 +27,7 @@ import httpx
 
 from . import catalog, catalogpreview, netsafe, pagelist, schedule, storyboard, thumbs
 from .resolvers import ResolveError, sniffer, ytdlp
+from .util import is_rate_limited
 
 log = logging.getLogger("viddown.catalogdetails")
 
@@ -303,9 +304,9 @@ class DetailWorker:
     def _on_error(self, item: dict, kind: str, msg: str) -> None:
         host = item.get("host") or ""
         low = msg.lower()
-        if kind == "network":                                       # omezení dotazů, výpadek: web odložit, video zůstane čekat
+        if kind == "network" or is_rate_limited(msg):               # omezení dotazů, výpadek: web odložit, video zůstane čekat
             self._back_off(host, BACKOFF_FIRST, "omezení nebo výpadek webu: " + msg[:120])
-        elif kind == "cookies" or "not a bot" in low or "confirm you" in low:
+        elif kind == "cookies" or "not a bot" in low or re.search(r"confirm you(?:'|’)?(?:re| are) not", low):   # „confirm your age“ je chyba jednoho videa, ne webu
             self._back_off(host, BACKOFF_LOGIN, "web vyžaduje ověření nebo cookies: " + msg[:120])
         elif kind == "unsupported" and self.st.settings.get("catalog_slow_browser"):
             self._finish(item, "slow", None)                        # yt-dlp web nezná: podrobnosti později prohlížečem

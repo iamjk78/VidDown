@@ -857,14 +857,14 @@ def auto_refresh(db, hours: float, now: float | None = None) -> int:
     Zdroj s chybou se zkusí znovu po stejném intervalu. Vrací počet zařazených zdrojů."""
     now = time.time() if now is None else now
     with db.conn() as c:
-        return c.execute("update catalog_sources set status='queued', manual=0 where status in ('done','error') "
+        return c.execute("update catalog_sources set status='queued', manual=0, scan_mode=case when status='error' then 'new' else scan_mode end where status in ('done','error') "
                          "and coalesce(last_scan, 0) < ? and not (status='error' and coalesce(error,'') like 'web není podporovaný%')",
                          (now - hours * 3600,)).rowcount
 
 
 def _fail(db, sid: int, msg: str) -> None:
     with db.conn() as c:
-        c.execute("update catalog_sources set status='error', error=?, last_scan=? where id=?", (msg, time.time(), sid))
+        c.execute("update catalog_sources set status='error', error=?, last_scan=? where id=? and status!='detached'", (msg, time.time(), sid))
 
 
 def store_choose(db, sid: int, listing: dict) -> None:

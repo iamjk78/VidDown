@@ -182,6 +182,8 @@ async def check(runner, sid: int) -> dict:
                 e["thumb_url"] = e.get("thumb_url") or info.get("thumbnail")
                 e["duration"] = e.get("duration") or info.get("duration")
                 e["channel"] = e.get("channel") or info.get("channel") or info.get("uploader")
+            if since and d is None and sub["kind"] != "page":              # datum neznámé (limit dotazů nebo chyba): nezařazovat, zkusí se příště
+                continue
             if since and d and d < since:
                 seen_old[vid] = None
                 if is_channel:

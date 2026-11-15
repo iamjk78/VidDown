@@ -251,6 +251,7 @@ def test_gap_depends_on_setting_and_performance_mode(st):
     ("login", "ERROR: Private video. Sign in if you've been granted access", "gone"),
     ("geo", "not available in your country", "new"),
     ("login", "This video is age-restricted", "new"),
+    ("login", "Sign in to confirm your age. This video may be inappropriate for some users.", "new"),
     ("other", "boom", "new"),
     ("unsupported", "Unsupported URL", "new"),
 ])
@@ -265,6 +266,7 @@ def test_item_level_errors_fail_only_that_video(st, fake, info, kind, msg, item_
 
 
 @pytest.mark.parametrize("kind,msg", [("network", "HTTP Error 429: Too Many Requests"), ("login", "Sign in to confirm you're not a bot"),
+                                      ("other", "The current session has been rate-limited by YouTube for up to an hour"),
                                       ("cookies", "could not copy cookies database")])
 def test_host_level_errors_back_off_the_host_and_keep_the_video_pending(st, fake, info, monkeypatch, kind, msg):
     monkeypatch.setattr(cd, "BACKOFF_FIRST", 0.3)

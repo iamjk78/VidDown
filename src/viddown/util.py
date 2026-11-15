@@ -106,7 +106,8 @@ def unique_target(directory: Path, stem: str, ext: str, companions=(".jpg",)) ->
     while True:
         s = stem if n == 1 else f"{stem} ({n})"
         cand = directory / f"{s}{ext}"
-        if not cand.exists() and not any((directory / f"{s}{c}").exists() for c in companions):
+        if (not cand.exists() and not cand.with_name(cand.name + ".viddown-part").exists()
+                and not any((directory / f"{s}{c}").exists() for c in companions)):
             return cand
         n += 1
 
@@ -237,7 +238,7 @@ ERROR_PATTERNS = [
 ]
 
 
-RATE_LIMIT_RE = re.compile(r"rate.?limited|rate limit|too many requests|http error 429|\b429\b", re.I)
+RATE_LIMIT_RE = re.compile(r"rate.?limited|rate limit|too many requests|http error 429|(?<![\w./:-])429(?![\w./:-])", re.I)
 
 
 def is_rate_limited(message: str) -> bool:

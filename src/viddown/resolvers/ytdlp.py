@@ -247,39 +247,44 @@ async def _download(url, info, ctx: Ctx, staging: Path, name: str, rate_bps, on_
     tail: list[str] = []
     last_emit = 0.0
     assert proc.stdout
-    async for raw in proc.stdout:
-        line = raw.decode("utf-8", "replace").rstrip()
-        if line.startswith("VDPROG "):
-            st, dl, tot, est, spd, eta, fid = (line[7:].split("|") + [""] * 7)[:7]
-            num = lambda x: float(x) if x not in ("NA", "None", "") else None  # noqa: E731
-            dlv, totv = num(dl) or 0, num(tot) or num(est) or 0
-            p = parts.setdefault(fid, [0, 0])
-            p[0] = dlv
-            if totv:
-                p[1] = max(p[1], int(totv)) if st != "finished" else int(dlv or totv)
-            now = time.monotonic()
-            if now - last_emit > 0.5 or st == "finished":
-                last_emit = now
-                done = sum(x[0] for x in parts.values())
-                total = sum(x[1] for x in parts.values())
-                on_progress(downloaded=int(done), total=int(total) or None,
-                            progress=(min(done / total, 1.0) if total else None),
-                            speed=num(spd), eta=int(num(eta)) if num(eta) is not None else None)
-            continue
-        if line.startswith("VDPOST "):
-            if line.startswith("VDPOST started"):   # stažení je hotové, běží ffmpeg: ukázat 100 % bez rychlosti
-                done = int(sum(x[0] for x in parts.values()) or sum(x[1] for x in parts.values()) or 0)
-                on_progress(progress=1.0, speed=None, eta=None, phase="post", **({"downloaded": done, "total": done} if done else {}))
-            continue
-        if line.startswith("VDFILE "):
-            filepath = line[7:].strip()
-            continue
-        if "has already been recorded in the archive" in line:
-            skipped = "archive"
-        elif "does not pass filter" in line and "is_live" in line:
-            skipped = "live"
-        tail.append(line)
-        tail = tail[-40:]
+    try:
+        async for raw in proc.stdout:
+            line = raw.decode("utf-8", "replace").rstrip()
+            if line.startswith("VDPROG "):
+                st, dl, tot, est, spd, eta, fid = (line[7:].split("|") + [""] * 7)[:7]
+                num = lambda x: float(x) if x not in ("NA", "None", "") else None  # noqa: E731
+                dlv, totv = num(dl) or 0, num(tot) or num(est) or 0
+                p = parts.setdefault(fid, [0, 0])
+                p[0] = dlv
+                if totv:
+                    p[1] = max(p[1], int(totv)) if st != "finished" else int(dlv or totv)
+                now = time.monotonic()
+                if now - last_emit > 0.5 or st == "finished":
+                    last_emit = now
+                    done = sum(x[0] for x in parts.values())
+                    total = sum(x[1] for x in parts.values())
+                    on_progress(downloaded=int(done), total=int(total) or None,
+                                progress=(min(done / total, 1.0) if total else None),
+                                speed=num(spd), eta=int(num(eta)) if num(eta) is not None else None)
+                continue
+            if line.startswith("VDPOST "):
+                if line.startswith("VDPOST started"):   # stažení je hotové, běží ffmpeg: ukázat 100 % bez rychlosti
+                    done = int(sum(x[0] for x in parts.values()) or sum(x[1] for x in parts.values()) or 0)
+                    on_progress(progress=1.0, speed=None, eta=None, phase="post", **({"downloaded": done, "total": done} if done else {}))
+                continue
+            if line.startswith("VDFILE "):
+                filepath = line[7:].strip()
+                continue
+            if "has already been recorded in the archive" in line:
+                skipped = "archive"
+            elif "does not pass filter" in line and "is_live" in line:
+                skipped = "live"
+            tail.append(line)
+            tail = tail[-40:]
+    except BaseException:                                               # chyba při čtení výstupu nesmí nechat yt-dlp běžet dál
+        if proc.returncode is None:
+            proc.kill()
+        raise
     code = await proc.wait()
     holder.proc = None
     if holder.stopped:
@@ -308,7 +313,11 @@ async def _download(url, info, ctx: Ctx, staging: Path, name: str, rate_bps, on_
             ff = ctx.engines.get("ffmpeg").bin_path()
         except Exception:  # noqa: BLE001
             ff = None
-        remuxed = await container.remux_mkv_to_mp4(str(ff) if ff else shutil.which("ffmpeg"), fp, holder, MODES.get(s.get("perf_mode", "full"), MODES["full"])[1] or None)
+        try:
+            remuxed = await container.remux_mkv_to_mp4(str(ff) if ff else shutil.which("ffmpeg"), fp, holder, MODES.get(s.get("perf_mode", "full"), MODES["full"])[1] or None)
+        except Cancelled:                                               # přerušení uprostřed přebalení: video je už v archivu, musí se dokončit později
+            save_pending(staging, fp if fp.is_file() else Path(filepath), None, "\n".join(tail))
+            raise
         if remuxed:
             fp = remuxed
         if holder.stopped:

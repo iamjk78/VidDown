@@ -13,6 +13,7 @@ import os
 import random
 import re
 import shutil
+import threading
 import time
 from pathlib import Path
 
@@ -27,6 +28,7 @@ from .resolvers.ytdlp import COOKIES_STALE
 from .util import (classify_error, fallback_allowed, free_space, host_key, in_schedule, is_rate_limited, render_template,
                    retry_allowed, sanitize_filename, unique_target)
 
+_PLACE_LOCK = threading.Lock()
 PENDING = ytdlp.PENDING  # hotové stažení čekající na přesun do cílové složky
 
 
@@ -152,10 +154,15 @@ class Runner:
         base = self.staging(0).parent
         if base.exists():
             active = {j["id"] for j in self.db.query("select id from jobs where status in ('queued','running','new','probing','confirm')")}
+            failed = {j["id"] for j in self.db.query("select id from jobs where status='failed'")}
             for d in base.glob("job-*"):
                 try:
-                    if int(d.name[4:]) not in active:
-                        shutil.rmtree(d, ignore_errors=True)
+                    jid = int(d.name[4:])
+                    if jid in active:
+                        continue
+                    if jid in failed and (d / PENDING).exists():          # selhaný přesun: hotové video čeká v dočasné složce na opakování
+                        continue
+                    shutil.rmtree(d, ignore_errors=True)
                 except ValueError:
                     pass
         for task in list(self.probing.values()):
@@ -580,6 +587,18 @@ class Runner:
         return render_template(tpl, merged)
 
     async def _execute(self, jid: int, holder: ProcHolder) -> None:
+        try:
+            await self._execute_inner(jid, holder)
+        except Exception as e:  # noqa: BLE001 - výjimka mimo vnitřní ošetření nesmí nechat slot obsazený
+            log.exception("úloha %s", jid)
+            self.running.pop(jid, None)
+            self.phases.pop(jid, None)
+            self.stop_reason.pop(jid, None)
+            cur = self.db.get(jid)
+            if cur and cur["status"] == "running":
+                self.db.update(jid, status="failed", error=str(e), error_kind="other", finished_at=time.time(), speed=None, eta=None)
+
+    async def _execute_inner(self, jid: int, holder: ProcHolder) -> None:
         job = self.db.get(jid)
         s = self.settings.all()
         ctx = Ctx(s, self.engines, self.data)
@@ -727,9 +746,11 @@ class Runner:
             if not root.is_dir():                                           # odpojený NAS: kořen cíle se nezakládá (video by skončilo v kontejneru)
                 root.mkdir(exist_ok=True)
             target_dir.mkdir(parents=True, exist_ok=True)
-            dest = unique_target(target_dir, src.stem, src.suffix)
-            part = dest.with_name(dest.name + ".viddown-part")
-            part.unlink(missing_ok=True)
+            with _PLACE_LOCK:                                              # volba názvu a jeho rezervace jsou jeden krok (souběžné přesuny)
+                dest = unique_target(target_dir, src.stem, src.suffix)
+                part = dest.with_name(dest.name + ".viddown-part")
+                with open(part, "xb"):
+                    pass
             shutil.move(str(src), part)
             os.replace(part, dest)
             part = None
@@ -815,6 +836,11 @@ class Runner:
 
     def _failed(self, jid: int, msg: str, kind: str, staging: Path) -> None:
         job = self.db.get(jid)
+        if not job or job["status"] in ("cancelling", "cancelled"):      # uživatel úlohu mezitím zrušil: chyba ji nesmí oživit
+            shutil.rmtree(staging, ignore_errors=True)
+            if job:
+                self.db.update(jid, status="cancelled", finished_at=time.time(), speed=None, eta=None)
+            return
         s = self.settings.all()
         if kind == "cookies":  # chyba nastavení cookies by shodila celou frontu – pozastavit, úloha zůstane
             self.db.update(jid, status="queued", error=msg, error_kind=kind, speed=None, eta=None)
@@ -918,12 +944,30 @@ class Runner:
         if job["status"] in ("done", "skipped"):
             self.archive_forget(job)
         keep = {k: job[k] for k in ("sub_id", "target_dir", "subdir", "catalog_item_id") if job.get(k)}  # složka odběru a vazba na katalog zůstanou
-        new_id, _ = self.add(job["url"], source=job["source"], auto_confirm=True, **keep)
+        new_id, fresh = self.add(job["url"], source=job["source"], auto_confirm=True, **keep)
+        if fresh:
+            self._adopt_staging(jid, new_id)
         if job.get("catalog_item_id"):                         # položka katalogu znovu čeká na novou úlohu
             with self.db.conn() as c:
                 c.execute("update catalog_items set state='queued', job_id=?, detail_error=null, updated_at=? "
                           "where id=? and state in ('new','queued')", (new_id, time.time(), job["catalog_item_id"]))
         return new_id
+
+    def _adopt_staging(self, old: int, new: int) -> None:
+        """Hotové video selhaného přesunu (PENDING) přejde do dočasné složky nové úlohy, ať se po opakování jen přesune."""
+        src, dst = self.staging(old), self.staging(new)
+        pend = src / PENDING
+        if not pend.exists() or dst.exists():
+            return
+        try:
+            d = json.loads(pend.read_text())
+            for k in ("file", "thumb"):
+                if d.get(k):
+                    d[k] = d[k].replace(str(src), str(dst), 1)
+            os.replace(src, dst)
+            (dst / PENDING).write_text(json.dumps(d))
+        except (OSError, ValueError):
+            log.warning("hotové video úlohy %s se nepodařilo předat opakování", old)
 
     @staticmethod
     def _archive_key(job: dict) -> tuple[str | None, str]:
