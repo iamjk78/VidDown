@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 
 from .. import container
-from ..util import classify_error, host_key, is_http_url
+from ..util import classify_error, host_key, is_http_url, mask_proxy
 from . import Cancelled, Ctx, ProcHolder, ResolveError, subprocess_kwargs
 
 PENDING = ".viddown-pending.json"      # hotové stažení čekající na přesun do cílové složky (nebo přerušené po zápisu do archivu yt-dlp)
@@ -251,7 +251,7 @@ async def _download(url, info, ctx: Ctx, staging: Path, name: str, rate_bps, on_
     for f in (info or {}).get("requested_formats") or []:
         parts[str(f.get("format_id"))] = [0, int(f.get("filesize") or f.get("filesize_approx") or 0)]
 
-    log.debug("yt-dlp cmd: %s", cmd)
+    log.debug("yt-dlp cmd: %s", [mask_proxy(c) if "://" in c and "@" in c else c for c in cmd])
     holder.check()
     proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
                                                 **subprocess_kwargs())

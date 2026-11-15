@@ -29,6 +29,7 @@ from .util import (classify_error, fallback_allowed, free_space, host_key, in_sc
                    retry_allowed, sanitize_filename, unique_target)
 
 _PLACE_LOCK = threading.Lock()
+TARGET_TIMEOUT = 10.0                  # nejdéle tak dlouho čeká kontrola cílové složky
 PENDING = ytdlp.PENDING  # hotové stažení čekající na přesun do cílové složky
 
 
@@ -116,7 +117,7 @@ class Runner:
 
     async def run(self, stop: asyncio.Event) -> None:
         self.db.recover()
-        self._finish_cancelling()
+        await self._finish_cancelling_async()
         last_purge = 0.0
         while not stop.is_set():
             try:
@@ -144,9 +145,24 @@ class Runner:
                 task.cancel()
         # úlohy přerušené ve fázi metadat se vrátí do fronty (jinak to udělá recover při startu)
         self.db.update_where("status='running'", (), status="queued", speed=None, eta=None)
-        self._finish_cancelling()
+        await self._finish_cancelling_async()
+
+    async def _finish_cancelling_async(self) -> None:
+        """Totéž co `_finish_cancelling`, ale souborové operace běží ve vlákně s limitem: dočasná složka může ležet na zaseknutém NAS a
+        smyčka událostí (a tím i GUI) při startu a vypnutí nesmí viset."""
+        try:
+            await asyncio.wait_for(asyncio.to_thread(self._cleanup_staging), 30)
+        except asyncio.TimeoutError:
+            log.warning("úklid dočasných složek trvá příliš dlouho (zaseknutý disk?), pokračuji bez něj")
+        for task in list(self.probing.values()):
+            task.cancel()
 
     def _finish_cancelling(self) -> None:
+        self._cleanup_staging()
+        for task in list(self.probing.values()):
+            task.cancel()
+
+    def _cleanup_staging(self) -> None:
         """Dokončí zrušení úloh, které zůstaly ve stavu 'cancelling', a uklidí osiřelé dočasné složky."""
         for j in self.db.query("select id from jobs where status='cancelling'"):
             shutil.rmtree(self.staging(j["id"]), ignore_errors=True)
@@ -165,8 +181,6 @@ class Runner:
                     shutil.rmtree(d, ignore_errors=True)
                 except ValueError:
                     pass
-        for task in list(self.probing.values()):
-            task.cancel()
 
     async def tick(self) -> None:
         s = self.settings.all()
@@ -396,7 +410,14 @@ class Runner:
         if now - self._target_checked < 20:
             return
         self._target_checked = now
-        ok, msg = await asyncio.to_thread(target_available, s["download_dir"])
+        # zaseknutý NAS (visící stat) nesmí zastavit smyčku fronty: po limitu je cíl nedostupný; dokud předchozí kontrola visí, nová se nespouští
+        task = getattr(self, "_target_task", None)
+        if task is None or task.done():
+            self._target_task = task = asyncio.ensure_future(asyncio.to_thread(target_available, s["download_dir"]))
+        try:
+            ok, msg = await asyncio.wait_for(asyncio.shield(task), TARGET_TIMEOUT)
+        except asyncio.TimeoutError:
+            ok, msg = False, "cílová složka neodpovídá (zaseknutý síťový disk?)"
         reason = self.db.kv_get("queue_pause_reason")
         if not ok:
             if not self.queue_paused():

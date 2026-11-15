@@ -151,6 +151,7 @@ class DetailWorker:
         self.active: dict[str, asyncio.Task] = {}
         self._thumb_locks: dict[int, asyncio.Lock] = {}
         self.hits: dict[str, collections.deque] = {}  # web -> časy dotazů za poslední hodinu (strop dotazů)
+        catalog.SCAN_GATE = self.scan_gate
         self.used_fallback: dict[str, float] = {}     # web -> kdy naposledy pomohla záložní proxy
         self.cdn_next: dict[str, float] = {}          # server miniatur -> nejdřív kdy další stažení
         self.src_scanned: dict[int, int] = {}        # zdroj -> nejvyšší číslo videa bez animace při prohledání jeho stránek (nová videa = znovu)
@@ -172,6 +173,13 @@ class DetailWorker:
         return base * random.uniform(0.7, 1.3)
 
     # --- slušnost k cizím serverům: strop dotazů za hodinu a záložní proxy ------------------------------
+    def scan_gate(self, host: str) -> bool:
+        """Další stránka seznamu: smí se, jen když web nepřekročil hodinový strop; dotaz se započítá."""
+        if self.over_budget(host):
+            return False
+        self.note_request(host)
+        return True
+
     def note_request(self, host: str) -> None:
         self.hits.setdefault(host, collections.deque()).append(time.monotonic())
 
@@ -247,6 +255,9 @@ class DetailWorker:
     # --- zpracování jednoho videa -----------------------------------------------------------------
     async def process(self, item: dict) -> None:
         host = item.get("host") or ""
+        if not netsafe.literal_ok(item.get("url") or ""):                 # adresa z cizího seznamu nesmí mířit do místní sítě
+            self._finish(item, "failed", "adresa míří mimo veřejný internet")
+            return
         self.note_request(host)
         try:
             try:
@@ -684,11 +695,30 @@ class DetailWorker:
                 continue
             await _sleep(stop, 2)
 
+    async def folder_ready(self) -> bool:
+        """Je složka miniatur dostupná k zápisu? Kontrola ve vlákně s limitem a s pamětí na 30 s (odpojený nebo zaseknutý NAS)."""
+        now = time.monotonic()
+        if now < getattr(self, "_folder_until", 0.0):
+            return getattr(self, "_folder_ok", True)
+
+        def probe() -> bool:
+            f = self.folder()
+            f.mkdir(parents=True, exist_ok=True)
+            return f.is_dir()
+        try:
+            ok = await asyncio.wait_for(asyncio.to_thread(probe), 6.0)
+        except (asyncio.TimeoutError, OSError):
+            ok = False
+        if not ok and getattr(self, "_folder_ok", True):
+            log.warning("katalog: složka miniatur není dostupná, miniatury a animace čekají")
+        self._folder_ok, self._folder_until = ok, now + 30.0
+        return ok
+
     async def thumbs_loop(self, stop: asyncio.Event) -> None:
         """Stahuje miniatury položkám, které ještě žádnou nemají (rychle, po dávkách; selhání se označí a nezkouší znovu)."""
         while not stop.is_set():
             try:
-                rows = [] if not self.allowed_now() else await asyncio.to_thread(
+                rows = [] if not self.allowed_now() or not await self.folder_ready() else await asyncio.to_thread(
                     self.db.query, "select id, url, thumb_url, thumb_alts from catalog_items where thumb_file is null and thumb_url is not null "
                     "and state in ('new','queued') order by source_id, pos limit ?", (THUMB_BATCH,))
                 if rows:
@@ -696,7 +726,7 @@ class DetailWorker:
                         await self._cdn_wait(r.get("thumb_url"))
                         await self._thumb_one(r)
                     continue
-                if self.st.settings.get("catalog_anim") and self.allowed_now() and not self.paused():     # animace až po všech miniaturách
+                if self.st.settings.get("catalog_anim") and self.allowed_now() and not self.paused() and await self.folder_ready():     # animace až po všech miniaturách
                     arows = await asyncio.to_thread(self.pending_anims, 2)
                     if arows:
                         for r in arows:

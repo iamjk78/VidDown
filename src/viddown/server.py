@@ -23,11 +23,12 @@ from fastapi.staticfiles import StaticFiles
 from . import __version__, appupdate, autobackup, backup, catalog, catalogdetails, pagelist, schedule, subscriptions, thumbs, updater
 from .config import DEFAULTS, CHOICES, cookies_path
 from .probe import probe_url
-from .util import check_dir_writable, env_flag, extract_urls, in_docker, in_schedule, sanitize_filename
+from .util import check_dir_writable, env_flag, extract_urls, in_docker, in_schedule, mask_proxy, sanitize_filename
 
 WEB = Path(__file__).parent / "web"
 
 log = logging.getLogger("viddown.server")
+FS_TIMEOUT = 8.0                                  # nejdéle čeká souborový dotaz (NAS může viset)
 MAX_RESTORE_BYTES = 8 * 1024 ** 3                  # největší povolená nahraná záloha
 JOB_FIELDS = ("id", "url", "title", "status", "kind", "method", "parent_id", "pos", "paused", "source", "channel",
               "duration", "height", "size_est", "approx", "progress", "downloaded", "total", "speed", "eta", "filepath",
@@ -103,6 +104,8 @@ def create_app(app_state) -> FastAPI:
         if not host_ok(req.headers.get("host", "")):
             return JSONResponse({"error": "host"}, status_code=400)
         if req.method not in ("GET", "HEAD", "OPTIONS") and not same_origin(req):
+            return JSONResponse({"error": "cross-origin"}, status_code=403)
+        if p.startswith("/api/") and req.headers.get("sec-fetch-site", "").lower() == "cross-site":     # ani čtení z cizího webu (obrázek, odkaz, fetch)
             return JSONResponse({"error": "cross-origin"}, status_code=403)
         open_paths = ("/api/session", "/api/login")
         if p.startswith("/api/") and p not in open_paths and not authed(req):
@@ -284,7 +287,7 @@ def create_app(app_state) -> FastAPI:
         if in_docker() or host not in ("127.0.0.1", "::1", "localhost"):
             raise HTTPException(403, "only on the local computer")
         p = Path(j["filepath"] or "")
-        if not p.exists():
+        if not p.exists():                                              # jen místní počítač (v Dockeru je akce zakázaná), NAS tu nehrozí
             raise HTTPException(404, "file not found")
         if sys.platform == "darwin":
             subprocess.Popen(["open", "-R", str(p)])
@@ -306,6 +309,13 @@ def create_app(app_state) -> FastAPI:
         return {"children": [job_out(c) for c in S.db.children(jid)]}
 
     thumb_miss: dict[int, float] = {}                                  # miniatura, která se nepodařila: znovu se zkusí až za 10 minut (ne při každém překreslení)
+
+    async def fs_call(fn, *args, timeout: float | None = None):
+        """Souborový dotaz (cesta může být na zaseknutém NAS) ve vlákně s limitem: smyčka událostí s GUI se nezastaví."""
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(fn, *args), timeout or FS_TIMEOUT)
+        except asyncio.TimeoutError:
+            raise HTTPException(504, "Úložiště neodpovídá (zaseknutý síťový disk?).")
 
     @app.get("/api/thumb/{jid}")
     async def thumb(jid: int):
@@ -338,7 +348,7 @@ def create_app(app_state) -> FastAPI:
     async def file(jid: int):
         j = _job(jid)
         p = Path(j["filepath"] or "")
-        if not p.exists():
+        if not await fs_call(p.exists):
             raise HTTPException(404, "file not found")
         return FileResponse(p, filename=p.name)
 
@@ -348,7 +358,7 @@ def create_app(app_state) -> FastAPI:
         ani nepřebaluje."""
         j = _job(jid)
         p = Path(j["filepath"] or "")
-        if not p.exists():
+        if not await fs_call(p.exists):
             raise HTTPException(404, "file not found")
         mt = {".mp4": "video/mp4", ".m4v": "video/mp4", ".mkv": "video/webm", ".webm": "video/webm", ".mov": "video/quicktime",
               ".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".opus": "audio/ogg", ".ogg": "audio/ogg"}.get(p.suffix.lower(), "application/octet-stream")
@@ -791,7 +801,7 @@ def create_app(app_state) -> FastAPI:
         if not name or not catalog.THUMB_NAME.match(name):
             raise HTTPException(404, "Miniatura není.")
         p = catalog.thumbs_dir(S.data, S.settings) / name
-        if not p.is_file():
+        if not await fs_call(p.is_file):
             raise HTTPException(404, "Miniatura není.")
         mt = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp", ".gif": "image/gif"}.get(p.suffix.lower(), "application/octet-stream")
         return FileResponse(p, media_type=mt, headers={"Cache-Control": "max-age=86400"})
@@ -803,7 +813,7 @@ def create_app(app_state) -> FastAPI:
         if not name or not catalog.ANIM_NAME.match(name):
             raise HTTPException(404, "Animace není.")
         p = catalog.thumbs_dir(S.data, S.settings) / name
-        if not p.is_file():
+        if not await fs_call(p.is_file):
             raise HTTPException(404, "Animace není.")
         mt = {".mp4": "video/mp4", ".webm": "video/webm", ".gif": "image/gif", ".webp": "image/webp"}.get(p.suffix.lower(), "application/octet-stream")
         return FileResponse(p, media_type=mt, headers={"Cache-Control": "max-age=86400"})
@@ -1102,7 +1112,11 @@ def create_app(app_state) -> FastAPI:
 
     @app.get("/api/settings/export")
     async def export_settings():
-        return Response(json.dumps(S.settings.export(), indent=2, ensure_ascii=False), media_type="application/json",
+        out = S.settings.export()
+        for k in ("proxy", "catalog_proxy_fallback"):                    # heslo v adrese proxy do souboru nepatří (import proxy stejně nepřebírá)
+            if isinstance(out.get(k), str):
+                out[k] = mask_proxy(out[k])
+        return Response(json.dumps(out, indent=2, ensure_ascii=False), media_type="application/json",
                         headers={"Content-Disposition": 'attachment; filename="viddown-settings.json"'})
 
     @app.post("/api/settings/import")
@@ -1138,13 +1152,15 @@ def create_app(app_state) -> FastAPI:
     @app.get("/api/fs")
     async def fs(path: str = ""):
         """Jednoduchý prohlížeč složek pro výběr cílové složky."""
-        p = Path(path).expanduser() if path else Path.home()
-        if not p.exists() or not p.is_dir():
-            p = Path.home()
-        try:
-            dirs = sorted([d.name for d in p.iterdir() if d.is_dir() and not d.name.startswith(".")], key=str.lower)[:300]
-        except PermissionError:
-            dirs = []
+        def scan() -> tuple[Path, list[str]]:
+            p = Path(path).expanduser() if path else Path.home()
+            if not p.exists() or not p.is_dir():
+                p = Path.home()
+            try:
+                return p, sorted([d.name for d in p.iterdir() if d.is_dir() and not d.name.startswith(".")], key=str.lower)[:300]
+            except PermissionError:
+                return p, []
+        p, dirs = await fs_call(scan, timeout=15.0)
         return {"path": str(p), "parent": str(p.parent) if p.parent != p else None, "dirs": dirs}
 
     # ------------------------------------------------------------ enginy

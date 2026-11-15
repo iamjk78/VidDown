@@ -339,3 +339,8 @@ def is_http_url(url: str) -> bool:
     """Adresa pro yt-dlp a spol.: http(s) bez mezer a řídicích znaků. Hodnota začínající `-` by se jinak četla jako přepínač."""
     u = (url or "").strip()
     return u.lower().startswith(("http://", "https://")) and not re.search(r"[\s\x00-\x1f]", u)
+
+
+def mask_proxy(url: str) -> str:
+    """Adresa proxy bez hesla (`socks5://uzivatel:heslo@host` → `socks5://uzivatel:***@host`) pro logy a export nastavení."""
+    return re.sub(r"(://[^/@:\s]*:)[^/@\s]+@", r"\1***@", url or "")

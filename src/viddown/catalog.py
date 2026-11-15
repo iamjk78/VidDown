@@ -391,6 +391,9 @@ async def list_page(url: str, ctx, cause: Exception | None = None) -> dict:
         return await _page_entries(url, ctx, cfg, rd)
 
 
+SCAN_GATE = None          # funkce (web) -> smí se ještě dotazovat? Nastavuje DetailWorker: stránkování seznamu se počítá do hodinového stropu dotazů
+
+
 async def _page_entries(url: str, ctx, cfg: dict, rd) -> dict:
     """Projde stránky seznamu podle zjištěné konfigurace; `rd` je prohlížeč (vykreslené stránky) nebo None (běžné HTML)."""
     items = [dict(i) for i in cfg["items"]]
@@ -398,6 +401,9 @@ async def _page_entries(url: str, ctx, cfg: dict, rd) -> dict:
     complete = True
     if cfg.get("page_param") or cfg.get("page_template"):
         for k in range(1, PAGE_MAX_PAGES):
+            if SCAN_GATE is not None and not SCAN_GATE(domain(url)):     # strop dotazů na web vyčerpán: seznam zůstane neúplný (nic se neoznačí jako zmizelé)
+                complete = False
+                break
             try:
                 await asyncio.sleep(1.0)                                   # šetrně k webu
                 nxt = pagelist.page_url(url, cfg, k)

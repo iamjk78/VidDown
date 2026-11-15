@@ -27,6 +27,8 @@ class TelegramBot:
         self._reload = asyncio.Event()
         self._client: httpx.AsyncClient | None = None
         self._token = None
+        self._offset: int | None = None            # poslední potvrzená aktualizace; přežije výpadek spojení (jinak by se zprávy zpracovaly znovu)
+        self._offset_token: str | None = None
         self.loop: asyncio.AbstractEventLoop | None = None
 
     # ------------------------------------------------------------ stav
@@ -118,7 +120,9 @@ class TelegramBot:
                         {"command": "aktualizovat", "description": "Aktualizovat enginy / update engines"},
                         {"command": "aplikace", "description": "Verze aplikace a její aktualizace / app version and updates"},
                         {"command": "pomoc", "description": "Nápověda / help"}])
-                    offset = None
+                    if self._offset_token != self._token:                      # jiný bot má jiné číslování aktualizací
+                        self._offset, self._offset_token = None, self._token
+                    offset = self._offset
                     while not stop.is_set() and not self._reload.is_set():
                         self.state = "ok" if self.chat() else "nochat"
                         params = {"timeout": 25, "allowed_updates": ["message", "callback_query"]}
@@ -134,7 +138,7 @@ class TelegramBot:
                             poll.cancel()
                             break
                         for u in poll.result():
-                            offset = u["update_id"] + 1
+                            offset = self._offset = u["update_id"] + 1
                             try:
                                 await self.handle(u)
                             except Exception:  # noqa: BLE001
