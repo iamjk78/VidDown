@@ -657,13 +657,6 @@ def create_app(app_state) -> FastAPI:
             tmp.unlink(missing_ok=True)
         return {"manifest": man}
 
-    @app.get("/api/backup/key")
-    async def backup_key():
-        """Klíč záloh této instalace (potřeba jen pro obnovu záloh na jiném počítači)."""
-        from . import dtb
-        k = await asyncio.to_thread(dtb.install_key, S.data)
-        return {"key": dtb.format_key(k)}
-
     @app.post("/api/restore/apply")
     async def restore_apply(req: Request):
         """Potvrdí obnovu: uloží případný přepis cest a restartuje aplikaci (obnova proběhne při startu)."""

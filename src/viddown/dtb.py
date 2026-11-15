@@ -1,12 +1,11 @@
 """Šifrovaný formát zálohy `.dtb` (AES-256-GCM po blocích).
 
-**Verze 2 (současná):** klíč je náhodný a patří jedné instalaci – leží v datové složce v souboru `backup.key` (práva 600)
-a do zálohy se nikdy nedostane. Na stejné instalaci se záloha obnoví bez zadávání čehokoli; na jiném počítači je potřeba
-zadat „klíč záloh“ z původní instalace (GUI ho ukáže v Nastavení › Záloha a obnova). Kód aplikace je veřejný, proto
-klíč nesmí být zabudovaný v aplikaci.
+**Verze 1 (používaná):** klíč je zabudovaný v aplikaci (rozhodnutí uživatele: žádné další heslo ani klíč, záloha se otevře
+v jakékoli instalaci VidDown). Kód aplikace je veřejný, takže šifrování chrání jen před náhodným nahlédnutím do souboru,
+ne před někým, kdo má zálohu i VidDown.
 
-**Verze 1 (starší zálohy):** klíč zabudovaný v aplikaci. Takové zálohy jde dál obnovit, nově se už nevytvářejí; protože je
-kód veřejný, chrání jen před náhodným nahlédnutím.
+**Verze 2 (jen čtení):** klíč instalace v `<data>/backup.key`; tak šifrovala verze 0.2.0. Takové zálohy jde dál obnovit
+(na stejné instalaci bez zadávání, jinde s klíčem z `viddown backup-key` / `restore --key`), nově se nevytvářejí.
 
 Formát v2: MAGIC (6 B) | otisk klíče (8 B) | sůl (16 B) | předpona nonce (4 B) | bloky [délka šifrotextu (4 B) | šifrotext+tag].
 Formát v1: MAGIC (6 B) | sůl (16 B) | předpona nonce (4 B) | bloky.
@@ -24,7 +23,7 @@ from pathlib import Path
 
 MAGIC1 = b"VDDTB\x01"
 MAGIC2 = b"VDDTB\x02"
-MAGIC = MAGIC2
+MAGIC = MAGIC1
 CHUNK = 1 << 20
 EXT = ".dtb"
 KEY_FILE = "backup.key"
@@ -44,13 +43,18 @@ def _derive(master: bytes, salt: bytes, info: bytes) -> bytes:
     return hmac.new(prk, info + b"\x01", hashlib.sha256).digest()           # HKDF expand (jeden blok = 32 B)
 
 
+def _data_dir() -> Path:
+    from .config import data_dir
+    return data_dir()
+
+
 def fingerprint(key: bytes) -> bytes:
     return hashlib.sha256(b"VidDown backup key id" + key).digest()[:8]
 
 
 # --- klíč instalace ----------------------------------------------------------------------------------------------------
 def install_key(data: Path | None = None) -> bytes:
-    """Klíč záloh této instalace (vytvoří se při první potřebě)."""
+    """Klíč instalace pro zálohy ve formátu v2 (z verze 0.2.0); vytvoří se při první potřebě."""
     if data is None:
         from .config import data_dir
         data = data_dir()
@@ -100,11 +104,15 @@ def is_dtb(path: Path) -> bool:
 
 
 def encrypt_file(src: Path, dst: Path, key: bytes | None = None) -> None:
+    """Zašifruje soubor. Bez `key` klíčem zabudovaným v aplikaci (formát v1, výchozí); s `key` ve formátu v2."""
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-    key = key if key is not None else install_key()
     salt, prefix = os.urandom(16), os.urandom(4)
-    header = MAGIC2 + fingerprint(key) + salt + prefix
-    aes = AESGCM(_derive(key, salt, b"VidDown backup v2"))
+    if key is None:
+        header = MAGIC1 + salt + prefix
+        aes = AESGCM(_derive(_LEGACY, salt, b"VidDown backup v1"))
+    else:
+        header = MAGIC2 + fingerprint(key) + salt + prefix
+        aes = AESGCM(_derive(key, salt, b"VidDown backup v2"))
     fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)        # záloha obsahuje tajemství: jen pro vlastníka
     with open(src, "rb") as f, os.fdopen(fd, "wb") as out:
         out.write(header)
@@ -137,7 +145,10 @@ def decrypt_file(src: Path, dst: Path, keys: list[bytes] | tuple = (), data: Pat
             if len(rest) != 28:
                 raise DtbError("záloha je poškozená (zkrácený soubor)")
             header, fp, salt, prefix = magic + rest, rest[:8], rest[8:24], rest[24:]
-            cands = [install_key(data), *keys]
+            cands = [*keys]
+            kf = Path(data or _data_dir()) / KEY_FILE
+            if kf.exists():                                                # klíč instalace jen když už existuje (zálohy z 0.2.0)
+                cands.insert(0, install_key(data))
             key = next((k for k in cands if fingerprint(k) == fp), None)
             if key is None:
                 raise KeyNeeded("záloha je zašifrovaná klíčem jiné instalace VidDown: zadejte její klíč záloh "

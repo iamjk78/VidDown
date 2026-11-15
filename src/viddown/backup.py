@@ -1,6 +1,6 @@
 """Záloha a obnova dat aplikace (export a import).
 
-Záloha je soubor `VidDown_<datum>_<čas>.dtb` (ZIP zašifrovaný klíčem této instalace, viz `dtb.py`),
+Záloha je soubor `VidDown_<datum>_<čas>.dtb` (ZIP zašifrovaný klíčem zabudovaným v aplikaci, viz `dtb.py`),
 nebo na požádání obyčejný ZIP. Import přijímá oba formáty. Vnitřní ZIP obsahuje: `backup.json` (popis), `viddown.db` (konzistentní snapshot i za běhu), `settings.json`,
 `secrets.json`, `cookies.txt`, `archive.txt` a volitelně `thumbs/`. Enginy, logy a dočasné soubory se nezálohují.
 
@@ -123,7 +123,7 @@ def create(data: Path, out: Path | None = None, include_thumbs: bool = False, en
                         zf.write(p, f"thumbs/{p.name}")
         if encrypt:
             enc = out.with_name(out.name + ".enc")
-            dtb.encrypt_file(part, enc)          # klíč záloh této instalace (datová složka aplikace)
+            dtb.encrypt_file(part, enc)          # klíč zabudovaný v aplikaci
             os.replace(enc, out)
             part.unlink(missing_ok=True)
         else:
@@ -289,8 +289,8 @@ def apply(data: Path, zip_path: Path, remap: tuple[str, str] | None = None, key:
 
 # --- obnova za běhu: příprava a provedení při startu -------------------------------------------
 def stage(data: Path, zip_path: Path, key: str | None = None) -> dict:
-    """Ověří zálohu a připraví ji k obnově při dalším startu. Nic zatím nemění. Šifrovaná záloha se znovu zašifruje klíčem
-    této instalace, takže obnova při startu nepotřebuje klíč záloh jiné instalace."""
+    """Ověří zálohu a připraví ji k obnově při dalším startu. Nic zatím nemění. Šifrovaná záloha se uloží znovu zašifrovaná
+    (klíčem aplikace), takže obnova při startu nepotřebuje případný klíč zálohy z verze 0.2.0."""
     data = Path(data)
     with _plain_zip(zip_path, key, data) as zp:
         man = _validate_zip(zp)

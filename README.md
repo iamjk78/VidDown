@@ -219,8 +219,7 @@ aktualizuje zevnitř). Ručně z vlastního počítače jde totéž bez GitHub A
 
 1. Na starém počítači zastavte VidDown (`docker compose down`) – Telegram bot smí běžet jen na jednom místě.
 2. Zkopírujte složku `data` na NAS (např. `/volume1/docker/viddown/data`), **bez** podsložek `engines/`, `tmp/` a `ms-playwright/`
-   (jsou pro jinou architekturu procesoru; na NAS se samy znovu stáhnou při prvním spuštění). Soubor `backup.key` zkopírujte také,
-   jinak na NAS neotevřete zálohy vytvořené na starém počítači.
+   (jsou pro jinou architekturu procesoru; na NAS se samy znovu stáhnou při prvním spuštění).
 3. Spusťte projekt. Pokud se cesta ke složce s videi změnila, zadejte v GUI (Nastavení › Cílová složka) novou, např. `/downloads`.
 4. Přepište cesty stažených souborů v historii, ať se videa nehlásí jako smazaná:
 
@@ -374,16 +373,15 @@ aktualizaci, vadnou verzi s pádem při startu a vadnou verzi s migrací databá
 - V GUI: Nastavení › Záloha a obnova. „Stáhnout zálohu“ uloží šifrovaný soubor `VidDown_<datum>_<čas>.dtb`, „Vybrat zálohu…“ nahraje zálohu k obnovení (`.dtb` i ZIP).
   Obnova se provede při restartu aplikace; před ní se dosavadní stav uloží do `restore/before-<čas>/` v datové složce (poslední 3).
   Při přesunu na jiný stroj lze zadat „staré → nové“ cesty, které se přepíšou v historii, odběrech i nastavení.
-- V terminálu: `viddown backup [soubor.dtb] [--thumbs] [--plain]`, `viddown restore soubor.dtb [--remap STARÁ NOVÁ] [--key KLÍČ]`
-  a `viddown backup-key`.
+- V terminálu: `viddown backup [soubor.dtb] [--thumbs] [--plain]` a `viddown restore soubor.dtb [--remap STARÁ NOVÁ]`.
   V Dockeru: `docker exec viddown viddown backup /data/zaloha.zip` (soubor je pak v datové složce na hostiteli).
   Když aplikace běží, `restore` obnovu jen připraví a provede se při jejím dalším startu.
 - Záloha obsahuje databázi (konzistentní snapshot i za běhu), `settings.json`, `secrets.json` (heslo, token bota), `cookies.txt`
   a `archive.txt`; volitelně náhledy. **Neobsahuje** enginy, logy a dočasné soubory. Obsahuje tajné údaje – ukládejte ji bezpečně.
-  Soubor `.dtb` je šifrovaný AES-256-GCM **klíčem záloh této instalace** (soubor `backup.key` v datové složce, do zálohy se nedostane).
-  Na stejné instalaci se obnoví bez zadávání čehokoli. Na jiném počítači nebo po přeinstalování je potřeba klíč záloh: ukáže ho
-  Nastavení › Záloha a obnova › **Klíč záloh** (nebo `viddown backup-key`). Uložte si ho do správce hesel. Starší zálohy (do
-  verze 0.1.0, klíč zabudovaný v aplikaci) jde dál obnovit.
+  Soubor `.dtb` je šifrovaný AES-256-GCM **klíčem zabudovaným v aplikaci**: otevře ho jen VidDown, na jakémkoli stroji, bez hesla
+  a bez dalšího klíče. Kód aplikace je veřejný, takže to chrání jen před náhodným nahlédnutím do souboru, ne před někým, kdo má
+  vaši zálohu i VidDown – zálohy proto ukládejte na místo, kam se cizí nedostanou. Zálohy vytvořené verzí 0.2.0 (klíč instalace
+  v `backup.key`) jdou dál obnovit; na jiném počítači s klíčem z `viddown backup-key` (`viddown restore … --key`).
   `--plain` (v GUI „bez šifrování“) uloží obyčejný ZIP.
 - Záloha z novější verze, než kterou používáte, se odmítne (nejdřív aktualizujte aplikaci).
 - **Automatické zálohy:** Nastavení › Záloha a obnova. Zapnete přepínač, zvolíte jak často (6 h, 12 h, 1 den, 3 dny, 1 týden),
@@ -441,7 +439,7 @@ Použijte samostatného bota: jeden token nemůže číst zprávy ve dvou aplika
 | Linux | `~/.local/share/viddown` |
 | Docker | `/data` |
 
-Obsahuje `settings.json`, `secrets.json` (token a hash hesla, práva 600), `backup.key` (klíč záloh, práva 600), `viddown.db`, `engines/`, `thumbs/`, `logs/` a `archive.txt` (už stažená videa). Jinou složku nastavíte proměnnou `VIDDOWN_DATA`.
+Obsahuje `settings.json`, `secrets.json` (token a hash hesla, práva 600), `viddown.db`, `engines/`, `thumbs/`, `logs/` a `archive.txt` (už stažená videa). Jinou složku nastavíte proměnnou `VIDDOWN_DATA`.
 
 Proměnné prostředí (mají přednost před nastavením v GUI a zamknou ho): `VIDDOWN_DOWNLOAD_DIR`, `VIDDOWN_TEMP_DIR`, `VIDDOWN_CONCURRENCY`, `VIDDOWN_PORT`, `VIDDOWN_HOST`, `VIDDOWN_LANGUAGE`, `VIDDOWN_PASSWORD`, `VIDDOWN_TELEGRAM_TOKEN`, `VIDDOWN_TELEGRAM_CHAT_ID`, `VIDDOWN_ALLOW_NO_PASSWORD`. `VIDDOWN_DEFAULT_DOWNLOAD_DIR` cílovou složku jen předvyplní a v GUI zůstane měnitelná (používá ji Docker obraz).
 

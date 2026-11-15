@@ -1,4 +1,5 @@
-"""Klíč záloh instalace: záloha z jiné instalace potřebuje její klíč, starší zálohy (v1) jdou dál obnovit, klíč není v záloze."""
+"""Zálohy jsou šifrované klíčem zabudovaným v aplikaci (otevřou se v jakékoli instalaci bez klíče); zálohy z verze 0.2.0
+(klíč instalace) jdou dál obnovit."""
 import os
 import zipfile
 
@@ -9,48 +10,43 @@ from tests.test_backup import make_data
 from viddown import backup, dtb
 
 
-def legacy_encrypt(src, dst):
-    """Záloha ve starém formátu v1 (klíč zabudovaný v aplikaci)."""
-    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-    salt, prefix = os.urandom(16), os.urandom(4)
-    header = dtb.MAGIC1 + salt + prefix
-    aes = AESGCM(dtb._derive(dtb._LEGACY, salt, b"VidDown backup v1"))
-    ct = aes.encrypt(prefix + (0).to_bytes(8, "big"), src.read_bytes(), header + (0).to_bytes(8, "big") + b"\x01")
-    dst.write_bytes(header + len(ct).to_bytes(4, "big") + ct)
+def test_backup_opens_in_another_installation_without_any_key(data, tmp_path, monkeypatch):
+    src = make_data(tmp_path / "a")
+    z = backup.create(src, tmp_path / "z.dtb")
+    assert z.read_bytes()[:6] == dtb.MAGIC1 and not (data / "backup.key").exists()     # žádný klíč instalace nevzniká
+    other = tmp_path / "jina"
+    other.mkdir()
+    monkeypatch.setenv("VIDDOWN_DATA", str(other))
+    assert backup.validate(z)["jobs"] >= 1
+    assert backup.stage(other, z) and dtb.is_dtb(other / "restore" / "pending.zip")
+    assert backup.validate(other / "restore" / "pending.zip")
 
 
-def test_key_format_roundtrip_and_validation(data):
-    k = dtb.install_key()
-    assert dtb.install_key() == k and len(k) == 32 and oct((data / "backup.key").stat().st_mode)[-3:] == "600"
-    txt = dtb.format_key(k)
-    assert dtb.parse_key(txt) == k and dtb.parse_key(txt.lower().replace("-", " ")) == k
+def v2_backup(src, dst, key):
+    plain = backup.create(src, dst.with_suffix(".zip"), encrypt=False)
+    dtb.encrypt_file(plain, dst, key)
+    return dst
+
+
+def test_backups_from_version_020_still_restore(data, tmp_path, monkeypatch):
+    src = make_data(tmp_path / "a")
+    k = dtb.install_key()                                              # instalace s verzí 0.2.0 má klíč v backup.key
+    z = v2_backup(src, tmp_path / "z.dtb", k)
+    assert z.read_bytes()[:6] == dtb.MAGIC2 and backup.validate(z)["jobs"] >= 1      # na stejné instalaci bez zadávání
+    other = tmp_path / "jina"
+    other.mkdir()
+    monkeypatch.setenv("VIDDOWN_DATA", str(other))
+    with pytest.raises(backup.KeyNeededError):
+        backup.validate(z)
+    assert backup.validate(z, dtb.format_key(k))["jobs"] >= 1
+
+
+def test_key_format_roundtrip():
+    k = os.urandom(32)
+    assert dtb.parse_key(dtb.format_key(k)) == k and dtb.parse_key(dtb.format_key(k).lower().replace("-", " ")) == k
     for bad in ("", "abc", "AAAA-BBBB"):
         with pytest.raises(dtb.DtbError):
             dtb.parse_key(bad)
-
-
-def test_backup_from_another_installation_needs_its_key(data, tmp_path, monkeypatch):
-    src = make_data(tmp_path / "a")
-    z = backup.create(src, tmp_path / "z.dtb")
-    key = dtb.format_key(dtb.install_key())
-    assert z.read_bytes()[:6] == dtb.MAGIC2
-    other = tmp_path / "jina"
-    other.mkdir()
-    monkeypatch.setenv("VIDDOWN_DATA", str(other))                  # nová instalace = jiný klíč
-    with pytest.raises(backup.KeyNeededError):
-        backup.validate(z)
-    assert backup.validate(z, key)["jobs"] >= 1
-    man = backup.stage(other, z, key)
-    assert man and dtb.is_dtb(other / "restore" / "pending.zip")          # připravená obnova je šifrovaná klíčem nové instalace
-    assert backup.validate(other / "restore" / "pending.zip")            # a otevře se bez zadávání klíče
-
-
-def test_old_v1_backups_still_restore(data, tmp_path):
-    src = make_data(tmp_path / "a")
-    plain = backup.create(src, tmp_path / "z.zip", encrypt=False)
-    old = tmp_path / "stara.dtb"
-    legacy_encrypt(plain, old)
-    assert dtb.is_dtb(old) and backup.validate(old)["jobs"] >= 1
 
 
 def test_key_file_is_never_inside_the_backup(data, tmp_path):
@@ -60,17 +56,12 @@ def test_key_file_is_never_inside_the_backup(data, tmp_path):
     assert "backup.key" not in zipfile.ZipFile(z).namelist()
 
 
-def test_api_restore_asks_for_the_key_and_shows_it(client, tmp_path, monkeypatch):
+def test_api_restore_of_a_foreign_020_backup_asks_for_its_key(client, tmp_path, monkeypatch):
     c, st = client
     other = make_data(tmp_path / "jina")
-    monkeypatch.setenv("VIDDOWN_DATA", str(tmp_path / "jina-instalace"))
-    (tmp_path / "jina-instalace").mkdir()
-    foreign_key = dtb.format_key(dtb.install_key())
-    z = backup.create(other, tmp_path / "cizi.dtb")
-    monkeypatch.setenv("VIDDOWN_DATA", str(st.data))
+    k = os.urandom(32)
+    z = v2_backup(other, tmp_path / "cizi.dtb", k)
     r = c.post("/api/restore", files={"file": ("cizi.dtb", open(z, "rb"), "application/octet-stream")})
     assert r.status_code == 400 and r.json()["detail"].startswith("KEY_NEEDED")
-    r = c.post("/api/restore", files={"file": ("cizi.dtb", open(z, "rb"), "application/octet-stream")}, data={"key": foreign_key})
+    r = c.post("/api/restore", files={"file": ("cizi.dtb", open(z, "rb"), "application/octet-stream")}, data={"key": dtb.format_key(k)})
     assert r.status_code == 200 and r.json()["manifest"]
-    k = c.get("/api/backup/key").json()["key"]
-    assert dtb.parse_key(k) == dtb.install_key(st.data)

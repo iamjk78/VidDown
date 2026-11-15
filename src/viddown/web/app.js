@@ -1137,11 +1137,8 @@ function fieldHtml(f, S) {
       <div class="row gap8 wrap" style="justify-content:flex-end"><span class="seg">${[['none', T('Ne', 'Off')], ['file', 'cookies.txt'], ...(S.docker ? [] : [['browser', T('Z prohlížeče', 'From browser')]])].map(([o, l]) => `<button data-k="cookies_mode" data-t="seg" data-v="${o}" class="${mode === o ? 'on' : ''}">${l}</button>`).join('')}</span>
       ${mode === 'file' ? (cf.exists ? `<span class="badge b-ok">${ic('check', 11)} cookies.txt · ${new Date(cf.mtime * 1000).toLocaleDateString()}</span>` : `<span class="badge b-warn">${T('Soubor nenahrán', 'Not uploaded')}</span>`) + `<label class="btn sm">${T('Nahrát', 'Upload')}<input type="file" id="ckfile" accept=".txt" hidden></label>${cf.exists ? `<button class="ibtn" id="ckdel" title="${T('Smazat', 'Delete')}">${ic('trash', 14)}</button>` : ''}` : ''}
       ${mode === 'browser' ? `<select class="input sm" style="width:120px" data-k="cookies_browser" data-t="text">${['chrome', 'firefox', 'safari', 'edge', 'brave', 'opera', 'chromium', 'vivaldi'].map(b => `<option ${S.values.cookies_browser === b ? 'selected' : ''}>${b}</option>`).join('')}</select>` : ''}</div></div>`; }
-    case 'backup': return `<div class="fld"><div class="lab"><div class="b5">${T('Záloha (export)', 'Backup (export)')}</div><div class="hint">${T('Databáze (fronta, historie, odběry, statistiky), nastavení, heslo, token bota, cookies a archiv stažených videí. Soubor .dtb je šifrovaný klíčem záloh této instalace: tady se obnoví bez dalšího, na jiném počítači je potřeba klíč (níže).', 'Database (queue, history, subscriptions, statistics), settings, password, bot token, cookies and the downloaded-videos archive. The .dtb file is encrypted with the backup key of this installation: it restores here without anything else, on another computer you need the key (below).')}</div></div>
+    case 'backup': return `<div class="fld"><div class="lab"><div class="b5">${T('Záloha (export)', 'Backup (export)')}</div><div class="hint">${T('Databáze (fronta, historie, odběry, statistiky), nastavení, heslo, token bota, cookies a archiv stažených videí. Soubor .dtb je šifrovaný klíčem aplikace: otevře ho jen VidDown, na jakémkoli stroji, bez hesla.', 'Database (queue, history, subscriptions, statistics), settings, password, bot token, cookies and the downloaded-videos archive. The .dtb file is encrypted with the app key: only VidDown can open it, on any machine, no password.')}</div></div>
       <div class="row gap8 wrap" style="justify-content:flex-end"><label class="row gap4 t2" style="font-size:12.5px"><input type="checkbox" id="bkthumbs"> ${T('s náhledy', 'with thumbnails')}</label><label class="row gap4 t2" style="font-size:12.5px" title="${T('Obyčejný ZIP, otevře se i bez VidDown, ale je čitelný pro každého', 'Plain ZIP, opens without VidDown but readable by anyone')}"><input type="checkbox" id="bkplain"> ${T('bez šifrování (ZIP)', 'unencrypted (ZIP)')}</label><a class="btn sm" id="bkdl" href="/api/backup">${ic('download', 13)} ${T('Stáhnout zálohu', 'Download backup')}</a></div></div>
-      <div class="fld"><div class="lab"><div class="b5">${T('Klíč záloh', 'Backup key')}</div><div class="hint">${T('Potřebujete ho jen pro obnovu zálohy na jiném počítači nebo po přeinstalování. Uložte si ho do správce hesel. Bez něj šifrovanou zálohu jinde neotevřete.', 'Only needed to restore a backup on another computer or after reinstalling. Keep it in your password manager. Without it the encrypted backup cannot be opened elsewhere.')}</div>
-        <code id="bkkeyv" class="mono fs12" style="display:none;word-break:break-all;margin-top:6px"></code></div>
-      <div class="row gap8" style="justify-content:flex-end"><button class="btn sm" id="bkkey">${T('Zobrazit', 'Show')}</button></div></div>
       <div class="fld"><div class="lab"><div class="b5">${T('Obnova (import)', 'Restore (import)')}</div><div class="hint">${T('Nahradí současná data daty ze zálohy a restartuje aplikaci. Dosavadní stav se uloží do složky restore/ v datové složce.', 'Replaces the current data with the backup and restarts the app. The previous state is kept in the restore/ folder of the data folder.')}</div></div>
       <div class="row gap8" style="justify-content:flex-end"><label class="btn sm">${T('Vybrat zálohu…', 'Choose backup…')}<input type="file" id="rsf" accept=".dtb,.zip" hidden></label></div></div>
       <div id="rsbox"></div>`;
@@ -1249,16 +1246,11 @@ function bindSettings(root, after) {
     catch (err) {
       if (err.message === 'auth') return;
       if (!err.message.startsWith('KEY_NEEDED')) { toast(err.message, true); e.target.value = ''; return; }
-      const key = prompt(T('Tato záloha je z jiné instalace VidDown a je zašifrovaná jejím klíčem záloh. Vložte ho (najdete ho v původní instalaci v Nastavení › Záloha a obnova):', 'This backup comes from another VidDown installation and is encrypted with its backup key. Paste it (the original installation shows it in Settings › Backup & restore):'));
+      const key = prompt(T('Tato záloha byla vytvořena verzí 0.2.0 na jiném počítači a je zašifrovaná jeho klíčem. Vložte ho (příkaz viddown backup-key na původním počítači):', 'This backup was made by version 0.2.0 on another computer and is encrypted with its key. Paste it (command viddown backup-key on the original computer):'));
       if (key) r = await act(() => send(key.trim()));
     }
     e.target.value = '';
     if (r) { toast(T('Záloha ověřena', 'Backup verified')); loadRestore($('#rsbox', root)); }
-  };
-  const bkk = $('#bkkey', root); if (bkk) bkk.onclick = async () => {
-    const r = await act(() => api('/api/backup/key')); if (!r) return;
-    $('#bkkeyv', root).textContent = r.key; $('#bkkeyv', root).style.display = '';
-    bkk.textContent = T('Kopírovat', 'Copy'); bkk.onclick = () => copyText(r.key).then(ok => toast(ok ? T('Klíč zkopírován', 'Key copied') : T('Kopírování se nepodařilo', 'Copy failed'), !ok));
   };
   const rb = $('#rsbox', root); if (rb) loadRestore(rb);
   const ab = $('#abbox', root); if (ab) loadAutoBackup(ab);

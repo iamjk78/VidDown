@@ -290,8 +290,7 @@ def cmd_backup(a) -> int:
         return 1
     print(f"Záloha: {p} ({fmt_bytes(p.stat().st_size)})")
     print("Pozor: obsahuje token Telegram bota, heslo a cookies. Ukládejte ji bezpečně a nesdílejte."
-          + ("" if a.plain else " Soubor je šifrovaný klíčem této instalace; pro obnovu na jiném počítači si poznamenejte klíč záloh: "
-                                    "viddown backup-key"))
+          + ("" if a.plain else " Soubor je šifrovaný klíčem aplikace, otevře ho jen VidDown."))
     return 0
 
 
@@ -434,8 +433,8 @@ def main(argv=None) -> int:
     sp.add_argument("file")
     sp.add_argument("--remap", nargs=2, metavar=("STARÁ", "NOVÁ"), help="přepíše začátek cest po přesunu na jiný stroj")
     sp.add_argument("--yes", "-y", action="store_true", help="bez potvrzení")
-    sp.add_argument("--key", help="klíč záloh původní instalace (jen u zálohy z jiného počítače)")
-    sub.add_parser("backup-key", help="vypíše klíč záloh této instalace (pro obnovu na jiném počítači)")
+    sp.add_argument("--key", help="klíč instalace (jen u zálohy vytvořené verzí 0.2.0 na jiném počítači)")
+    sub.add_parser("backup-key", help="klíč instalace pro zálohy vytvořené verzí 0.2.0")
     sp = sub.add_parser("app", help="aktualizace kódu aplikace: verze, samotest, návrat")
     sp.add_argument("action", choices=["status", "check", "update", "token", "pack", "install", "selftest", "activate", "rollback", "unskip", "remove"])
     sp.add_argument("arg", nargs="?", help="verze nebo cesta k archivu")
