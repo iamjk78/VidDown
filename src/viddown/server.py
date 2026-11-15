@@ -52,6 +52,7 @@ def create_app(app_state) -> FastAPI:
     S = app_state
     app = FastAPI(title="VidDown", version=__version__, docs_url=None, redoc_url=None)
     fails: dict[str, list[float]] = {}
+    bg_tasks: set = set()                                                 # odkazy na úlohy na pozadí (jinak je může uklidit GC)
 
     # ------------------------------------------------------------ přihlášení
     def token() -> str:
@@ -1050,10 +1051,16 @@ def create_app(app_state) -> FastAPI:
             raise HTTPException(400, "Adresa kontrolního videa musí začínat http:// nebo https://.")
         if changes.get("network_access") and not S.secrets.has_password():
             raise HTTPException(400, "Nastavte nejdřív heslo do GUI.")
+        old_thumbs = catalog.thumbs_dir(S.data, S.settings)
         try:
             S.settings.update(changes)
         except ValueError as e:
             raise HTTPException(400, str(e))
+        new_thumbs = catalog.thumbs_dir(S.data, S.settings)
+        if "catalog_thumbs_dir" in changes and new_thumbs != old_thumbs:      # stávající miniatury jdou s sebou (jinak by v katalogu chyběly)
+            t = asyncio.get_running_loop().create_task(asyncio.to_thread(catalog.move_thumbs, old_thumbs, new_thumbs))
+            bg_tasks.add(t)
+            t.add_done_callback(bg_tasks.discard)
         if "proxy" in changes:
             thumbs.PROXY = S.settings.get("proxy") or None
         if "telegram_chat_id" in changes and S.bot:

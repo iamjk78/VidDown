@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import threading
 import time
 import unicodedata
@@ -181,6 +182,52 @@ def remove_anim(folder: Path | None, name: str | None) -> None:
             (folder / name).unlink(missing_ok=True)
         except OSError as e:
             log.warning("animace %s se nepodařilo smazat: %s", name, e)
+
+
+def prune_thumbs(db, folder: Path, min_age: float = 3600.0) -> int:
+    """Smaže miniatury a animace, na které už žádná položka neodkazuje (po pádu, smazání položky mimo aplikaci…). Jen soubory
+    s názvy katalogu (`<id>.jpg`, `<id>.anim.mp4`) a starší než `min_age` (právě stahované se ještě nemusí být zapsané v databázi)."""
+    used = {r["n"] for r in db.query("select thumb_file n from catalog_items where thumb_file is not null and thumb_file != '' "
+                                     "union select anim_file from catalog_items where anim_file is not null and anim_file != ''")}
+    now, n = time.time(), 0
+    try:
+        with os.scandir(folder) as it:
+            for e in list(it):
+                if not (THUMB_NAME.match(e.name) or ANIM_NAME.match(e.name)) or e.name in used or not e.is_file(follow_symlinks=False):
+                    continue
+                if now - e.stat(follow_symlinks=False).st_mtime < min_age:
+                    continue
+                try:
+                    Path(e.path).unlink()
+                    n += 1
+                except OSError:
+                    pass
+    except OSError:
+        return 0
+    if n:
+        log.info("katalog: smazáno %d osiřelých miniatur a animací", n)
+    return n
+
+
+def move_thumbs(old: Path, new: Path) -> int:
+    """Přesune miniatury a animace katalogu do nové složky (změna nastavení), ať se nemusí stahovat znovu. Vrací počet souborů."""
+    if old == new:
+        return 0
+    n = 0
+    try:
+        new.mkdir(parents=True, exist_ok=True)
+        with os.scandir(old) as it:
+            for e in list(it):
+                if (THUMB_NAME.match(e.name) or ANIM_NAME.match(e.name)) and e.is_file(follow_symlinks=False) and not (new / e.name).exists():
+                    try:
+                        shutil.move(e.path, new / e.name)
+                        n += 1
+                    except OSError as ex:
+                        log.warning("miniaturu %s se nepodařilo přesunout: %s", e.name, ex)
+    except OSError as ex:
+        log.warning("miniatury katalogu se nepodařilo přesunout z %s: %s", old, ex)
+    log.info("katalog: přesunuto %d miniatur a animací do %s", n, new)
+    return n
 
 
 def disk_usage(folder: Path) -> dict:
@@ -479,7 +526,7 @@ async def list_source(url: str, ctx) -> dict:
                          "channel": info.get("channel") or info.get("uploader"), "duration": info.get("duration"),
                          "thumb_url": _thumb(info), "thumb_alts": thumb_candidates(info)[1:1 + THUMB_ALTS_MAX],
                          "height": ytdlp.best_height(info), "size": ytdlp.size_estimate(info), "detail_state": "done",
-                         "anim_url": anim_source(info)}]}
+                         "anim_url": anim_source(info), "published_at": published_ts(info)}]}
 
 
 # --- uložení seznamu ------------------------------------------------------------------------------
@@ -532,8 +579,9 @@ def apply_listing(db, sid: int, listing: dict, mode: str, dl_keys: set[str], dl_
                 c.execute("update catalog_items set pos=?, title=?, channel=?, duration=coalesce(?, duration), thumb_url=coalesce(?, thumb_url), "
                           "search=?, updated_at=? where id=?",
                           (pos, new_title, new_channel, e.get("duration"), e.get("thumb_url"), norm(f"{new_title or ''} {new_channel or ''}"), now, iid))
-                if state == "gone":                               # zase dostupné
-                    c.execute("update catalog_items set state='new' where id=?", (iid,))
+                if state == "gone":                               # zase dostupné: podrobnosti se zjistí znovu (dřív selhaly, protože video chybělo)
+                    c.execute("update catalog_items set state='new', detail_state=case when detail_state='failed' then 'pending' else detail_state end, "
+                              "detail_error=case when detail_state='failed' then null else detail_error end where id=?", (iid,))
                     restored += 1
                 elif mode == "all" and state in ("removed", "done"):
                     c.execute("update catalog_items set state='new', job_id=null, "
@@ -729,11 +777,11 @@ def _queue_items(db, runner, ids: list[int], force: bool = False) -> dict:
             res["skipped_downloaded"] += 1
         else:
             todo.append(r)
+    if force:                                                           # vynucené stažení: nejdřív z archivu (jedním přepsáním souboru)
+        fjs = [fj for fj in (_forget_job(db, r) for r in todo) if fj]
+        if fjs:
+            runner.archive_forget_many(fjs)
     for r in todo:
-        if force:                                                       # vynucené stažení: nejdřív z archivu, jinak by ho yt-dlp přeskočil
-            fj = _forget_job(db, r)
-            if fj:
-                runner.archive_forget_many([fj])
         kw = {"subdir": r["source_folder"]} if r["source_folder"] else {}
         jid, new = runner.add(r["url"], source="catalog", auto_confirm=True, catalog_item_id=r["id"], **kw)
         with db.conn() as c:
@@ -954,7 +1002,16 @@ async def task(st, stop: asyncio.Event) -> None:
 
 
 async def _reconcile_loop(st, stop: asyncio.Event) -> None:
+    last_prune = time.monotonic() - 23 * 3600                         # první úklid hodinu po startu, pak jednou denně
     while not stop.is_set():
+        if time.monotonic() - last_prune > 24 * 3600:
+            last_prune = time.monotonic()
+            try:
+                await asyncio.wait_for(asyncio.to_thread(prune_thumbs, st.db, thumbs_dir(st.data, st.settings)), 300)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001
+                log.warning("katalog: úklid osiřelých miniatur se nepodařil", exc_info=True)
         try:
             await asyncio.to_thread(reconcile, st.db, thumbs_dir(st.data, st.settings))   # staženo / selhalo → stav položek v katalogu
         except asyncio.CancelledError:
