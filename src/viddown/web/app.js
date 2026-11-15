@@ -40,7 +40,13 @@ const ICONS = {
 const ic = (n, s = 16) => `<svg class="ic" width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${ICONS[n] || ''}</svg>`;
 
 const App = { qsel: new Set(), qshown: [], view: 'queue', session: null, st: null, settings: null, engines: null, hist: { items: [], q: '', status: '', days: 30, offset: 0 },
-  expanded: new Set(), drag: null, es: null, timer: null, wizardShown: false, args: [], subFilter: null, subReady: false };
+  expanded: new Set(), drag: null, es: null, timer: null, wizardShown: false, args: [], subFilter: null, subReady: false, thumbBad: new Set() };
+/* miniatura, která se nenačetla, se v tomto prohlížeči znovu nežádá (jinak by se při každé aktualizaci stavu opakoval dotaz) */
+document.addEventListener('error', e => {
+  const t = e.target;
+  if (t && t.tagName === 'IMG' && t.dataset && t.dataset.tj) { App.thumbBad.add(Number(t.dataset.tj)); t.remove(); }
+}, true);
+const safeHref = u => (/^https?:\/\//i.test(String(u || '').trim()) ? String(u).trim() : '#');
 function parseHash() { const h = (location.hash || '#queue').slice(1).split('/'); App.view = h[0] || 'queue'; App.args = h.slice(1); }
 
 /* ------------------------------------------------------------ pomocné */
@@ -93,11 +99,21 @@ function setThumbs(on) { try { localStorage.setItem('vd_thumbs', on ? '1' : '0')
 function thumbHtml(j, w, h, opts = {}) {
   const busy = j.status === 'new' || j.status === 'probing';
   const inner = busy ? '<div class="spin"></div>' : ic('film', 20);
-  const img = j.has_thumb ? `<img src="/api/thumb/${j.id}" loading="lazy" alt="" style="position:absolute;inset:0" onerror="this.remove()">` : '';
+  const ok = j.has_thumb && !App.thumbBad.has(j.id);
+  const img = ok ? `<img src="/api/thumb/${j.id}" loading="lazy" alt="" style="position:absolute;inset:0" data-tj="${j.id}">` : '';
   const dur = j.duration && !opts.noDur ? `<span class="dur">${fmtDur(j.duration)}</span>` : '';
   const res = opts.res && j.height ? `<span class="res">${j.height}p</span>` : '';
-  return `<div class="th ${busy || !j.has_thumb ? 'ph' : ''} ${opts.cls || ''}" style="width:${w}px;height:${h}px">${inner}${img}${res}${dur}</div>`;
+  return `<div class="th ${busy || !ok ? 'ph' : ''} ${opts.cls || ''}" style="width:${w}px;height:${h}px">${inner}${img}${res}${dur}</div>`;
 }
+
+/* přístupnost: přepínače (segmenty, čipy) hlásí čtečce, zda jsou zapnuté; stav se doplňuje po každém překreslení */
+let ariaPending = false;
+function ariaSync() {
+  ariaPending = false;
+  $$('.seg > button, button.chip').forEach(b => { const on = b.classList.contains('on') ? 'true' : 'false'; if (b.getAttribute('aria-pressed') !== on) b.setAttribute('aria-pressed', on); });
+}
+new MutationObserver(() => { if (!ariaPending) { ariaPending = true; requestAnimationFrame(ariaSync); } })
+  .observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] });
 
 /* ------------------------------------------------------------ start */
 async function boot() {
@@ -112,11 +128,22 @@ async function start() {
   try { App.settings = await api('/api/settings'); } catch (e) { return; }
   connectSSE(); render();
 }
+/* pruh o ztraceném spojení se serverem (restart, výpadek sítě); zmizí, jakmile dorazí další stav */
+function connLost(on) {
+  let el = document.getElementById('connlost');
+  if (!on) { if (el) el.remove(); return; }
+  if (el) return;
+  el = document.createElement('div'); el.id = 'connlost'; el.setAttribute('role', 'status'); el.setAttribute('aria-live', 'polite');
+  el.style.cssText = 'position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:9999;background:var(--surface2,#333);color:var(--text,#fff);border:1px solid var(--border,#555);border-radius:10px;padding:10px 16px;font-size:13px;box-shadow:0 4px 16px rgba(0,0,0,.35)';
+  el.textContent = T('Spojení se serverem se přerušilo, zkouším se připojit znovu…', 'Connection to the server lost, reconnecting…');
+  document.body.appendChild(el);
+}
 function connectSSE() {
   if (App.es) App.es.close();
   const es = new EventSource('/api/events');
-  es.onmessage = e => { App.st = JSON.parse(e.data); onState(); };
-  es.onerror = () => {                                                         // spojení definitivně zavřel prohlížeč (401, restart serveru): ověřit přihlášení a připojit znovu
+  es.onmessage = e => { connLost(false); App.st = JSON.parse(e.data); onState(); };
+  es.onerror = () => {
+    connLost(true);                                                         // spojení definitivně zavřel prohlížeč (401, restart serveru): ověřit přihlášení a připojit znovu
     if (es.readyState !== 2) return;
     setTimeout(async () => {
       try { const s = await api('/api/session'); if (s.auth_required && !s.authed) return renderLogin(); connectSSE(); } catch (e) { setTimeout(connectSSE, 3000); }
@@ -312,6 +339,7 @@ function qWaitingKids(q, j) { return q.filter(c => c.parent_id === j.id && c.sta
 function qSelectShown(q) {
   for (const id of App.qshown) {
     const j = q.find(x => x.id === id); if (!j) continue;
+    if (j.status === 'running') continue;                           // „Vybrat zobrazené“ nevybírá právě stahovaná videa (ta se vybírají jen ručně)
     App.qsel.add(id);
     if (j.kind !== 'video' && !j.parent_id) qWaitingKids(q, j).forEach(c => App.qsel.add(c.id));
   }
@@ -332,8 +360,9 @@ async function qRemoveSelected(q) {
   const ids = q.filter(j => App.qsel.has(j.id) && !(j.parent_id && App.qsel.has(j.parent_id))).map(j => j.id);   // vybraný playlist = jeden příkaz
   const n = qCount(q), lists = q.filter(j => App.qsel.has(j.id) && j.kind !== 'video' && !j.parent_id).length;
   if (!ids.length) return;
-  if (!confirm(T(`Odebrat z fronty ${n} ${n === 1 ? 'video' : n < 5 ? 'videa' : 'videí'}${lists ? ` (včetně ${lists} celých playlistů)` : ''}? Stažené soubory se nemění.`,
-    `Remove ${n} item(s) from the queue${lists ? ` (including ${lists} whole playlist(s))` : ''}? Downloaded files are not affected.`))) return;
+  const running = q.filter(j => App.qsel.has(j.id) && j.status === 'running').length;
+  if (!confirm(T(`Odebrat z fronty ${n} ${n === 1 ? 'video' : n < 5 ? 'videa' : 'videí'}${lists ? ` (včetně ${lists} celých playlistů)` : ''}${running ? `; ${running} z nich se právě stahuje a stahování se zruší` : ''}? Stažené soubory se nemění.`,
+    `Remove ${n} item(s) from the queue${lists ? ` (including ${lists} whole playlist(s))` : ''}${running ? `; ${running} of them ${running === 1 ? 'is' : 'are'} downloading now and will be cancelled` : ''}? Downloaded files are not affected.`))) return;
   if (await act(() => api('/api/jobs/bulk-cancel', { method: 'POST', body: { ids } }), T('Odebráno z fronty', 'Removed from the queue'))) App.qsel.clear();
   renderQueueDyn();
 }
@@ -570,11 +599,12 @@ function renderSubNew() {
     $('#sau').placeholder = mode === 'page' ? 'https://www.example.com/tv-show' : 'https://www.youtube.com/@kanal';
     $('#samodehint').textContent = mode === 'page' ? T('Web bez kanálu: seznam dílů s podstránkami, každý díl má vlastní stránku s videem.', 'A site without a channel: a list of episodes with sub-pages, each with its own video page.') : T('YouTube a další weby, které yt-dlp umí vypsat jako kanál nebo playlist.', 'YouTube and other sites yt-dlp can list as a channel or playlist.');
   });
+  $('#sau').addEventListener('input', () => { if (det && det.for !== $('#sau').value.trim()) { det = null; $('#sapvbox').innerHTML = ''; } });   // jiná adresa = starý náhled (a jeho vzor) neplatí
   $('#sapv').onclick = async () => {
     const url = $('#sau').value.trim(), box = $('#sapvbox'); if (!url) return toast(T('Zadejte URL stránky.', 'Enter the page URL.'));
     box.innerHTML = `<div class="row gap8 t2 fs12"><span class="spin" style="width:13px;height:13px"></span> ${T('Načítám stránku…', 'Loading the page…')}</div>`;
     try {
-      det = await api('/api/subscriptions/preview-page', { method: 'POST', body: { url } });
+      det = await api('/api/subscriptions/preview-page', { method: 'POST', body: { url } }); det.for = url;
       if (!$('#sat').value.trim() && det.title) $('#sat').placeholder = det.title;
       box.innerHTML = `<div class="card" style="padding:12px 14px;background:var(--surface2)"><div class="fs12 b6" style="margin-bottom:6px">${T('Nalezeno', 'Found')}: ${det.items.length}${det.items.length >= 12 ? '+' : ''} ${T('videí (první stránka)', 'videos (first page)')} · ${det.page_param ? T('stránkování', 'paging') + ' ' + esc(det.page_param) : T('bez stránkování', 'no paging')}</div>
         ${det.items.map(i => `<div class="row gap8 fs12" style="justify-content:space-between"><span class="ell">${esc(i.title || i.url)}</span><span class="t2" style="white-space:nowrap">${i.date ? esc(i.date) : T('bez data', 'no date')}</span></div>`).join('')}</div>
@@ -589,7 +619,7 @@ function renderSubNew() {
     try {
       if (!url) throw new Error(T('Zadejte URL kanálu nebo playlistu.', 'Enter a channel or playlist URL.'));
       const body = { url, folder: $('#saf').value.trim(), since: sinceValue(since), tabs: tabsValue(tabs), title: $('#sat').value.trim(), check_hours: $('#sachk').value };
-      if (mode === 'page') { body.kind = 'page'; if (det && $('#sare')) { body.item_regex = $('#sare').value.trim(); body.page_template = $('#sapt').value.trim(); } }
+      if (mode === 'page') { body.kind = 'page'; if (det && det.for === url && $('#sare')) { body.item_regex = $('#sare').value.trim(); body.page_template = $('#sapt').value.trim(); } }
       btn.disabled = true; btn.innerHTML = `<span class="spin" style="width:13px;height:13px"></span> ${T('Kontroluji URL…', 'Checking URL…')}`;
       const r = await api('/api/subscriptions', { method: 'POST', body });
       toast(T('Odběr přidán', 'Subscription added')); if (App.st && App.st.subs && !subById(r.id)) App.st.subs.push(r); go(`sub/${r.id}`);
@@ -630,7 +660,7 @@ function updateSubHead() {
   const s = subById(sid);
   if (!s) { el.innerHTML = `<div class="card empty"><h3>${T('Odběr neexistuje', 'Subscription not found')}</h3><button class="btn" data-go="subs">${T('Zpět na odběry', 'Back to subscriptions')}</button></div>`; return; }
   el.innerHTML = `<div class="row gap16 wrap">${subThumb(s, 56)}<div class="grow" style="min-width:0"><div class="row gap10"><h1 class="ell">${esc(s.title || s.url)}</h1>${subStatus(s)}</div>
-    <div class="t2 fs12 row gap12 wrap" style="margin-top:4px"><span>${subKind(s)} · ${sinceTxt(s)}</span><a href="${esc(s.url)}" target="_blank" rel="noopener noreferrer" class="row gap4">${ic('link', 12)} ${T('Otevřít zdroj', 'Open source')}</a>
+    <div class="t2 fs12 row gap12 wrap" style="margin-top:4px"><span>${subKind(s)} · ${sinceTxt(s)}</span><a href="${esc(safeHref(s.url))}" target="_blank" rel="noopener noreferrer" class="row gap4">${ic('link', 12)} ${T('Otevřít zdroj', 'Open source')}</a>
      <span class="row gap4" title="${esc(s.folder)}">${ic('folder', 12)} <span class="ell" style="max-width:340px">${esc(s.folder)}</span></span></div>
     <div class="row gap16 fs12 t2 wrap" style="margin-top:6px">${subCounts(s)}<span>${T('kontrola', 'checked')}: ${s.last_check ? fmtDate(s.last_check) : '—'}</span></div></div>
     <div class="row gap10"><button class="btn" data-sa="check" data-id="${s.id}">${ic('refresh', 13)} ${T('Zkontrolovat teď', 'Check now')}</button>
@@ -883,7 +913,7 @@ async function loadHistory() {
     const on = H.all || H.sel.has(h.id);
     return `<div class="hr ${on ? 'sel' : ''}"><div><input type="checkbox" class="hsel" data-id="${h.id}" ${on ? 'checked' : ''}></div><div ${playable ? `data-h="play" data-id="${h.id}" style="cursor:pointer" title="${T('Přehrát', 'Play')}"` : ''}>${thumbHtml(h, 104, 58)}</div><div style="min-width:0"><div class="b6 fs14 ell" title="${esc(h.filepath || h.url)}">${esc(h.title || h.url)}</div>${sub}</div>
      <div>${gone ? `<span class="badge b-warn">${ic('trash', 11)} ${T('Soubor smazán', 'File deleted')}</span>` : badge[h.status] || ''}</div><div class="hide-s">${methodBadge(h.method)}</div><div class="b5 hide-s">${h.status === 'done' && !gone ? fmtBytes(h.filesize) : '—'}</div><div class="t2">${fmtDate(h.finished_at)}</div>
-     <div class="acts">${acts}<a class="ibtn" title="${esc(h.url)}" href="${esc(h.url)}" target="_blank" rel="noopener noreferrer">${ic('link', 15)}</a><button class="ibtn" title="${T('Smazat záznam', 'Delete record')}" data-h="del" data-id="${h.id}">${ic('trash', 14)}</button></div></div>`;
+     <div class="acts">${acts}<a class="ibtn" title="${esc(h.url)}" href="${esc(safeHref(h.url))}" target="_blank" rel="noopener noreferrer">${ic('link', 15)}</a><button class="ibtn" title="${T('Smazat záznam', 'Delete record')}" data-h="del" data-id="${h.id}">${ic('trash', 14)}</button></div></div>`;
   }).join('');
   $('#hlist').innerHTML = r.items.length ? `<div class="hr h"><span><input type="checkbox" id="hall" title="${T('Vybrat vše na stránce', 'Select all on page')}"></span><span></span><span>Video</span><span>${T('Stav', 'Status')}</span><span class="hide-s">${T('Metoda', 'Method')}</span><span class="hide-s">${T('Velikost', 'Size')}</span><span>${T('Dokončeno', 'Finished')}</span><span></span></div>${rows}`
     : `<div class="empty">${ic('history', 30)}<h3>${T('Historie je prázdná', 'History is empty')}</h3><p>${T('Dokončená a neúspěšná stahování se zobrazí tady.', 'Finished and failed downloads show up here.')}</p></div>`;
@@ -1496,10 +1526,10 @@ function catCard(it) {
     ${it.anim ? (it.anim_kind === 'video' ? `<video class="vanim" muted loop playsinline preload="none" data-asrc="${esc(it.anim)}"></video>` : `<img class="vanim" alt="" data-asrc="${esc(it.anim)}">`) : ''}
     ${it.anim ? `<span class="vb3" title="${T('Najetím myší (na dotyku klepnutím) se přehraje animace', 'Hover (tap on touch screens) to play the animation')}">${ic('play', 10)} ${T('animace', 'animation')}</span>` : ''}
     ${h ? `<span class="vb1">${h}</span>` : ''}<label class="vck"><input type="checkbox" data-csel="${it.id}" ${sel ? 'checked' : ''}></label>${it.duration ? `<span class="vb2">${fmtDur(it.duration)}</span>` : ''}</div>
-    <div class="vt"><a href="${esc(it.url)}" target="_blank" rel="noopener" title="${esc(it.title || it.url)}">${esc(it.title || it.url)}</a></div>
+    <div class="vt"><a href="${esc(safeHref(it.url))}" target="_blank" rel="noopener" title="${esc(it.title || it.url)}">${esc(it.title || it.url)}</a></div>
     <div class="vm ell" title="${esc(it.source_title || '')}">${esc(it.source_title || '')}${it.channel && it.channel !== it.source_title ? ' · ' + esc(it.channel) : ''}</div>
     <div class="vm2"><span>${meta}</span>${it.published ? `<span class="t2" title="${T('Datum zveřejnění videa', 'Video publication date')}">${fmtPub(it.published)}</span>` : ''}${badges}</div>
-    <div class="vact"><a class="btn sm ib" href="${esc(it.url)}" target="_blank" rel="noopener noreferrer" data-cact="open" title="${T('Otevřít stránku videa na webu', 'Open the video page on the site')}">${ic('external', 14)}</a>
+    <div class="vact"><a class="btn sm ib" href="${esc(safeHref(it.url))}" target="_blank" rel="noopener noreferrer" data-cact="open" title="${T('Otevřít stránku videa na webu', 'Open the video page on the site')}">${ic('external', 14)}</a>
       <button class="btn sm ib" data-cact="copy" data-url="${esc(it.url)}" title="${T('Zkopírovat adresu stránky videa', 'Copy the video page address')}">${ic('copy', 14)}</button>
       <button class="btn sm primary" data-cact="download" data-id="${it.id}" data-dl="${it.downloaded_before ? 1 : 0}" ${it.state === 'new' ? '' : 'disabled'}>${ic('download', 13)} ${T('Stáhnout', 'Download')}</button>
       <button class="btn sm" data-cact="remove" data-id="${it.id}" ${it.state === 'queued' ? 'disabled' : ''} title="${T('Odstranit z katalogu', 'Remove from the catalog')}">${ic('trash', 13)} ${T('Odstranit', 'Remove')}</button></div></div>`;
@@ -1535,7 +1565,7 @@ function catToggle(id, on) {
   const card = $(`[data-cid="${id}"]`); if (card) card.classList.toggle('on', on);
   catPaintSel();
 }
-async function catDownload(spec, force) {
+async function catDownload(spec, force, keepSel = false) {
   if (CAT.busy) return;
   CAT.busy = true;
   const r = await act(() => api('/api/catalog/items/action', { method: 'POST', body: { action: 'download', ...spec, ...(force ? { force: true } : {}) } }));
@@ -1547,7 +1577,8 @@ async function catDownload(spec, force) {
   if (r.skipped_downloaded) parts.push(T(`přeskočeno „staženo dříve“ ${r.skipped_downloaded}`, `skipped “downloaded before” ${r.skipped_downloaded}`));
   if (r.skipped_state) parts.push(T(`přeskočeno ${r.skipped_state} (ve frontě nebo odstraněno)`, `skipped ${r.skipped_state} (queued or removed)`));
   toast(parts.join(', ') || T('Nic k zařazení', 'Nothing to queue'));
-  catClearSel(); catLoad();
+  if (keepSel) (spec.ids || []).forEach(id => CAT.sel.delete(id)); else catClearSel();      // z karty: ostatní označená videa zůstanou označená
+  catLoad();
 }
 function catDownloadAsk(spec, n) {
   const m = modal(`<div class="mh">${ic('download', 18)}<h2>${T('Stáhnout z katalogu', 'Download from the catalog')}</h2></div>
@@ -1555,15 +1586,15 @@ function catDownloadAsk(spec, n) {
       <label class="row gap8 fs13" style="margin-top:10px"><input type="checkbox" id="catforce"> ${T('I videa označená „Staženo dříve“ stáhnout znovu', 'Also download videos marked “Downloaded before” again')}</label></div>
     <div class="mf"><button class="btn" id="catdlno">${T('Zrušit', 'Cancel')}</button><button class="btn primary" id="catdlgo">${T('Zařadit do fronty', 'Add to queue')}</button></div>`);
   $('#catdlno', m.el).onclick = m.close;
-  $('#catdlgo', m.el).onclick = () => { const f = $('#catforce', m.el).checked; m.close(); catDownload(spec, f); };
+  $('#catdlgo', m.el).onclick = () => { const f = $('#catforce', m.el).checked; m.close(); catDownload(spec.filter ? { ...spec, expect: n } : spec, f); };
 }
-async function catRemove(spec, count) {
+async function catRemove(spec, count, keepSel = false) {
   if (CAT.busy) return;
   CAT.busy = true;
-  const r = await act(() => api('/api/catalog/items/action', { method: 'POST', body: { action: 'remove', ...spec } }),
+  const r = await act(() => api('/api/catalog/items/action', { method: 'POST', body: { action: 'remove', ...(spec.filter ? { ...spec, expect: count } : spec) } }),
     count > 1 ? T(`Odstraněno: ${count}`, `Removed: ${count}`) : null);
   CAT.busy = false;
-  if (r) { if (r.skipped) toast(T(`Přeskočeno ${r.skipped} (ve frontě nebo už odstraněno)`, `Skipped ${r.skipped} (queued or already removed)`)); catClearSel(); catLoad(); }
+  if (r) { if (r.skipped) toast(T(`Přeskočeno ${r.skipped} (ve frontě nebo už odstraněno)`, `Skipped ${r.skipped} (queued or already removed)`)); if (keepSel) (spec.ids || []).forEach(id => CAT.sel.delete(id)); else catClearSel(); catLoad(); }
 }
 /* Animace v kartě: načte se a přehraje až při najetí myší na kartu (dotyk: klepnutí na náhled), jinak se nic nestahuje ani nepřehrává */
 function catAnimOn(th, on) {
@@ -1619,11 +1650,11 @@ function catGridClick(e) {
   if (!b || b.disabled) return;
   if (b.dataset.cact === 'copy') { copyText(b.dataset.url).then(ok => toast(ok ? T('Adresa zkopírována', 'Address copied') : T('Kopírování se nepodařilo', 'Copy failed'), !ok)); return; }
   if (b.dataset.cact === 'open') return;                                  // běžný odkaz, otevře se sám v nové záložce
-  if (b.dataset.cact === 'remove') catRemove({ ids: [+b.dataset.id] }, 1);
+  if (b.dataset.cact === 'remove') catRemove({ ids: [+b.dataset.id] }, 1, true);
   else if (b.dataset.cact === 'download') {
     const again = b.dataset.dl === '1';
     if (again && !confirm(T('Toto video už bylo staženo dříve. Stáhnout ho znovu?', 'This video was downloaded before. Download it again?'))) return;
-    catDownload({ ids: [+b.dataset.id] }, again);
+    catDownload({ ids: [+b.dataset.id] }, again, true);
   }
 }
 function catSelClick(e) {
@@ -1871,12 +1902,32 @@ async function saveSetting(k, v, after) {
 
 /* ------------------------------------------------------------ modální okna */
 function modal(html, cls = '') {
-  const root = $('#modal-root'); root.innerHTML = `<div class="overlay"><div class="modal ${cls}" role="dialog" aria-modal="true">${html}</div></div>`;
-  const onKey = e => { if (e.key === 'Escape' && !cls.includes('nodismiss')) close(); };
-  const close = () => { document.removeEventListener('keydown', onKey); root.innerHTML = ''; };
+  /* okna se vrství (výběr složky nad průvodcem nezruší průvodce); Escape zavírá jen horní, Tab zůstává uvnitř a po zavření se vrátí fokus */
+  const root = $('#modal-root'), prev = document.activeElement;
+  const wrap = document.createElement('div');
+  wrap.innerHTML = `<div class="overlay"><div class="modal ${cls}" role="dialog" aria-modal="true">${html}</div></div>`;
+  root.appendChild(wrap);
+  const isTop = () => root.lastElementChild === wrap;
+  const focusables = () => $$('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])', wrap).filter(x => !x.disabled && x.offsetParent !== null);
+  const onKey = e => {
+    if (!isTop()) return;
+    if (e.key === 'Escape' && !cls.includes('nodismiss')) close();
+    else if (e.key === 'Tab') {
+      const f = focusables(); if (!f.length) return;
+      const first = f[0], last = f[f.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+      else if (!wrap.contains(document.activeElement)) { e.preventDefault(); first.focus(); }
+    }
+  };
+  const close = () => {
+    document.removeEventListener('keydown', onKey); wrap.remove();
+    try { if (prev && prev.focus && document.contains(prev)) prev.focus(); } catch (e) { /* fokus se nevrátí */ }
+  };
   document.addEventListener('keydown', onKey);
-  $('.overlay', root).addEventListener('mousedown', e => { if (e.target.classList.contains('overlay') && !cls.includes('nodismiss')) close(); });
-  return { el: $('.modal', root), close };
+  $('.overlay', wrap).addEventListener('mousedown', e => { if (e.target.classList.contains('overlay') && !cls.includes('nodismiss') && isTop()) close(); });
+  const f0 = focusables()[0]; if (f0) f0.focus();
+  return { el: $('.modal', wrap), close };
 }
 async function openDirPicker(start, cb) {
   const m = modal(`<div class="mh">${ic('folder', 18)}<h2>${T('Vyberte složku', 'Choose a folder')}</h2></div><div class="mb"><input class="input sm mono fs12" id="dpath"><div class="dirs" id="dlist"></div></div>

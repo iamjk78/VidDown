@@ -305,15 +305,28 @@ def create_app(app_state) -> FastAPI:
     async def job_children(jid: int):
         return {"children": [job_out(c) for c in S.db.children(jid)]}
 
+    thumb_miss: dict[int, float] = {}                                  # miniatura, která se nepodařila: znovu se zkusí až za 10 minut (ne při každém překreslení)
+
     @app.get("/api/thumb/{jid}")
     async def thumb(jid: int):
         j = S.db.get(jid)
         if not j:
             raise HTTPException(404)
+        now = time.time()
+        if now - thumb_miss.get(jid, 0) < 600:
+            raise HTTPException(404, headers={"Cache-Control": "max-age=600"})
         p = await asyncio.to_thread(thumbs.ensure_cached, S.data, j)
         if not p:
-            raise HTTPException(404)
-        head = p.read_bytes()[:16]
+            if len(thumb_miss) > 5000:
+                thumb_miss.clear()
+            thumb_miss[jid] = now
+            raise HTTPException(404, headers={"Cache-Control": "max-age=600"})
+        thumb_miss.pop(jid, None)
+
+        def sniff() -> bytes:
+            with open(p, "rb") as f:
+                return f.read(16)
+        head = await asyncio.to_thread(sniff)
         mt = "image/jpeg"
         if head[:4] == b"\x89PNG":
             mt = "image/png"
@@ -762,6 +775,9 @@ def create_app(app_state) -> FastAPI:
             ids = await asyncio.to_thread(catalog.select_ids, S.db, body)
         except ValueError as e:
             raise HTTPException(400, f"Neplatný výběr: {e}")
+        expect = body.get("expect")
+        if isinstance(expect, int) and not isinstance(expect, bool) and len(ids) > expect:       # výběr podle filtru se od potvrzení rozrostl
+            raise HTTPException(409, f"Počet videí se mezitím změnil ({len(ids)} místo {expect}). Zopakujte výběr.")
         if body["action"] == "download":
             res = await asyncio.to_thread(catalog.queue_items, S.db, S.runner, ids, body.get("force") is True)
         else:
