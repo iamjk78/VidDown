@@ -54,12 +54,32 @@ async function api(path, opts = {}) {
   const o = { method: opts.method || 'GET', headers: {} };
   if (opts.body instanceof FormData) o.body = opts.body;
   else if (opts.body !== undefined) { o.body = JSON.stringify(opts.body); o.headers['Content-Type'] = 'application/json'; }
-  const r = await fetch(path, o);
+  let r;
+  try { r = await fetch(path, o); } catch (e) { throw new Error(T('Server neodpovídá. Zkontrolujte, že VidDown běží, a zkuste to znovu.', 'The server is not responding. Check that VidDown is running and try again.')); }
   if (r.status === 401 && !path.startsWith('/api/login')) { renderLogin(); throw new Error('auth'); }
   let data = null; try { data = await r.json(); } catch (e) { /* bez těla */ }
-  if (!r.ok) throw new Error((data && (data.detail || data.error)) || r.statusText);
+  if (!r.ok) {
+    let msg = data && (data.detail || data.error);
+    if (Array.isArray(msg) || (msg && typeof msg === 'object')) msg = T('Neplatný požadavek.', 'Invalid request.');
+    throw new Error(errText(msg || r.statusText || String(r.status)));
+  }
   return data;
 }
+/* strojové hlášky serveru (anglicky) → čitelný text v jazyce GUI */
+const ERR_TEXT = {
+  'busy': ['Probíhá jiná operace s enginy, zkuste to za chvíli.', 'Another engine operation is running, try again shortly.'],
+  'wrong password': ['Špatné heslo.', 'Wrong password.'],
+  'too many attempts, wait 5 minutes': ['Příliš mnoho pokusů, počkejte 5 minut.', 'Too many attempts, wait 5 minutes.'],
+  'file not found': ['Soubor nebyl nalezen (byl přesunut nebo smazán?).', 'File not found (moved or deleted?).'],
+  'unknown action': ['Neznámá akce.', 'Unknown action.'],
+  'cross-origin': ['Požadavek z cizí stránky byl odmítnut.', 'Request from another site was refused.'],
+  'host': ['Adresa, přes kterou GUI otevíráte, není povolená (VIDDOWN_ALLOWED_HOSTS).', 'This address is not allowed (VIDDOWN_ALLOWED_HOSTS).'],
+  'only on the local computer': ['Jde jen na počítači, kde VidDown běží.', 'Only on the computer running VidDown.'],
+  'bot off': ['Telegram bot není zapnutý.', 'The Telegram bot is off.'],
+  'Not Found': ['Nenalezeno.', 'Not found.'],
+  'Internal Server Error': ['Chyba serveru, podrobnosti jsou v logu.', 'Server error, see the log.'],
+};
+function errText(m) { const t = ERR_TEXT[String(m)]; return t ? T(t[0], t[1]) : String(m); }
 function toast(msg, err = false) {
   const el = document.createElement('div'); el.className = 'toast' + (err ? ' err' : ''); el.textContent = msg;
   $('#toasts').appendChild(el); setTimeout(() => el.remove(), err ? 6000 : 2500);
@@ -265,7 +285,7 @@ function rowHtml(j, pos, child = false) {
   const right = isGroup ? '' : `${j.size_est ? '~' + fmtBytes(j.size_est) : ''}${j.size_est && j.height ? ' · ' : ''}${j.height ? j.height + 'p' : ''}${j.approx ? ' ' + T('(odhad)', '(est.)') : ''}`;
   const toggle = isGroup ? `<button class="ibtn" data-a="expand" data-id="${j.id}" title="${T('Rozbalit', 'Expand')}">${ic(App.expanded.has(j.id) ? 'up' : 'down', 15)}</button>` : '';
   const selOn = App.qsel.has(j.id);
-  return `<div class="qr${pz}${child ? ' child' : ''}${selOn ? ' qon' : ''}" data-row="${j.id}" ${child ? '' : 'draggable="true"'}>
+  return `<div class="qr${pz}${child ? ' child' : ''}${selOn ? ' qon' : ''}" data-row="${j.id}" ${child ? '' : `draggable="true" tabindex="0" aria-label="${esc(j.title || j.url || '')}" title="${T('Pořadí: přetáhněte, nebo Alt + šipka nahoru/dolů', 'Order: drag, or Alt + Arrow Up/Down')}"`}>
    <span class="qck"><input type="checkbox" class="qsel" data-id="${j.id}" ${selOn ? 'checked' : ''} title="${T('Vybrat k odstranění', 'Select for removal')}"></span>
    <span class="grip">${child ? '' : ic('grip', 15)}</span><span class="pos">${pos ?? ''}</span>
    <div class="fade">${thumbsOn() ? thumbHtml(j, child ? 72 : 96, child ? 40 : 54, { cls: isGroup ? 'stack' : '' }) : ''}</div>
@@ -480,6 +500,19 @@ document.addEventListener('click', async e => {
 });
 
 /* přetahování (změna pořadí) */
+/* pořadí ve frontě i bez myši: Alt + šipka nahoru/dolů na zvýrazněném řádku */
+document.addEventListener('keydown', async e => {
+  if (!e.altKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return;
+  const r = e.target.closest && e.target.closest('.qr[draggable]'); if (!r) return;
+  e.preventDefault();
+  const rows = $$('#qlist .qr[draggable]'), i = rows.indexOf(r), id = +r.dataset.row;
+  let before;
+  if (e.key === 'ArrowUp') { if (i <= 0) return; before = +rows[i - 1].dataset.row; }
+  else { if (i < 0 || i >= rows.length - 1) return; before = rows[i + 2] ? +rows[i + 2].dataset.row : null; }
+  await act(() => api(`/api/jobs/${id}/move`, { method: 'POST', body: { before_id: before } }));
+  renderQueueDyn();
+  requestAnimationFrame(() => { const again = $(`#qlist .qr[data-row="${id}"]`); if (again) again.focus(); });
+});
 document.addEventListener('dragstart', e => { const r = e.target.closest && e.target.closest('.qr[draggable]'); if (!r) return; App.drag = +r.dataset.row; r.classList.add('dragging'); e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', r.dataset.row); });
 document.addEventListener('dragover', e => { if (!App.drag) return; const r = e.target.closest('.qr[draggable]'); if (!r) return; e.preventDefault(); $$('.drop-before').forEach(x => x.classList.remove('drop-before')); r.classList.add('drop-before'); });
 document.addEventListener('dragend', () => { $$('.drop-before,.dragging').forEach(x => x.classList.remove('drop-before', 'dragging')); App.drag = null; renderQueueDyn(); });
@@ -2025,7 +2058,10 @@ async function renderEngines() {
 async function loadEngines() {
   if (App.view !== 'engines') return;
   let r; try { r = await api('/api/engines'); } catch (e) { return; }
+  if (App.view !== 'engines' || !$('#eauto')) return;                       // mezitím jiná obrazovka (pomalá odpověď)
   App.engines = r;
+  const oldLg = $('#edyn') && $('.log', $('#edyn'));
+  const keepLog = oldLg ? { bottom: oldLg.scrollHeight - oldLg.scrollTop - oldLg.clientHeight < 30, top: oldLg.scrollTop } : null;
   $('#eauto').innerHTML = `${T('Automatické aktualizace', 'Automatic updates')} <button class="toggle ${r.auto ? 'on' : ''}" id="eat"></button> ${T('každých', 'every')} ${r.hours} h`;
   $('#eat').onclick = () => saveSetting('engine_auto_update', !r.auto, loadEngines);
   const desc = { 'yt-dlp': T('YouTube a tisíce dalších webů', 'YouTube and thousands of sites'), deno: T('JavaScript runtime pro YouTube', 'JavaScript runtime for YouTube'), ffmpeg: T('Spojování a převod videa', 'Merging and converting video') };
@@ -2069,7 +2105,7 @@ async function loadEngines() {
     loadEngines();
   });
   $('#chinst').onclick = () => act(() => api('/api/engines/chromium/install', { method: 'POST' }), T('Instaluji Chromium…', 'Installing Chromium…'));
-  const lg = $('.log', $('#edyn')); if (lg) lg.scrollTop = lg.scrollHeight;
+  const lg = $('.log', $('#edyn')); if (lg) lg.scrollTop = !keepLog || keepLog.bottom ? lg.scrollHeight : keepLog.top;
 }
 
 /* ------------------------------------------------------------ nápověda */
