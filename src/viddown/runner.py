@@ -743,7 +743,18 @@ class Runner:
             job = self.db.get(job["id"])
         self.db.update(job["id"], method="sniffer")
         name = self._name(job, {"title": job["title"] or sn.get("title") or "video"})
-        return await sniffer.download(sn, ctx, staging, name, on_progress, holder)
+        try:
+            return await sniffer.download(sn, ctx, staging, name, on_progress, holder)
+        except ResolveError:                                                   # adresy ze sniffu mohly vypršet: příště se stránka načte znovu
+            cur = self.db.get(job["id"])
+            try:
+                ci = json.loads(cur["info"]) if cur and cur["info"] else {}
+            except ValueError:
+                ci = {}
+            if isinstance(ci, dict) and ci.get("sniff"):
+                ci["sniffed_at"] = 0
+                self.db.update(job["id"], info=ci)
+            raise
 
     def _skip_result(self, jid: int, result: dict, method: str, staging: Path) -> bool:
         if not result.get("skipped"):

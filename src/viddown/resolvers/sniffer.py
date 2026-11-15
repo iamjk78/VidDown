@@ -165,7 +165,7 @@ async def add_cookies(context, path: Path, host: str | None = None) -> int:
 def parse_m3u8(text: str, base: str) -> dict:
     """Rozpozná master/media playlist. U master vybere variantu s nejvyšším datovým tokem."""
     lines = [l.strip() for l in text.splitlines() if l.strip()]
-    res = {"master": False, "variants": [], "audio": {}, "duration": 0.0, "drm": False}
+    res = {"master": False, "variants": [], "audio": {}, "duration": 0.0, "drm": False, "live": False}
     attrs_re = re.compile(r'([A-Z0-9-]+)=("[^"]*"|[^,]*)')
     for i, l in enumerate(lines):
         if l.startswith("#EXT-X-STREAM-INF"):
@@ -192,11 +192,35 @@ def parse_m3u8(text: str, base: str) -> dict:
         elif l.startswith("#EXT-X-KEY") or l.startswith("#EXT-X-SESSION-KEY"):
             if re.search(r"SAMPLE-AES|com\.apple\.streamingkeydelivery|com\.widevine|playready", l, re.I):
                 res["drm"] = True
+    # media playlist bez #EXT-X-ENDLIST je živý přenos (pořád se prodlužuje): ffmpeg by ho stahoval donekonečna
+    res["live"] = not res["master"] and any(l.startswith("#EXTINF") for l in lines) and not any(l.startswith("#EXT-X-ENDLIST") for l in lines)
     if res["variants"]:
         best = max(res["variants"], key=lambda v: (v["height"] or 0, v["bw"]))
         res["best"] = best
         res["best_audio"] = res["audio"].get(best.get("audio")) if best.get("audio") else None
     return res
+
+
+DASH_DRM_RE = re.compile(r"<ContentProtection\b[^>]*schemeIdUri=\"urn:uuid:", re.I)     # Widevine/PlayReady/FairPlay (ne jen „mp4protection“)
+MAX_STREAMS = 8          # nejvýš tolik nalezených playlistů se při sniffu zkoumá (stránka jich může nahrát stovky)
+
+
+def media_kind(url: str) -> str | None:
+    """Adresa přímo na mediální soubor nebo playlist (pak se stránka nevykresluje, prohlížeč by soubor jen stáhl)."""
+    try:
+        path = urlparse(url).path.lower()
+    except ValueError:
+        return None
+    if path.endswith(".m3u8"):
+        return "hls"
+    if path.endswith(".mpd"):
+        return "dash"
+    return "direct" if DIRECT_EXT.search(path) else None
+
+
+def mask_urls(text: str) -> str:
+    """Podepsané adresy (tokeny v parametrech) do chybových hlášek, logu ani Telegramu nepatří."""
+    return re.sub(r"(https?://[^\s?#]+)[?#][^\s'\"]*", r"\1?…", text or "")
 
 
 class Renderer:
@@ -218,9 +242,11 @@ class Renderer:
             kw["proxy"] = {"server": s["proxy"]}
         try:
             self._browser = await self._pw.chromium.launch(**kw)
-        except Exception as e:  # noqa: BLE001
+        except BaseException as e:                                  # i zrušení (CancelledError): ovladač Playwright se zastaví
             await self._pw.stop()
-            raise ResolveError(f"Chromium nelze spustit ({e}). Nainstalujte ho v Enginy.", "engine")
+            if isinstance(e, Exception):
+                raise ResolveError(f"Chromium nelze spustit ({e}). Nainstalujte ho v Enginy.", "engine")
+            raise
         try:
             self._context = await self._browser.new_context(user_agent=UA, viewport={"width": 1280, "height": 900}, locale="cs-CZ")
             if self.ctx.cookies_file:
@@ -351,7 +377,7 @@ async def sniff(url: str, ctx: Ctx) -> dict:
             def on_response(resp):
                 try:
                     u = resp.url
-                    if not u.startswith("http"):
+                    if not u.startswith("http") or resp.status >= 400:        # chybová odpověď (404, 403…) není video
                         return
                     ct = (resp.headers.get("content-type") or "").lower()
                     path = urlparse(u).path
@@ -374,8 +400,13 @@ async def sniff(url: str, ctx: Ctx) -> dict:
 
             page.on("response", on_response)
             start = time.monotonic()
+            mk = media_kind(url)
+            if mk:                                                          # odkaz rovnou na video nebo playlist: žádná stránka
+                found[url] = {"kind": mk, "len": 0, "t": time.monotonic() - 10}
+                timeout = 0
             try:
-                await page.goto(url, wait_until="domcontentloaded", timeout=timeout * 1000)
+                if not mk:
+                    await page.goto(url, wait_until="domcontentloaded", timeout=timeout * 1000)
             except PWTimeout:
                 pass
             except Exception as e:  # noqa: BLE001
@@ -432,9 +463,8 @@ async def sniff(url: str, ctx: Ctx) -> dict:
             candidates = []
             drm = bool(meta.get("drm"))
             variant_urls: set[str] = set()
-            for u, c in list(found.items()):
-                if c["kind"] != "hls":
-                    continue
+            hls_urls = [u for u, c in found.items() if c["kind"] == "hls"][:MAX_STREAMS]
+            for u in hls_urls:
                 try:
                     r = await context.request.get(u, headers={"Referer": url}, timeout=20000)
                     pl = parse_m3u8(await r.text(), u)
@@ -448,22 +478,36 @@ async def sniff(url: str, ctx: Ctx) -> dict:
                     if not best:                                                       # master bez použitelné varianty nesmí shodit celý sniff
                         continue
                     variant_urls.update(v["uri"] for v in pl["variants"])
+                    live = False
                     try:                                                               # šifrování bývá až v playlistu vybrané varianty, ne v master playlistu
                         vr = await context.request.get(best["uri"], headers={"Referer": url}, timeout=20000)
-                        if parse_m3u8(await vr.text(), best["uri"])["drm"]:
+                        vp = parse_m3u8(await vr.text(), best["uri"])
+                        if vp["drm"]:
                             drm = True
                             continue
+                        live = vp["live"]
                     except Exception:  # noqa: BLE001
                         pass
                     candidates.append({"kind": "hls", "url": best["uri"], "audio": pl.get("best_audio"),
-                                       "height": best["height"], "master": u, "rank": 0})
+                                       "height": best["height"], "master": u, "rank": 0, "live": live})
                 else:
                     candidates.append({"kind": "hls", "url": u, "audio": None, "height": None,
-                                       "duration": pl["duration"], "rank": 2})
+                                       "duration": pl["duration"], "rank": 2, "live": pl["live"]})
             candidates = [c for c in candidates if c["rank"] == 0 or c["url"] not in variant_urls]
+            for u in [u for u, c in found.items() if c["kind"] == "dash"][:MAX_STREAMS]:
+                try:                                                               # šifrovaný DASH by se stáhl jako nepřehratelný soubor
+                    mr = await context.request.get(u, headers={"Referer": url}, timeout=20000)
+                    mpd = await mr.text()
+                    if DASH_DRM_RE.search(mpd):
+                        drm = True
+                        continue
+                    live = 'type="dynamic"' in mpd
+                except Exception:  # noqa: BLE001
+                    live = False
+                candidates.append({"kind": "dash", "url": u, "height": None, "rank": 1, "live": live})
             for u, c in found.items():
                 if c["kind"] == "dash":
-                    candidates.append({"kind": "dash", "url": u, "height": None, "rank": 1})
+                    continue
                 elif c["kind"] == "direct":
                     candidates.append({"kind": "direct", "url": u, "height": None, "len": c.get("len", 0), "rank": 3})
             candidates.sort(key=lambda c: (c["rank"], -(c.get("height") or 0), -(c.get("len") or 0)))
@@ -524,7 +568,11 @@ async def download(sn: dict, ctx: Ctx, staging: Path, name: str, on_progress, ho
     if not sn.get("candidates"):
         raise ResolveError("na stránce nebylo nalezeno žádné video", "unsupported")
     last_err = "neznámá chyba"
+    last_kind = None
     for cand in sn["candidates"][:3]:
+        if cand.get("live") and not ctx.settings.get("live_from_start"):      # živý přenos by se stahoval donekonečna
+            last_err, last_kind = "na stránce je živý přenos (nahrávání živých přenosů je vypnuté)", "live"
+            continue
         hdr_lines = [f"Referer: {sn['referer']}"]
         if not await candidate_ok(cand["url"], sn["referer"]) or (cand.get("audio") and not await candidate_ok(cand["audio"], sn["referer"])):
             last_err = "adresa videa míří mimo veřejný internet"
@@ -573,6 +621,7 @@ async def download(sn: dict, ctx: Ctx, staging: Path, name: str, on_progress, ho
             err = (await err_task).decode(errors="replace").strip()
             holder.proc = None
             if holder.stopped:
+                out.unlink(missing_ok=True)                                 # ffmpeg nenavazuje: polotovar by jen zabíral místo
                 raise Cancelled()
             if code == 0 and out.exists():
                 bad = implausible_size(out.stat().st_size, duration)
@@ -581,6 +630,8 @@ async def download(sn: dict, ctx: Ctx, staging: Path, name: str, on_progress, ho
                 last_err = bad
                 out.unlink(missing_ok=True)
                 break  # stejný zdroj v jiném kontejneru by dopadl stejně
-            last_err = err.splitlines()[-1] if err else f"ffmpeg skončil s kódem {code}"
+            last_err = mask_urls(err.splitlines()[-1]) if err else f"ffmpeg skončil s kódem {code}"
             out.unlink(missing_ok=True)
+    if last_kind == "live" and last_err.startswith("na stránce je živý přenos"):
+        raise ResolveError(last_err, "live")
     raise ResolveError(last_err, classify_error(last_err) if classify_error(last_err) != "unsupported" else "other")

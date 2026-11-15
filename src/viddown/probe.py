@@ -188,7 +188,10 @@ async def probe_url(url: str, ctx: Ctx) -> dict:
         # Facebook Story: video leží za odkazem (sdílený reel) – najdeme ho a zkontrolujeme jako běžné video
         try:
             st = await pages.open_story(url, ctx)
-            if "sniff" in st:  # story má vlastní video (ne sdílený reel)
+            if "sniff" in st:  # story má vlastní video (ne sdílený reel): stahuje ho prohlížeč, takže platí nastavení metod
+                if "sniffer" not in (ctx.settings.get("methods") or ["ytdlp", "sniffer"]):
+                    return {"type": "none", "error": "video příběhu se dá stáhnout jen prohlížečem a metoda Prohlížeč je vypnutá",
+                            "error_kind": "unsupported"}
                 return _sniff_result(st["sniff"], url)
         except ResolveError as e:
             log.info("probe %s (story): %s (%s)", url, e, e.kind)
