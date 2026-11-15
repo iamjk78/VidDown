@@ -329,7 +329,8 @@ def test_bootstrap_falls_back_to_image_when_state_is_corrupt(tmp_path):
         env.pop(k, None)
     code = "import sys; from viddown import bootstrap; sys.exit(bootstrap.main(['version']))"
     r = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=60)
-    assert r.returncode == 0 and "VidDown 0.1.0" in r.stdout
+    from viddown import __version__
+    assert r.returncode == 0 and f"VidDown {__version__}" in r.stdout          # verze z obrazu (ne pevné číslo)
 
 
 def test_migrations_are_additive():
