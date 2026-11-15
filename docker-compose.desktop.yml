@@ -1,0 +1,16 @@
+# VidDown na počítači s Docker Desktop (Windows i Mac). Návod je v README (Instalace › Počítač s Docker Desktop).
+# Uložte tento soubor do složky VidDown pod názvem docker-compose.yml a ve stejné složce spusťte:  docker compose up -d
+# Aplikace pak běží na http://localhost:8765 (jen z tohoto počítače, proto bez hesla).
+services:
+  viddown:
+    image: ghcr.io/iamjk78/viddown:latest
+    container_name: viddown
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8765:8765"
+    environment:
+      TZ: Europe/Prague
+      VIDDOWN_ALLOW_NO_PASSWORD: "1"   # aplikace je dostupná jen z tohoto počítače
+    volumes:
+      - ./data:/data          # nastavení a databáze (vytvoří se samo vedle tohoto souboru)
+      - ./Videa:/downloads    # sem se ukládají videa (složka Videa vedle tohoto souboru)

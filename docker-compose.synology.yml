@@ -1,26 +1,23 @@
-# VidDown na Synology (Container Manager → Projekt) nebo kdekoli, kde stačí stáhnout hotový obraz.
-# Obraz se do registru nahrává z vývojového počítače příkazem scripts/release.sh.
+# VidDown na Synology NAS (Container Manager › Projekt › Vytvořit › Vytvořit docker-compose.yml).
+# Návod krok za krokem je v README (Instalace › Synology NAS). Obraz je veřejný, přihlašovat se nikam nemusíte.
 #
-# Jednorázově na NAS (SSH nebo plánovač úloh jako root):
-#   docker login ghcr.io -u <GitHub uživatel>     # heslo = osobní token se scope read:packages
-# Aktualizace:
-#   docker compose -f docker-compose.synology.yml pull && docker compose -f docker-compose.synology.yml up -d
+# Upravte jen tři věci:
+#   1) VIDDOWN_PASSWORD – heslo do aplikace (aspoň 6 znaků),
+#   2) cestu ke složce pro videa (řádek s /downloads),
+#   3) PUID/PGID jen když aplikace hlásí, že do složky nejde zapisovat (viz README › Když něco nefunguje).
 services:
   viddown:
-    image: ghcr.io/iamjk78/viddown:latest      # pro pevnou verzi např. ghcr.io/iamjk78/viddown:0.1.0
+    image: ghcr.io/iamjk78/viddown:latest
     container_name: viddown
     restart: unless-stopped
     ports:
-      - "8765:8765"          # GUI: http://<adresa-NAS>:8765  (přes Tailscale/VPN; veřejně nevystavovat!)
+      - "8765:8765"          # aplikace: http://<adresa-NAS>:8765 (jen v domácí síti nebo přes VPN, nevystavovat do internetu)
     environment:
       TZ: Europe/Prague
-      PUID: "1026"           # vlastník stažených souborů: uživatel NAS (v SSH `id <uživatel>`)
-      PGID: "100"            # skupina (na Synology běžně 100 = users)
-      # Port je dostupný celé místní síti, proto je heslo povinné: nastavte ho tady, nebo v proměnné prostředí VIDDOWN_PASSWORD.
-      # Bez hesla (jen když je NAS dostupný výhradně přes VPN a port je vázaný na adresu VPN) lze použít VIDDOWN_ALLOW_NO_PASSWORD: "1".
-      VIDDOWN_PASSWORD: "${VIDDOWN_PASSWORD:?Nastavte VIDDOWN_PASSWORD (heslo do GUI)}"
-      # VIDDOWN_ALLOWED_HOSTS: "nas.example.com"   # jméno, kterým se do GUI přistupuje, když není IP adresa, bez tečky ani .local/.lan
+      PUID: "1026"           # uživatel NAS, kterému budou patřit stažená videa (první vytvořený uživatel bývá 1026)
+      PGID: "100"            # skupina „users“
+      VIDDOWN_PASSWORD: "ZMENTE-TOTO-HESLO"
     volumes:
-      - /volume1/docker/viddown/data:/data           # databáze, nastavení, token, cookies, enginy, logy
-      - /volume1/video/VidDown:/downloads      # sem se ukládají videa (cílová složka v GUI: /downloads)
-      # - /volume1/zalohy/viddown:/backups           # složka pro automatické zálohy (v GUI: Nastavení › Záloha a obnova › /backups)
+      - /volume1/docker/viddown/data:/data       # nastavení, databáze, enginy (složku vytvořte ve File Station)
+      - /volume1/video/VidDown:/downloads        # sem se ukládají videa (v aplikaci je to složka /downloads)
+      # - /volume1/zalohy/viddown:/backups       # volitelně: automatické zálohy (v aplikaci pak zadejte /backups)
