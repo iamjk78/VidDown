@@ -27,7 +27,7 @@ import httpx
 
 from . import catalog, catalogpreview, netsafe, pagelist, schedule, storyboard, thumbs
 from .resolvers import ResolveError, sniffer, ytdlp
-from .util import is_rate_limited
+from .util import host_key, is_rate_limited
 
 log = logging.getLogger("viddown.catalogdetails")
 
@@ -194,7 +194,23 @@ class DetailWorker:
         return len(q) >= limit
 
     def limited_hosts(self) -> set[str]:
-        return {h for h in list(self.hits) if self.over_budget(h)}
+        """Weby přes hodinový strop dotazů a weby, které fronta pozastavila po omezení (pauza webu je společná)."""
+        out = {h for h in list(self.hits) if self.over_budget(h)}
+        rn = getattr(self.st, "runner", None)
+        if rn is not None and getattr(rn, "host_pause", None):
+            now = time.time()
+            paused = {k for k, v in rn.host_pause.items() if v.get("until", 0) > now}
+            if paused:
+                out |= {h for h in self._known_hosts() if host_key("https://" + h + "/") in paused}
+        return out
+
+    def _known_hosts(self) -> set[str]:
+        """Weby položek, na které katalog ještě čeká (pro převod pauzy fronty, která pracuje s `host_key`)."""
+        try:
+            return {r["host"] for r in self.db.query("select distinct host from catalog_items where host is not null "
+                                                     "and detail_state in ('pending','slow') and state in ('new','queued')")}
+        except Exception:  # noqa: BLE001
+            return set()
 
     def fallback_proxy(self) -> str | None:
         fb = str(self.st.settings.get("catalog_proxy_fallback") or "").strip()
@@ -315,6 +331,9 @@ class DetailWorker:
     def _on_error(self, item: dict, kind: str, msg: str) -> None:
         host = item.get("host") or ""
         low = msg.lower()
+        note = getattr(getattr(self.st, "runner", None), "note_host_limit", None)
+        if is_rate_limited(msg) and note is not None:
+            note("https://" + host + "/", msg)                                # omezení webu platí i pro frontu a odběry
         if kind == "network" or is_rate_limited(msg):               # omezení dotazů, výpadek: web odložit, video zůstane čekat
             self._back_off(host, BACKOFF_FIRST, "omezení nebo výpadek webu: " + msg[:120])
         elif kind == "cookies" or "not a bot" in low or re.search(r"confirm you(?:'|’)?(?:re| are) not", low):   # „confirm your age“ je chyba jednoho videa, ne webu

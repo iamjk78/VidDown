@@ -17,7 +17,7 @@ import time
 from . import pagelist
 from .probe import _flatten
 from .resolvers import ResolveError, ytdlp
-from .util import youtube_channel_base
+from .util import is_rate_limited, youtube_channel_base
 
 log = logging.getLogger("viddown.subscriptions")
 
@@ -84,13 +84,15 @@ def interval_hours(sub: dict, default: float) -> float:
     return float(sub["check_hours"]) if sub.get("check_hours") else float(default or 0)
 
 
-def due(db, hours: float, now: float | None = None) -> dict | None:
+def due(db, hours: float, now: float | None = None, skip=None) -> dict | None:
     """Nejdřív na řadě zapnutý odběr, který nečeká na potvrzení a naposledy se kontroloval před víc než jeho interval
-    (vlastní, jinak globální `hours`; 0 = nekontrolovat)."""
+    (vlastní, jinak globální `hours`; 0 = nekontrolovat). `skip(url)` vyřadí odběry pozastavených webů (ostatní se kontrolují dál)."""
     now = now or time.time()
     best = None
     for s in db.sub_list():
         if not s["enabled"] or s["pending"]:
+            continue
+        if skip is not None and skip(s["url"]):
             continue
         h = interval_hours(s, hours)
         if h <= 0:
@@ -146,6 +148,8 @@ async def check(runner, sid: int) -> dict:
     except ResolveError as e:
         log.info("odběr %s: kontrola selhala: %s", sid, e)
         db.sub_update(sid, last_check=now, last_error=str(e))
+        if is_rate_limited(str(e)):                                  # omezení webu platí i pro frontu a ostatní odběry téhož webu
+            runner.note_host_limit(sub["url"], str(e))
         if e.kind == "cookies":
             runner._pause_for_cookies(str(e))
         return {"error": str(e)}
@@ -210,7 +214,11 @@ async def check(runner, sid: int) -> dict:
 def queue_entries(db, sub: dict, entries: list[dict]) -> int:
     """Zařadí videa do fronty (v pořadí od nejnovějšího). Bez dalšího potvrzování."""
     n = 0
+    active = db.active_urls()                                       # video, které už je ve frontě (ručně nebo z jiného odběru), se nepřidá znovu
     for e in entries:
+        if e["url"] in active:
+            continue
+        active.add(e["url"])
         db.add(e["url"], source="subscription", status="queued", kind="video", title=e.get("title"),
                thumb_url=e.get("thumb_url"), channel=e.get("channel") or sub.get("title"), duration=e.get("duration"),
                sub_id=sub["id"], target_dir=sub["folder"], auto_confirm=1,

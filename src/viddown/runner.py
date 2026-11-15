@@ -189,9 +189,15 @@ class Runner:
         # 1) kontrola nových URL (vlastní limit, nezabírá sloty stahování)
         free = int(s.get("probe_concurrency", 2)) - len(self.probing)
         if free > 0 and self.db.kv_get("queue_pause_reason") != "cookies":
-            for job in self.db.query("select * from jobs where status='new' order by pos limit ?", (free,)):
+            for job in self.db.query("select * from jobs where status='new' and (not_before is null or not_before<=?) order by pos limit ?",
+                                     (now, free * 10)):
+                if free <= 0:
+                    break
+                if self.host_paused_until(job["url"]):                     # web nás omezil: kontrola počká (jinak by omezení jen prodlužovala)
+                    continue
                 self.db.update(job["id"], status="probing")
                 self.probing[job["id"]] = asyncio.create_task(self._probe(job))
+                free -= 1
 
         # 2) dostupnost cílové složky (např. odpojený NAS) – pozastaví a po obnovení zase pustí frontu
         await self._check_target(s)
@@ -239,7 +245,7 @@ class Runner:
         # 3b) odběry: kontrola nových videí (po jednom odběru, jen když fronta není pozastavená)
         hours = float(s.get("subscription_check_hours") or 0)
         if not qpaused and (self._sub_task is None or self._sub_task.done()) and schedule.allowed(s, "subscriptions", now, self.db):
-            sub = subscriptions.due(self.db, hours, now)
+            sub = subscriptions.due(self.db, hours, now, skip=self.host_paused_until)     # pozastavený web se zkontroluje později
             if sub:
                 self._sub_task = asyncio.create_task(self._check_sub(sub["id"]))
 
@@ -248,7 +254,8 @@ class Runner:
                 and self.cpu.mode != "eco" and window:
             job = self.db.query(
                 "select * from jobs where kind='video' and status='queued' and thumb_url is null and method is null "
-                "and coalesce(info,'') not like '%\"preview_tried\"%' order by pos limit 1")
+                "and coalesce(info,'') not like '%\"preview_tried\"%' order by pos limit 20")
+            job = [j for j in job if not self.host_paused_until(j["url"])][:1]       # pozastavený web náhledy nezatěžují
             if job:
                 self._prev_task = asyncio.create_task(self._preview(job[0]))
 
@@ -302,20 +309,29 @@ class Runner:
         now = time.time()
         return [{"host": h, "until": v["until"], "reason": v.get("reason")} for h, v in self.host_pause.items() if v["until"] > now]
 
-    def _rate_limited(self, job: dict, msg: str) -> None:
-        """Web omezil počet dotazů: úloha se vrací do fronty bez započtení pokusu a celý web se pozastaví na 15, 30, nakonec 60 minut
-        (YouTube hlásí omezení až na hodinu; zkoušet znovu za minutu by jen prodlužovalo omezení)."""
-        key = host_key(job["url"])
+    def host_paused_until(self, url_or_key: str) -> float:
+        """Do kdy je web pozastavený po omezení dotazů (0 = není). Platí pro stahování, kontrolu URL, náhledy, odběry i katalog."""
+        key = url_or_key if "/" not in url_or_key else host_key(url_or_key)
+        cur = self.host_pause.get(key)
+        return cur["until"] if cur and cur["until"] > time.time() else 0.0
+
+    def note_host_limit(self, url_or_key: str, msg: str) -> float:
+        """Web omezil počet dotazů: pozastaví se na 15, 30, nakonec 60 minut (YouTube hlásí omezení až na hodinu; zkoušet znovu za minutu
+        by jen prodlužovalo omezení). Souběžná hlášení téhož webu odklad nezvyšují. Vrací konec pauzy."""
+        key = url_or_key if "/" not in url_or_key else host_key(url_or_key)
         now = time.time()
         cur = self.host_pause.get(key)
-        if cur and cur["until"] > now:                                      # souběžné úlohy téhož webu nezvyšují odklad vícekrát
-            until = cur["until"]
-        else:
-            n = int(cur["n"]) if cur else 0
-            delay = (900, 1800, 3600)[min(n, 2)]
-            until = now + delay
-            self.host_pause[key] = {"until": until, "delay": delay, "n": n + 1, "reason": msg[:160]}
-            log.warning("%s: web omezil dotazy, stahování se pozastavilo o %d min (%s)", key, delay // 60, msg[:120])
+        if cur and cur["until"] > now:
+            return cur["until"]
+        n = int(cur["n"]) if cur else 0
+        delay = (900, 1800, 3600)[min(n, 2)]
+        self.host_pause[key] = {"until": now + delay, "delay": delay, "n": n + 1, "reason": msg[:160]}
+        log.warning("%s: web omezil dotazy, pozastaveno o %d min (%s)", key, delay // 60, msg[:120])
+        return now + delay
+
+    def _rate_limited(self, job: dict, msg: str) -> None:
+        """Web omezil počet dotazů: úloha se vrací do fronty bez započtení pokusu a celý web se pozastaví (viz `note_host_limit`)."""
+        until = self.note_host_limit(job["url"], msg)
         self.db.update(job["id"], status="queued", not_before=until, error=msg, error_kind="ratelimit", speed=None, eta=None)
 
     def temp_usage(self) -> int:
@@ -445,6 +461,14 @@ class Runner:
         cur = self.db.get(jid)
         if not cur or cur["status"] != "probing":
             return  # mezitím zrušeno
+        if res.get("type") == "none" and (is_rate_limited(res.get("error") or "") or res.get("error_kind") == "network"):
+            limited = is_rate_limited(res.get("error") or "")
+            tries = int(cur["attempts"] or 0) + (0 if limited else 1)
+            if limited or tries <= int(self.settings.get("auto_retry_attempts", 2)):
+                until = self.note_host_limit(cur["url"], res["error"]) if limited else time.time() + RETRY_DELAYS[min(tries - 1, len(RETRY_DELAYS) - 1)]
+                self.db.update(jid, status="new", attempts=tries, not_before=until, error=res.get("error"),
+                               error_kind="ratelimit" if limited else res.get("error_kind"))
+                return
         if res.get("resolved_url") and res["resolved_url"] != cur["url"]:
             # story odkazovala na jiné video: stahuje se jeho adresa, původní URL zůstává v info (origin_url)
             self.db.update(jid, url=res["resolved_url"])
@@ -553,9 +577,10 @@ class Runner:
         # videa, která už jsou ve frontě (z jiného playlistu nebo zadaná zvlášť), se nepřidávají podruhé
         seen: set[str] = set()
         kept = []
+        active = self.db.active_urls()                              # jeden dotaz místo dvou na každé video (velký kanál by zdržel smyčku)
         for e in entries:
             u = e.get("url")
-            if u and (u in seen or self.db.find_active_url(u)):
+            if u and (u in seen or u in active):
                 continue
             seen.add(u)
             kept.append(e)

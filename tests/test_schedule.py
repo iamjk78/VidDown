@@ -283,7 +283,7 @@ def test_queue_previews_wait_for_the_window_too(rt, monkeypatch):
 @pytest.mark.parametrize("scope,expect_call", [(["queue"], True), (["queue", "subscriptions"], False)])
 def test_subscription_checks_obey_the_schedule_only_when_in_scope(rt, monkeypatch, scope, expect_call):
     calls = []
-    monkeypatch.setattr(runner_mod.subscriptions, "due", lambda db, hours, now: calls.append(1))
+    monkeypatch.setattr(runner_mod.subscriptions, "due", lambda db, hours, now, **kw: calls.append(1))
     rt.settings.update({"schedule_enabled": True, "schedule_rules": closed_rules(), "schedule_scope": scope})
     asyncio.run(run_until(rt, lambda: bool(calls), timeout=1.5))
     assert bool(calls) is expect_call

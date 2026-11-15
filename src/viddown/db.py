@@ -418,6 +418,13 @@ class DB:
         where, args = self._history_where(q, status, days, sub)
         return self.query(f"select count(*) n from jobs{where}", args)[0]["n"]
 
+    def active_urls(self) -> set[str]:
+        """Adresy, které jsou ve frontě nebo se stahují (jedním dotazem; pro hromadné kontroly duplicit)."""
+        rows = self.query("select url from jobs where status in ('new','probing','confirm','queued','running') "
+                          "or (status='expanded' and exists(select 1 from jobs c where c.parent_id=jobs.id "
+                          "and c.status in ('new','probing','confirm','queued','running')))")
+        return {r["url"] for r in rows}
+
     def find_active_url(self, url: str) -> dict | None:
         r = self.query("select * from jobs where url=? and status in ('new','probing','confirm','queued','running') limit 1", (url,))
         if r:
