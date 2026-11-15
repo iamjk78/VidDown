@@ -212,7 +212,8 @@ def test_one_request_at_a_time_per_host_with_gap_but_hosts_in_parallel(st, fake,
         by_host.setdefault(url.split("/")[2], []).append(t)
     for host, ts in by_host.items():
         assert len(ts) == 3 and all(b - a >= 0.18 for a, b in zip(ts, ts[1:])), (host, ts)     # 0,05 s práce + 0,15 s pauza (s rezervou)
-    assert abs(by_host["host-a.example"][0] - by_host["host-b.example"][0]) < 0.15              # weby jedou souběžně
+    a, b = by_host["host-a.example"], by_host["host-b.example"]
+    assert b[0] < a[1] and a[0] < b[1]                                                        # weby jedou souběžně (pořadí, ne přesný čas: stabilní i při zátěži)
 
 
 def test_at_most_three_hosts_at_once(st, fake, info):

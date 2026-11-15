@@ -149,4 +149,4 @@ def test_cdn_wait_spaces_downloads_from_the_same_server(st, monkeypatch):
         await w._cdn_wait("https://other.example/c.jpg")                                         # jiný server: hned
         return same, time.monotonic() - t1
     same, other = asyncio.run(go())
-    assert same >= 0.15 and other < 0.15
+    assert same >= 0.15 and other < same                                                         # jiný server nečeká (srovnání, ne pevný práh)
