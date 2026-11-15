@@ -290,7 +290,16 @@ def cmd_backup(a) -> int:
         return 1
     print(f"Záloha: {p} ({fmt_bytes(p.stat().st_size)})")
     print("Pozor: obsahuje token Telegram bota, heslo a cookies. Ukládejte ji bezpečně a nesdílejte."
-          + ("" if a.plain else " Soubor je šifrovaný klíčem aplikace, otevře ho jen VidDown."))
+          + ("" if a.plain else " Soubor je šifrovaný klíčem této instalace; pro obnovu na jiném počítači si poznamenejte klíč záloh: "
+                                    "viddown backup-key"))
+    return 0
+
+
+def cmd_backup_key(a) -> int:
+    """Klíč záloh této instalace."""
+    from . import dtb
+    print(dtb.format_key(dtb.install_key(data_dir())))
+    print("Uložte si ho bezpečně (správce hesel). Bez něj zálohu z tohoto počítače jinde neobnovíte.", file=sys.stderr)
     return 0
 
 
@@ -301,14 +310,14 @@ def cmd_restore(a) -> int:
     zp = Path(a.file)
     remap = tuple(a.remap) if a.remap else None
     try:
-        man = backup.validate(zp)
+        man = backup.validate(zp, getattr(a, "key", None), data_dir())
         created = time.strftime("%d.%m.%Y %H:%M", time.localtime(man.get("created", 0)))
         print(f"Záloha z {created}, verze {man.get('app_version')}: {man.get('jobs')} úloh, {man.get('done')} stažených, "
               f"{man.get('subscriptions')} odběrů.")
         if man.get("path_hint"):
             print(f"Cesty stažených souborů v záloze začínají např.: {man['path_hint']}")
         if running_info() is not None:
-            backup.stage(data_dir(), zp)
+            backup.stage(data_dir(), zp, getattr(a, "key", None))
             if remap:
                 backup.set_remap(data_dir(), *remap)
             print("Aplikace běží: obnova je připravená a provede se při jejím dalším startu. Restartujte ji (Nastavení › Restartovat, "
@@ -317,7 +326,7 @@ def cmd_restore(a) -> int:
         if not a.yes and input("Nahradit aktuální data daty ze zálohy? Dosavadní stav se uloží do složky restore/. [a/N] ").lower() not in ("a", "y"):
             print("Zrušeno.")
             return 1
-        res = backup.apply(data_dir(), zp, remap)
+        res = backup.apply(data_dir(), zp, remap, getattr(a, "key", None))
     except backup.BackupError as e:
         print(f"Chyba: {e}", file=sys.stderr)
         return 1
@@ -425,6 +434,8 @@ def main(argv=None) -> int:
     sp.add_argument("file")
     sp.add_argument("--remap", nargs=2, metavar=("STARÁ", "NOVÁ"), help="přepíše začátek cest po přesunu na jiný stroj")
     sp.add_argument("--yes", "-y", action="store_true", help="bez potvrzení")
+    sp.add_argument("--key", help="klíč záloh původní instalace (jen u zálohy z jiného počítače)")
+    sub.add_parser("backup-key", help="vypíše klíč záloh této instalace (pro obnovu na jiném počítači)")
     sp = sub.add_parser("app", help="aktualizace kódu aplikace: verze, samotest, návrat")
     sp.add_argument("action", choices=["status", "check", "update", "token", "pack", "install", "selftest", "activate", "rollback", "unskip", "remove"])
     sp.add_argument("arg", nargs="?", help="verze nebo cesta k archivu")
@@ -462,7 +473,8 @@ def _dispatch(p, a) -> int:
         p.error("config set KLÍČ HODNOTA")
     return {"add": cmd_add, "queue": cmd_queue, "history": cmd_history, "engine": cmd_engine, "config": cmd_config,
             "password": cmd_password, "telegram": cmd_telegram, "autostart": cmd_autostart, "doctor": cmd_doctor,
-            "db": cmd_db, "app": cmd_app, "backup": cmd_backup, "restore": cmd_restore}[a.cmd](a)
+            "db": cmd_db, "app": cmd_app, "backup": cmd_backup, "restore": cmd_restore,
+            "backup-key": cmd_backup_key}[a.cmd](a)
 
 
 if __name__ == "__main__":

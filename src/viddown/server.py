@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse, urlsplit
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from starlette.background import BackgroundTask
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -632,7 +632,7 @@ def create_app(app_state) -> FastAPI:
         return _restore_status()
 
     @app.post("/api/restore")
-    async def restore_stage(file: UploadFile = File(...)):
+    async def restore_stage(file: UploadFile = File(...), key: str = Form("")):
         """Nahraje zálohu a ověří ji. Samotná obnova se provede až po potvrzení a restartu."""
         import shutil
         import tempfile
@@ -648,12 +648,21 @@ def create_app(app_state) -> FastAPI:
                             raise HTTPException(413, "Záloha je příliš velká.")
                         out.write(chunk)
             await asyncio.to_thread(save_upload)                              # velký soubor nezastaví smyčku událostí
-            man = await asyncio.to_thread(backup.stage, S.data, tmp)
+            man = await asyncio.to_thread(backup.stage, S.data, tmp, key.strip() or None)
+        except backup.KeyNeededError as e:
+            raise HTTPException(400, "KEY_NEEDED: " + str(e))                 # GUI se zeptá na klíč záloh a nahraje znovu
         except backup.BackupError as e:
             raise HTTPException(400, str(e))
         finally:
             tmp.unlink(missing_ok=True)
         return {"manifest": man}
+
+    @app.get("/api/backup/key")
+    async def backup_key():
+        """Klíč záloh této instalace (potřeba jen pro obnovu záloh na jiném počítači)."""
+        from . import dtb
+        k = await asyncio.to_thread(dtb.install_key, S.data)
+        return {"key": dtb.format_key(k)}
 
     @app.post("/api/restore/apply")
     async def restore_apply(req: Request):

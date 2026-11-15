@@ -1,6 +1,6 @@
 """Záloha a obnova dat aplikace (export a import).
 
-Záloha je soubor `VidDown_<datum>_<čas>.dtb` (ZIP zašifrovaný klíčem zabudovaným v aplikaci, viz `dtb.py`),
+Záloha je soubor `VidDown_<datum>_<čas>.dtb` (ZIP zašifrovaný klíčem této instalace, viz `dtb.py`),
 nebo na požádání obyčejný ZIP. Import přijímá oba formáty. Vnitřní ZIP obsahuje: `backup.json` (popis), `viddown.db` (konzistentní snapshot i za běhu), `settings.json`,
 `secrets.json`, `cookies.txt`, `archive.txt` a volitelně `thumbs/`. Enginy, logy a dočasné soubory se nezálohují.
 
@@ -31,6 +31,10 @@ KEEP_BEFORE = 3
 
 class BackupError(Exception):
     pass
+
+
+class KeyNeededError(BackupError):
+    """Záloha je zašifrovaná klíčem jiné instalace (je potřeba zadat její klíč záloh)."""
 
 
 def _rdir(data: Path) -> Path:
@@ -119,7 +123,7 @@ def create(data: Path, out: Path | None = None, include_thumbs: bool = False, en
                         zf.write(p, f"thumbs/{p.name}")
         if encrypt:
             enc = out.with_name(out.name + ".enc")
-            dtb.encrypt_file(part, enc)
+            dtb.encrypt_file(part, enc)          # klíč záloh této instalace (datová složka aplikace)
             os.replace(enc, out)
             part.unlink(missing_ok=True)
         else:
@@ -132,8 +136,9 @@ def create(data: Path, out: Path | None = None, include_thumbs: bool = False, en
 
 
 @contextlib.contextmanager
-def _plain_zip(path: Path):
-    """Obyčejný ZIP ze zálohy: `.dtb` se dešifruje do dočasného souboru, ZIP se použije přímo."""
+def _plain_zip(path: Path, key: str | None = None, data: Path | None = None):
+    """Obyčejný ZIP ze zálohy: `.dtb` se dešifruje do dočasného souboru (klíčem této instalace, případně zadaným klíčem
+    záloh jiné instalace), ZIP se použije přímo."""
     path = Path(path)
     if not dtb.is_dtb(path):
         yield path
@@ -143,7 +148,10 @@ def _plain_zip(path: Path):
     tmp = Path(name)
     try:
         try:
-            dtb.decrypt_file(path, tmp)
+            keys = [dtb.parse_key(key)] if key else []
+            dtb.decrypt_file(path, tmp, keys)
+        except dtb.KeyNeeded as e:
+            raise KeyNeededError(str(e)) from e
         except dtb.DtbError as e:
             raise BackupError(str(e)) from e
         yield tmp
@@ -151,9 +159,9 @@ def _plain_zip(path: Path):
         tmp.unlink(missing_ok=True)
 
 
-def validate(path: Path) -> dict:
+def validate(path: Path, key: str | None = None, data: Path | None = None) -> dict:
     """Ověří zálohu (`.dtb` i ZIP): struktura, bezpečné názvy, velikost, integrita databáze, verze schématu."""
-    with _plain_zip(path) as zp:
+    with _plain_zip(path, key, data) as zp:
         return _validate_zip(zp)
 
 
@@ -246,10 +254,10 @@ def _remap_all(data: Path, old: str, new: str) -> dict:
     return n
 
 
-def apply(data: Path, zip_path: Path, remap: tuple[str, str] | None = None) -> dict:
+def apply(data: Path, zip_path: Path, remap: tuple[str, str] | None = None, key: str | None = None) -> dict:
     """Obnoví data ze zálohy. Dosavadní stav uloží do `<data>/restore/before-<čas>/`. Aplikace nesmí běžet."""
     data = Path(data)
-    man = validate(zip_path)
+    man = validate(zip_path, key, data)
     before = _rdir(data) / f"before-{time.strftime('%Y%m%d-%H%M%S')}"
     before.mkdir(parents=True, exist_ok=True)
     db = data / "viddown.db"
@@ -258,7 +266,7 @@ def apply(data: Path, zip_path: Path, remap: tuple[str, str] | None = None) -> d
     for name in FILES:
         if (data / name).is_file():
             shutil.copy2(data / name, before / name)
-    with _plain_zip(zip_path) as zp, zipfile.ZipFile(zp) as zf:
+    with _plain_zip(zip_path, key, data) as zp, zipfile.ZipFile(zp) as zf:
         for suf in ("", "-wal", "-shm"):
             Path(str(db) + suf).unlink(missing_ok=True)
         for name in zf.namelist():
@@ -280,12 +288,19 @@ def apply(data: Path, zip_path: Path, remap: tuple[str, str] | None = None) -> d
 
 
 # --- obnova za běhu: příprava a provedení při startu -------------------------------------------
-def stage(data: Path, zip_path: Path) -> dict:
-    """Ověří zálohu a připraví ji k obnově při dalším startu. Nic zatím nemění."""
-    man = validate(zip_path)
-    d = _rdir(data)
-    d.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(zip_path, d / "pending.zip")
+def stage(data: Path, zip_path: Path, key: str | None = None) -> dict:
+    """Ověří zálohu a připraví ji k obnově při dalším startu. Nic zatím nemění. Šifrovaná záloha se znovu zašifruje klíčem
+    této instalace, takže obnova při startu nepotřebuje klíč záloh jiné instalace."""
+    data = Path(data)
+    with _plain_zip(zip_path, key, data) as zp:
+        man = _validate_zip(zp)
+        d = _rdir(data)
+        d.mkdir(parents=True, exist_ok=True)
+        dst = d / "pending.zip"
+        if dtb.is_dtb(zip_path):                                     # i připravená obnova zůstane šifrovaná (klíčem této instalace)
+            dtb.encrypt_file(zp, dst)
+        else:
+            shutil.copyfile(zp, dst)
     (d / "pending.json").write_text(json.dumps({"manifest": man, "remap": None, "staged": time.time()},
                                                ensure_ascii=False), "utf-8")
     return man

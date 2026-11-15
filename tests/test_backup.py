@@ -260,10 +260,14 @@ def test_cli_backup_and_restore(tmp_path, monkeypatch, capsys):
     z = tmp_path / "out.zip"
     assert cli.main(["backup", str(z)]) == 0
     assert "Pozor" in capsys.readouterr().out and z.exists()
+    assert cli.main(["backup-key"]) == 0
+    key = capsys.readouterr().out.strip()                          # klíč záloh původní instalace
     dst = tmp_path / "novy"
     monkeypatch.setenv("VIDDOWN_DATA", str(dst))
     monkeypatch.setattr("viddown.daemon.running_info", lambda: None)
-    assert cli.main(["restore", str(z), "--yes", "--remap", "/nas/Videa", "/downloads"]) == 0
+    assert cli.main(["restore", str(z), "--yes"]) == 1              # jiná instalace: bez klíče záloh to nejde
+    assert "klíč" in capsys.readouterr().err
+    assert cli.main(["restore", str(z), "--yes", "--remap", "/nas/Videa", "/downloads", "--key", key]) == 0
     out = capsys.readouterr().out
     assert "Obnoveno" in out and "filepath 1" in out
     assert DB(dst / "viddown.db").query("select filepath from jobs")[0]["filepath"] == "/downloads/v0.mp4"
@@ -274,10 +278,12 @@ def test_cli_restore_while_running_only_stages(tmp_path, monkeypatch, capsys):
     from viddown import cli
     src = make_data(tmp_path / "a")
     z = backup.create(src, tmp_path / "out.zip")
+    from viddown import dtb
+    key = dtb.format_key(dtb.install_key())
     dst = make_data(tmp_path / "b", paths=("/stary",), token="STARY")
     monkeypatch.setenv("VIDDOWN_DATA", str(dst))
     monkeypatch.setattr("viddown.daemon.running_info", lambda: {"pid": 1})
-    assert cli.main(["restore", str(z)]) == 0
+    assert cli.main(["restore", str(z), "--key", key]) == 0
     assert "při jejím dalším startu" in capsys.readouterr().out
     assert backup.pending(dst) is not None
     assert json.loads((dst / "secrets.json").read_text())["telegram_token"] == "STARY"

@@ -1,4 +1,4 @@
-"""Šifrovaný formát zálohy .dtb (klíč zabudovaný v aplikaci)."""
+"""Šifrovaný formát zálohy .dtb (v2: klíč záloh instalace; v1: starší zálohy se zabudovaným klíčem jen ke čtení)."""
 import os
 import re
 import sqlite3
@@ -56,7 +56,7 @@ def test_tampering_is_detected(tmp_path):
     flipped[len(raw) // 2] ^= 0xFF
     check(bytes(flipped), "poškozená|změněna")
     check(raw[:-5], "poškozená")                                   # zkrácený poslední blok
-    hl = len(dtb.MAGIC) + 20                                       # hlavička: magic + sůl + předpona nonce
+    hl = len(dtb.MAGIC) + 28                                       # hlavička v2: magic + otisk klíče + sůl + předpona nonce
     first_len = int.from_bytes(raw[hl:hl + 4], "big")
     check(raw[:hl + 4 + first_len], "poškozená|změněna")           # useknuto přesně na hranici bloku
     # přehození dvou bloků
