@@ -1,0 +1,102 @@
+# Vydání VidDown: po odeslání značky v<verze> (nebo ručně tlačítkem „Run workflow“) GitHub sestaví
+#   1) archiv kódu aplikace + manifest pro aktualizace zevnitř aplikace,
+#   2) Docker obraz pro Intel/AMD (linux/amd64) i ARM (linux/arm64) → ghcr.io/iamjk78/viddown:<verze> a :latest,
+#   3) GitHub Release v<verze> s archivem a manifestem (z něj si aplikace bere aktualizace).
+#
+# Postup: zvyšte verzi v src/viddown/__init__.py, commitněte a pošlete značku:
+#   git tag v0.2.0 && git push origin main v0.2.0
+# Ručně z Macu jde totéž bez GitHub Actions: scripts/release.sh
+name: Vydání
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write     # vytvoření vydání
+  packages: write     # nahrání obrazu do ghcr.io
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/viddown
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verze a kontrola značky
+        id: v
+        run: |
+          VERSION="$(python3 -c "import re;print(re.search(r'__version__ = \"(.+?)\"', open('src/viddown/__init__.py').read()).group(1))")"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "rev=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "${GITHUB_REF_NAME}" != "v$VERSION" ]; then
+            echo "Značka ${GITHUB_REF_NAME} neodpovídá verzi v src/viddown/__init__.py ($VERSION)." >&2
+            exit 1
+          fi
+          PREV="$(git describe --tags --abbrev=0 --match 'v*' HEAD^ 2>/dev/null || true)"
+          echo "prev=$PREV" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Archiv aplikace a manifest
+        run: |
+          python -m pip install --quiet .
+          mkdir -p dist/release
+          python -m viddown.cli app pack "dist/release/viddown-${{ steps.v.outputs.version }}.zip" \
+            --commit "${{ steps.v.outputs.rev }}" --json dist/release/manifest.json
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker obraz (Intel + ARM)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: false
+          tags: |
+            ${{ env.IMAGE }}:${{ steps.v.outputs.version }}
+            ${{ env.IMAGE }}:latest
+          labels: |
+            org.opencontainers.image.title=VidDown
+            org.opencontainers.image.version=${{ steps.v.outputs.version }}
+            org.opencontainers.image.revision=${{ steps.v.outputs.rev }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.description=Stahování videí z webu, fronta, katalog a Telegram bot
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          V="${{ steps.v.outputs.version }}"
+          PREV="${{ steps.v.outputs.prev }}"
+          if [ -n "$PREV" ]; then NOTES="$(git log --pretty='- %s' "$PREV"..HEAD)"; else NOTES="$(git log --pretty='- %s' -n 20)"; fi
+          NOTES="$NOTES
+
+          Docker: ghcr.io/${{ github.repository_owner }}/viddown:$V (Intel/AMD i ARM)"
+          if gh release view "v$V" >/dev/null 2>&1; then
+            gh release upload "v$V" dist/release/* --clobber
+          else
+            gh release create "v$V" dist/release/* --target "$(git rev-parse HEAD)" --title "VidDown $V" --notes "$NOTES"
+          fi

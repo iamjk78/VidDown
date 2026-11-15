@@ -10,3 +10,9 @@ tests
 *.pyc
 data
 downloads
+docker-compose.override.yml
+.github
+scripts
+packaging
+docs
+PLAN.md

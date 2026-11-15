@@ -17,3 +17,10 @@ def test_engine_log_keeps_the_reading_position_and_ignores_late_responses():
 
 def test_queue_order_can_be_changed_with_the_keyboard():
     assert "e.altKey" in APP_JS and "ArrowUp" in APP_JS and 'tabindex="0"' in APP_JS
+
+
+def test_first_run_wizard_explains_docker_folders_cookies_and_summary():
+    body = APP_JS[APP_JS.index("function openWizard"):APP_JS.index("/* ------------------------------------------------------------ enginy")]
+    assert "const N = 6" in body and "S().docker" in body and "/downloads" in body
+    assert "id=\"wck\"" in body and "/api/settings/cookies" in body                  # nahrání cookies přímo v průvodci
+    assert "VIDDOWN_PASSWORD" in body and "Volné místo" in body                      # shrnutí: složka, místo, heslo

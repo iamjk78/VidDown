@@ -1993,7 +1993,7 @@ function openToken(after) {
 
 /* ------------------------------------------------------------ průvodce prvním spuštěním */
 function openWizard() {
-  let step = 0; const N = 5;
+  let step = 0; const N = 6;
   const m = modal('', 'wide nodismiss');
   const S = () => App.settings;
   const steps = [
@@ -2004,7 +2004,7 @@ function openWizard() {
       <li>${T('<b>Telegram:</b> pošlete botovi odkaz a on video stáhne.', '<b>Telegram:</b> send a link to the bot and it downloads the video.')}</li>
       <li>${T('<b>Miniatura</b> se uloží jako JPG vedle každého videa.', 'A <b>JPG thumbnail</b> is saved next to each video.')}</li>
       <li>${T('<b>Enginy</b> (yt-dlp, Deno, ffmpeg) se aktualizují samy a při chybě se vrátí k funkční verzi.', '<b>Engines</b> (yt-dlp, Deno, ffmpeg) update themselves and roll back on failure.')}</li></ul></div>`,
-    () => `<div class="mh">${ic('folder', 20)}<h2>${T('Kam ukládat videa', 'Where to save videos')}</h2></div><div class="mb" id="wf">${fieldHtml({ k: 'download_dir', type: 'path', label: ['Cílová složka', 'Download folder'] }, S())}
+    () => `<div class="mh">${ic('folder', 20)}<h2>${T('Kam ukládat videa', 'Where to save videos')}</h2></div><div class="mb" id="wf">${S().docker ? `<div class="banner info" style="margin-bottom:12px">${ic('folder', 16)}<span class="grow fs13">${T('VidDown běží v Dockeru a vidí jen složky, které jste mu při instalaci připojili. <b>/downloads</b> je složka, kterou jste vytvořili pro videa (na NAS nebo v počítači) – nechte ji tak, pokud nevíte, že chcete jinou. Jiné připojené složky najdete tlačítkem Vybrat.', 'VidDown runs in Docker and only sees folders you connected during installation. <b>/downloads</b> is the folder you created for videos (on the NAS or computer) – keep it unless you know you want another. Other connected folders are under Choose.')}</span></div>` : ''}${fieldHtml({ k: 'download_dir', type: 'path', label: ['Cílová složka', 'Download folder'] }, S())}
       ${fieldHtml({ k: 'quality', type: 'seg', opts: [['max', ['Maximální', 'Maximum']], ['compat', ['Kompatibilita', 'Compatibility']]], label: ['Kvalita', 'Quality'], hint: ['Maximální = nejvyšší rozlišení (MKV, když se kodeky nevejdou do MP4)', 'Maximum = highest resolution (MKV when codecs do not fit MP4)'] }, S())}
       ${fieldHtml({ k: 'channel_folder', type: 'toggle', label: ['Kanály do samostatné složky', 'Channels into their own folder'] }, S())}${fieldHtml({ k: 'playlist_folder', type: 'toggle', label: ['Playlisty do samostatné složky', 'Playlists into their own folder'] }, S())}</div>`,
     () => `<div class="mh">${ic('download', 20)}<h2>${T('Jak stahovat', 'How to download')}</h2></div><div class="mb" id="wf">${fieldHtml({ k: 'concurrency', type: 'stepper', label: ['Souběžná stahování', 'Parallel downloads'], hint: ['Kolik videí z čela fronty se stahuje najednou', 'How many videos download at once'] }, S())}
@@ -2018,13 +2018,30 @@ function openWizard() {
       <div class="col gap8" style="margin-top:10px"><input class="input mono" id="wtok" placeholder="${S().telegram_token_set ? T('Token je uložen – nový vložte jen pro změnu', 'Token saved – paste only to change') : '123456789:AA…'}">
       <input class="input mono" id="wchat" placeholder="chat ID" value="${esc(S().values.telegram_chat_id)}"></div>
       <p class="fs12 muted">${T('Pomocí bota jde stejně jako v GUI přidávat odkazy. Bot vám napíše, kolik videí našel a v jakém rozlišení, a pak už jen hlásí chyby.', 'The bot adds links like the GUI does. It tells you how many videos it found and in which resolution, then only reports errors.')}</p></div>`,
-    () => `<div class="mh">${ic('check', 20)}<h2>${T('Hotovo', 'All set')}</h2></div><div class="mb help">
+    () => `<div class="mh">${ic('lock', 20)}<h2>${T('Přihlášení k YouTube (volitelné)', 'YouTube sign-in (optional)')}</h2></div><div class="mb help">
+      <p>${T('Videa s <b>věkovým omezením</b> (a některá další) YouTube stáhnout nedovolí bez přihlášení. Přihlášení se předává souborem <b>cookies.txt</b>. Když ho teď nemáte, krok přeskočte – nahrát ho jde kdykoli v Nastavení › Pokročilé.', 'Videos with an <b>age restriction</b> (and some others) cannot be downloaded from YouTube without signing in. The sign-in is passed as a <b>cookies.txt</b> file. If you do not have it now, skip this step – you can upload it any time in Settings › Advanced.')}</p>
+      <ol><li>${T('V prohlížeči otevřete <b>anonymní okno</b> a přihlaste se na youtube.com.', 'Open a <b>private window</b> in your browser and sign in to youtube.com.')}</li>
+      <li>${T('Rozšířením „Get cookies.txt LOCALLY“ (Chrome, Edge) nebo „cookies.txt“ (Firefox) uložte cookies do souboru.', 'Save the cookies to a file with the “Get cookies.txt LOCALLY” extension (Chrome, Edge) or “cookies.txt” (Firefox).')}</li>
+      <li>${T('Anonymní okno zavřete (nepřihlašujte se v něm znovu) a soubor nahrajte tlačítkem níže.', 'Close the private window (do not sign in there again) and upload the file below.')}</li></ol>
+      <div class="row gap10" style="margin-top:10px"><label class="btn">${ic('cookie', 14)} ${T('Nahrát cookies.txt', 'Upload cookies.txt')}<input type="file" id="wck" accept=".txt,text/plain" hidden></label>
+      <span class="fs13 ${S().cookies_file && S().cookies_file.exists ? '' : 'muted'}">${S().cookies_file && S().cookies_file.exists ? ic('check', 13) + ' ' + T('Soubor je nahraný', 'File uploaded') : T('Zatím nenahráno', 'Not uploaded yet')}</span></div></div>`,
+    () => {
+      const v = S().values, disk = (App.st && App.st.disk) || {};
+      const tg = S().telegram_token_set && v.telegram_chat_id;
+      const free = disk.target_reliable && disk.target_free != null ? fmtBytes(disk.target_free) : T('nelze zjistit', 'unknown');
+      const pw = S().has_password ? (S().docker ? T('nastavené v souboru <code>docker-compose.yml</code> (řádek <code>VIDDOWN_PASSWORD</code>); změníte ho tam a projekt v Dockeru restartujete', 'set in <code>docker-compose.yml</code> (the <code>VIDDOWN_PASSWORD</code> line); change it there and restart the project in Docker') : T('nastavené (změníte v Nastavení › Telegram a síť)', 'set (change it in Settings › Telegram & network)')) : T('bez hesla – GUI je dostupné jen z tohoto počítače', 'no password – the GUI is only reachable from this computer');
+      const row = (k, val) => `<div class="row gap10" style="padding:6px 0;border-top:1px solid var(--border)"><span class="t2" style="min-width:150px">${k}</span><span class="grow">${val}</span></div>`;
+      return `<div class="mh">${ic('check', 20)}<h2>${T('Hotovo', 'All set')}</h2></div><div class="mb help">
+      <div class="card" style="padding:8px 14px;margin-bottom:12px">${row(T('Videa se ukládají do', 'Videos are saved to'), `<code>${esc(v.download_dir)}</code>`)}${row(T('Volné místo', 'Free space'), free)}
+        ${row(T('Kvalita', 'Quality'), v.quality === 'compat' ? T('Kompatibilita', 'Compatibility') : T('Maximální', 'Maximum'))}${row('Telegram', tg ? T('zapnutý', 'on') : T('nenastavený (volitelné)', 'not set (optional)'))}
+        ${row(T('Přihlášení YouTube', 'YouTube sign-in'), S().cookies_file && S().cookies_file.exists ? T('nahrané', 'uploaded') : T('nenahrané (volitelné)', 'not uploaded (optional)'))}${row(T('Heslo do aplikace', 'App password'), pw)}</div>
       <p>${T('Vložte odkaz do pole <b>Fronta › Vložte URL</b> a stiskněte Enter. Můžete vložit i víc odkazů najednou.', 'Paste a link into <b>Queue › Paste URL</b> and press Enter. You can paste several at once.')}</p>
       <ul><li>${T('<b>Fronta</b> – průběh, pořadí (přetažením), pauza a odstranění položek.', '<b>Queue</b> – progress, drag to reorder, pause and remove items.')}</li>
       <li>${T('<b>Historie</b> – hotová a neúspěšná stahování, opakování.', '<b>History</b> – finished and failed downloads, retry.')}</li>
       <li>${T('<b>Nastavení</b> – pojmenování, plánování, cookies, Telegram a další.', '<b>Settings</b> – naming, schedule, cookies, Telegram and more.')}</li>
       <li>${T('<b>Enginy</b> – verze, aktualizace a návrat k předchozí verzi.', '<b>Engines</b> – versions, updates and rollback.')}</li>
-      <li>${T('<b>Nápověda</b> – podrobný popis všech funkcí. Průvodce spustíte znovu odtud.', '<b>Help</b> – all features explained. Restart this guide from there.')}</li></ul></div>`,
+      <li>${T('<b>Nápověda</b> – podrobný popis všech funkcí. Průvodce spustíte znovu odtud.', '<b>Help</b> – all features explained. Restart this guide from there.')}</li></ul></div>`;
+    },
   ];
   const draw = () => {
     m.el.innerHTML = steps[step]() + `<div class="mf"><div class="steps" style="margin-right:auto">${Array.from({ length: N }, (_, i) => `<i class="${i <= step ? 'on' : ''}"></i>`).join('')}</div>
@@ -2033,6 +2050,13 @@ function openWizard() {
     const wf = $('#wf', m.el); if (wf) bindSettings(wf, draw);
     const sk = $('#wskip', m.el); if (sk) sk.onclick = finish;
     const bk = $('#wback', m.el); if (bk) bk.onclick = () => { step--; draw(); };
+    const ck = $('#wck', m.el);
+    if (ck) ck.onchange = async () => {
+      const f = ck.files && ck.files[0]; if (!f) return;
+      const fd = new FormData(); fd.append('file', f);
+      const r = await act(() => api('/api/settings/cookies', { method: 'POST', body: fd }), T('Cookies nahrány', 'Cookies uploaded'));
+      if (r) { App.settings = r; draw(); }
+    };
     $('#wnext', m.el).onclick = async () => {
       if (step === 3) {
         const tok = $('#wtok').value.trim(), chat = $('#wchat').value.trim();
