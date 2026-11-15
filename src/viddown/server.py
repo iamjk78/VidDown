@@ -54,7 +54,9 @@ def create_app(app_state) -> FastAPI:
 
     # ------------------------------------------------------------ přihlášení
     def token() -> str:
-        return hmac.new(S.secrets.session_key().encode(), b"viddown-session", hashlib.sha256).hexdigest()
+        # součástí je i heslo z prostředí: jeho změna zneplatní už vydaná sezení
+        pw = (os.environ.get("VIDDOWN_PASSWORD") or "").encode()
+        return hmac.new(S.secrets.session_key().encode(), b"viddown-session" + pw, hashlib.sha256).hexdigest()
 
     def authed(req: Request) -> bool:
         if not S.secrets.has_password():
@@ -205,6 +207,8 @@ def create_app(app_state) -> FastAPI:
         async def gen():
             last = None
             while not getattr(S, "stopping", False) and not await req.is_disconnected():
+                if not authed(req):                                      # odhlášení nebo změna hesla ukončí i už otevřený proud
+                    return
                 st = await asyncio.to_thread(state)
                 payload = json.dumps(st, ensure_ascii=False, default=str)
                 h = hashlib.md5(payload.encode()).hexdigest()
@@ -610,13 +614,15 @@ def create_app(app_state) -> FastAPI:
         fd, name = tempfile.mkstemp(suffix=".zip", prefix="vd-restore-")
         tmp = Path(name)
         try:
-            with os.fdopen(fd, "wb") as out:                                   # fdopen převezme (a zavře) deskriptor z mkstemp
-                total = 0
-                while chunk := file.file.read(1 << 20):
-                    total += len(chunk)
-                    if total > MAX_RESTORE_BYTES:
-                        raise HTTPException(413, "Záloha je příliš velká.")
-                    out.write(chunk)
+            def save_upload() -> None:
+                with os.fdopen(fd, "wb") as out:                               # fdopen převezme (a zavře) deskriptor z mkstemp
+                    total = 0
+                    while chunk := file.file.read(1 << 20):
+                        total += len(chunk)
+                        if total > MAX_RESTORE_BYTES:
+                            raise HTTPException(413, "Záloha je příliš velká.")
+                        out.write(chunk)
+            await asyncio.to_thread(save_upload)                              # velký soubor nezastaví smyčku událostí
             man = await asyncio.to_thread(backup.stage, S.data, tmp)
         except backup.BackupError as e:
             raise HTTPException(400, str(e))
@@ -878,6 +884,8 @@ def create_app(app_state) -> FastAPI:
     @app.post("/api/app/rollback")
     async def app_rollback(req: Request):
         body = await req.json() if (await req.body()) else {}
+        if body.get("restore_db") and S.runner.running:
+            raise HTTPException(409, "Obnova databáze za běhu stahování není možná – nejdřív pozastavte frontu a počkejte na doběhnutí úloh.")
         return await _app_call(updater.do_rollback, S, bool(body.get("restore_db")))
 
     @app.post("/api/app/unskip")
@@ -1012,6 +1020,8 @@ def create_app(app_state) -> FastAPI:
             raise HTTPException(400, "V Dockeru nelze číst cookies z prohlížeče – aplikace neběží na stejném počítači "
                                      "jako prohlížeč. Exportujte cookies do souboru cookies.txt a nahrajte ho.")
         await validate_dirs(changes)
+        if changes.get("selftest_url") and not str(changes["selftest_url"]).lower().startswith(("http://", "https://")):
+            raise HTTPException(400, "Adresa kontrolního videa musí začínat http:// nebo https://.")
         if changes.get("network_access") and not S.secrets.has_password():
             raise HTTPException(400, "Nastavte nejdřív heslo do GUI.")
         try:
@@ -1050,16 +1060,18 @@ def create_app(app_state) -> FastAPI:
 
     @app.post("/api/settings/cookies")
     async def upload_cookies(file: UploadFile = File(...)):
-        data = await file.read()
+        data = await file.read(5 * 1024 * 1024 + 1)
+        if len(data) > 5 * 1024 * 1024:
+            raise HTTPException(413, "Soubor s cookies je příliš velký.")
         text = data.decode("utf-8", "replace")
         if "\t" not in text:
             raise HTTPException(400, "Soubor nevypadá jako cookies.txt (formát Netscape).")
         cp = cookies_path()
-        cp.write_text(text, encoding="utf-8")
-        try:
-            os.chmod(cp, 0o600)
-        except OSError:
-            pass
+        tmpc = cp.with_suffix(".tmp")
+        fd = os.open(tmpc, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)        # práva 600 od vzniku, zápis atomicky
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmpc, cp)
         S.settings.update({"cookies_mode": "file"})
         S.db.kv_set("yt_cookies_bad", None)
         S.db.kv_set("yt_cookies_notice_at", None)       # nové cookies: příští neplatnost se oznámí hned
@@ -1080,13 +1092,18 @@ def create_app(app_state) -> FastAPI:
     @app.post("/api/settings/import")
     async def import_settings(file: UploadFile = File(...)):
         try:
-            d = json.loads((await file.read()).decode("utf-8"))
+            raw = await file.read(1024 * 1024 + 1)
+            if len(raw) > 1024 * 1024:
+                raise HTTPException(413, "Soubor nastavení je příliš velký.")
+            d = json.loads(raw.decode("utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError):
             raise HTTPException(400, "Neplatný soubor nastavení.")
         locked = S.settings.locked_keys()
         if not isinstance(d, dict):
             raise HTTPException(400, "Neplatný soubor nastavení.")
-        skip = {"network_access", "app_update_repo", "app_update_mode"}          # cizí soubor nesmí změnit zdroj aktualizací ani dostupnost ze sítě
+        # cizí soubor nesmí změnit zdroj aktualizací, dostupnost ze sítě, proxy (přesměrování provozu), Telegram ani adresu kontrolního videa
+        skip = {"network_access", "app_update_repo", "app_update_mode", "proxy", "telegram_chat_id", "selftest_url", "cookies_mode",
+                "catalog_proxy_fallback"}
         if in_docker():
             skip |= {"port", "host"}                                           # mapování portů a healthcheck kontejneru mají pevný port
         changes = {k: v for k, v in d.items() if k in DEFAULTS and k not in locked and k not in skip}

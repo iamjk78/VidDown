@@ -162,6 +162,8 @@ ENV_MAP = {
 
 _lock = threading.RLock()
 
+RANGES = {"port": (1, 65535), "probe_concurrency": (1, 16)}           # další meze se přidávají sem; mimo rozsah = chyba při ukládání, oříznutí při čtení
+
 
 def _coerce(default, value):
     """Převede hodnotu na typ výchozí hodnoty. Vyhodí ValueError při nesmyslu."""
@@ -172,9 +174,15 @@ def _coerce(default, value):
             return bool(value)
         return str(value).strip().lower() in ("1", "true", "yes", "ano", "on")
     if isinstance(default, int):
-        return int(float(value))
+        try:
+            return int(float(value))
+        except OverflowError:                                          # „1e309“ → inf
+            raise ValueError("číslo je mimo rozsah")
     if isinstance(default, float):
-        return float(value)
+        f = float(value)
+        if f != f or f in (float("inf"), float("-inf")):
+            raise ValueError("číslo je mimo rozsah")
+        return f
     if isinstance(default, list):
         if isinstance(value, list):
             items = value
@@ -233,6 +241,8 @@ class Settings:
                     except (TypeError, ValueError):
                         pass
             out["concurrency"] = max(1, min(16, out["concurrency"]))
+            for k, (lo, hi) in RANGES.items():
+                out[k] = max(lo, min(hi, out[k]))
             return out
 
     def __getitem__(self, key):
@@ -253,6 +263,8 @@ class Settings:
                     val = [x for x in dict.fromkeys(val)]
                     if not val or any(x not in schedule.SCOPES for x in val):
                         raise ValueError(f"schedule_scope must be a non-empty subset of {schedule.SCOPES}")
+                if k in RANGES and not (RANGES[k][0] <= val <= RANGES[k][1]):
+                    raise ValueError(f"{k} must be between {RANGES[k][0]} and {RANGES[k][1]}")
                 if k in CHOICES and val not in CHOICES[k]:
                     raise ValueError(f"invalid value for {k}: {val}")
                 if k in ("schedule_start", "schedule_end"):
@@ -315,28 +327,40 @@ class Secrets:
 
     def __init__(self, path: Path | None = None):
         self.path = path or data_dir() / "secrets.json"
+        self._cache: dict | None = None          # poslední úspěšně načtený obsah
+        self._unreadable = False                 # soubor teď nejde přečíst (a nemáme z čeho vycházet)
 
     def _load(self) -> dict:
         try:
             d = json.loads(self.path.read_text(encoding="utf-8"))
             if not isinstance(d, dict):
                 raise ValueError("tajemství nejsou objekt")
-            return d
         except FileNotFoundError:
+            d = {}
+        except OSError:                          # přechodná chyba čtení: nic se nepřepisuje a heslo se nevypíná
+            if self._cache is not None:
+                return dict(self._cache)
+            self._unreadable = True
             return {}
-        except (ValueError, OSError):
+        except ValueError:
             _keep_corrupt(self.path)
-            return {}
+            d = {}
+        self._unreadable = False
+        self._cache = dict(d)
+        return d
 
     def _save(self, d: dict) -> None:
+        if self._unreadable:                     # soubor se nepodařilo přečíst: zápis by smazal hash hesla a tokeny
+            raise OSError("tajemství nelze přečíst, zápis se odmítá")
         with _lock:
             tmp = self.path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(d), encoding="utf-8")
-            try:
-                os.chmod(tmp, 0o600)
-            except OSError:
-                pass
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)      # práva od vzniku, ne až dodatečně
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(json.dumps(d))
+                f.flush()
+                os.fsync(f.fileno())
             os.replace(tmp, self.path)
+        self._cache = dict(d)
 
     # --- telegram
     @property
@@ -363,7 +387,10 @@ class Secrets:
 
     # --- heslo do GUI
     def has_password(self) -> bool:
-        return bool(os.environ.get("VIDDOWN_PASSWORD") or self._load().get("password_hash"))
+        if os.environ.get("VIDDOWN_PASSWORD"):
+            return True
+        d = self._load()
+        return bool(d.get("password_hash")) or self._unreadable             # nečitelný soubor: raději heslo vyžadovat
 
     def set_password(self, password: str) -> None:
         d = self._load()
@@ -395,6 +422,8 @@ class Secrets:
 
     def session_key(self) -> str:
         d = self._load()
+        if self._unreadable:                                          # nečitelný soubor: nikdo se nepřihlásí a nic se nezapisuje
+            return pysecrets.token_hex(32)
         if not d.get("session_key"):
             d["session_key"] = pysecrets.token_hex(32)
             self._save(d)

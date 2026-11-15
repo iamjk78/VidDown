@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
+from .. import netsafe
 from ..util import classify_error, is_hls_response
 from . import Cancelled, Ctx, ProcHolder, ResolveError, subprocess_kwargs
 
@@ -138,10 +139,19 @@ def parse_netscape_cookies(path: Path) -> list[dict]:
     return out
 
 
-async def add_cookies(context, path: Path) -> int:
-    """Načte cookies.txt do prohlížeče po jedné; vadná položka nezahodí ostatní. Vrací počet načtených."""
+def cookie_applies(domain: str, host: str) -> bool:
+    d = (domain or "").lstrip(".").lower()
+    h = (host or "").lower()
+    return bool(d) and (h == d or h.endswith("." + d))
+
+
+async def add_cookies(context, path: Path, host: str | None = None) -> int:
+    """Načte cookies.txt do prohlížeče po jedné; vadná položka nezahodí ostatní. S `host` se načtou jen cookies, které platí pro
+    tento web (ostatní přihlášení z cookies.txt do prohlížeče nepatří). Vrací počet načtených."""
     ok = bad = 0
     for ck in parse_netscape_cookies(path):
+        if host is not None and not cookie_applies(ck["domain"], host):
+            continue
         try:
             await context.add_cookies([ck])
             ok += 1
@@ -267,6 +277,49 @@ async def render_html(url: str, ctx: Ctx, scrolls: int = 6) -> tuple[str, str]:
         return await r.render(url, scrolls)
 
 
+async def guard_routes(context, start_url: str) -> None:
+    """Prohlížeč smí jen na veřejné weby (ne do místní sítě, na metadata cloudu, `file:` apod.). Web, který uživatel zadal, se nekontroluje;
+    přesměrování a podpožadavky na jiné adresy ano (stránka z internetu jinak může skenovat místní síť)."""
+    start_host = (urlparse(start_url).hostname or "").lower()
+    cache: dict[str, bool] = {start_host: True}
+
+    async def handler(route):
+        u = route.request.url
+        if u.startswith(("data:", "blob:", "about:")):
+            await route.continue_()
+            return
+        try:
+            host = (urlparse(u).hostname or "").lower()
+        except ValueError:
+            host = ""
+        if not u.startswith(("http://", "https://")) or not host:
+            await route.abort()
+            return
+        ok = cache.get(host)
+        if ok is None:
+            ok = await asyncio.to_thread(netsafe.host_ok, u)
+            cache[host] = ok
+            if not ok:
+                log.warning("sniffer: požadavek na neveřejnou adresu zablokován (%s)", host)
+        if ok:
+            await route.continue_()
+        else:
+            await route.abort()
+    await context.route("**/*", handler)
+
+
+async def candidate_ok(url: str, referer: str) -> bool:
+    """Adresa kandidáta pro ffmpeg: jen http(s) a veřejný hostitel (nebo stejný web, jaký uživatel zadal)."""
+    try:
+        h = (urlparse(url).hostname or "").lower()
+        rh = (urlparse(referer).hostname or "").lower()
+    except ValueError:
+        return False
+    if not url.lower().startswith(("http://", "https://")) or not h:
+        return False
+    return h == rh or await asyncio.to_thread(netsafe.host_ok, url)
+
+
 async def sniff(url: str, ctx: Ctx) -> dict:
     """Načte stránku a vrátí {title, thumbnail, candidates[], drm, headers}."""
     try:
@@ -290,7 +343,8 @@ async def sniff(url: str, ctx: Ctx) -> dict:
             context = await browser.new_context(user_agent=UA, viewport={"width": 1280, "height": 720},
                                                 ignore_https_errors=True, locale="cs-CZ")
             if ctx.cookies_file:
-                await add_cookies(context, ctx.cookies_file)
+                await add_cookies(context, ctx.cookies_file, urlparse(url).hostname or "")
+            await guard_routes(context, url)
             await context.add_init_script(INIT_JS)
             page = await context.new_page()
 
@@ -434,6 +488,9 @@ def _cookie_header(cookies: list[dict], target: str) -> str:
     return "; ".join(pairs)
 
 
+WHITELIST = "http,https,tcp,tls,crypto"                                # ffmpeg nesmí z playlistu číst `file:`, `concat:` ani jiná schémata
+
+
 async def _duration(ctx: Ctx, url: str, headers: str) -> float | None:
     fp = ctx.engines.get("ffmpeg").bin_path("ffprobe")
     if not fp:
@@ -441,7 +498,7 @@ async def _duration(ctx: Ctx, url: str, headers: str) -> float | None:
     cmd = [fp, "-v", "error", "-user_agent", UA]
     if headers:
         cmd += ["-headers", headers]
-    cmd += ["-show_entries", "format=duration", "-of", "csv=p=0", url]
+    cmd += ["-protocol_whitelist", WHITELIST, "-show_entries", "format=duration", "-of", "csv=p=0", url]
     proc = None
     try:
         proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
@@ -469,6 +526,9 @@ async def download(sn: dict, ctx: Ctx, staging: Path, name: str, on_progress, ho
     last_err = "neznámá chyba"
     for cand in sn["candidates"][:3]:
         hdr_lines = [f"Referer: {sn['referer']}"]
+        if not await candidate_ok(cand["url"], sn["referer"]) or (cand.get("audio") and not await candidate_ok(cand["audio"], sn["referer"])):
+            last_err = "adresa videa míří mimo veřejný internet"
+            continue
         ck = _cookie_header(sn.get("cookies"), cand["url"])
         if ck:
             hdr_lines.append(f"Cookie: {ck}")
@@ -478,9 +538,9 @@ async def download(sn: dict, ctx: Ctx, staging: Path, name: str, on_progress, ho
         for ext in ([".mp4", ".mkv"] if is_mp4 else [".mkv"]):
             out = staging / f"{name}{ext}"
             cmd = [ff, "-y", "-hide_banner", "-nostdin", "-loglevel", "error", "-user_agent", UA, "-headers", headers,
-                   "-rw_timeout", "30000000", "-i", cand["url"]]                    # server, který přestane posílat data, nezdrží stahování navždy
+                   "-protocol_whitelist", WHITELIST, "-rw_timeout", "30000000", "-i", cand["url"]]                    # server, který přestane posílat data, nezdrží stahování navždy
             if cand.get("audio"):
-                cmd += ["-user_agent", UA, "-headers", headers, "-rw_timeout", "30000000", "-i", cand["audio"], "-map", "0:v:0?", "-map", "1:a:0?"]
+                cmd += ["-user_agent", UA, "-headers", headers, "-protocol_whitelist", WHITELIST, "-rw_timeout", "30000000", "-i", cand["audio"], "-map", "0:v:0?", "-map", "1:a:0?"]
             else:
                 cmd += ["-map", "0:v:0?", "-map", "0:a:0?"]
             cmd += ["-c", "copy"]

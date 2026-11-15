@@ -333,3 +333,9 @@ def is_frozen() -> bool:
 
 def env_flag(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def is_http_url(url: str) -> bool:
+    """Adresa pro yt-dlp a spol.: http(s) bez mezer a řídicích znaků. Hodnota začínající `-` by se jinak četla jako přepínač."""
+    u = (url or "").strip()
+    return u.lower().startswith(("http://", "https://")) and not re.search(r"[\s\x00-\x1f]", u)

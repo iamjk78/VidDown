@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 
 from .. import container
-from ..util import classify_error, host_key
+from ..util import classify_error, host_key, is_http_url
 from . import Cancelled, Ctx, ProcHolder, ResolveError, subprocess_kwargs
 
 PENDING = ".viddown-pending.json"      # hotové stažení čekající na přesun do cílové složky (nebo přerušené po zápisu do archivu yt-dlp)
@@ -32,6 +32,12 @@ log = logging.getLogger("viddown.ytdlp")
 
 PROG = ("download:VDPROG %(progress.status)s|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|"
         "%(progress.total_bytes_estimate)s|%(progress.speed)s|%(progress.eta)s|%(info.format_id)s")
+
+
+def _checked(url: str) -> str:
+    if not is_http_url(url):
+        raise ResolveError("adresa není platná http(s) adresa", "unsupported")
+    return url.strip()
 
 
 def base_cmd(ctx: Ctx) -> list[str]:
@@ -145,10 +151,14 @@ async def _run_json_inner(cmd: list[str], timeout: float, ctx: Ctx | None) -> di
 async def probe(url: str, ctx: Ctx, timeout: float = 300, playlist_end: int | None = None) -> dict:
     """Metadata bez stahování. Playlist/kanál vrací plochý seznam položek (volitelně jen prvních `playlist_end`)."""
     cctx, ck = with_copy(ctx)
-    cmd = base_cmd(cctx) + ["-J", "--flat-playlist"]
-    if playlist_end:
-        cmd += ["--playlist-end", str(int(playlist_end))]
-    cmd.append(url)
+    try:
+        cmd = base_cmd(cctx) + ["-J", "--flat-playlist"]
+        if playlist_end:
+            cmd += ["--playlist-end", str(int(playlist_end))]
+        cmd += ["--", _checked(url)]
+    except BaseException:                                              # kopie cookies se při chybě sestavení příkazu uklidí
+        _drop(ck)
+        raise
     return await _run_json(cmd, timeout, ctx, ck)
 
 
@@ -159,7 +169,11 @@ def polite_args(url: str) -> list[str]:
 
 async def full_info(url: str, ctx: Ctx, timeout: float = 180) -> dict:
     cctx, ck = with_copy(ctx)
-    cmd = base_cmd(cctx) + ["-J", "--no-playlist", *polite_args(url), *format_args(ctx.settings), url]
+    try:
+        cmd = base_cmd(cctx) + ["-J", "--no-playlist", *polite_args(url), *format_args(ctx.settings), "--", _checked(url)]
+    except BaseException:
+        _drop(ck)
+        raise
     return await _run_json(cmd, timeout, ctx, ck)
 
 
@@ -230,7 +244,7 @@ async def _download(url, info, ctx: Ctx, staging: Path, name: str, rate_bps, on_
     threads = MODES.get(s.get("perf_mode", "full"), MODES["full"])[1]
     if threads:
         cmd += ["--postprocessor-args", f"ffmpeg:-threads {threads}"]
-    cmd.append(url)
+    cmd += ["--", _checked(url)]
 
     # odhad celkové velikosti přes všechny části (video + audio)
     parts: dict[str, list] = {}

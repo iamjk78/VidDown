@@ -666,6 +666,7 @@ class Runner:
             reason = self.stop_reason.pop(jid, "cancel")
             cur = self.db.get(jid)
             if reason == "cancel" or (cur and cur["status"] == "cancelling"):
+                self._scrub_sniff(jid)
                 shutil.rmtree(staging, ignore_errors=True)
                 thumbs.drop(self.data, jid)
                 self.db.update(jid, status="cancelled", finished_at=time.time(), speed=None, eta=None)

@@ -33,9 +33,13 @@ def enable() -> str:
         env["PATH"] = os.environ.get("PATH", "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin")
         if not getattr(sys, "frozen", False):
             env["PYTHONPATH"] = str(Path(__file__).resolve().parent.parent)
-        with open(p, "wb") as f:
+        with os.fdopen(os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb") as f:      # v prostředí mohou být tajemství
             plistlib.dump({"Label": LABEL, "ProgramArguments": cmd, "RunAtLoad": True, "KeepAlive": {"SuccessfulExit": False},
                            "EnvironmentVariables": env, "ProcessType": "Background"}, f)
+        try:
+            os.chmod(p, 0o600)                                         # i když soubor už existoval s jinými právy
+        except OSError:
+            pass
         subprocess.run(["launchctl", "unload", str(p)], capture_output=True)
         subprocess.run(["launchctl", "load", str(p)], capture_output=True)
         return str(p)

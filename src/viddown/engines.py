@@ -248,9 +248,11 @@ class YtDlp(Engine):
         if code != 0:
             return False, f"--version selhalo: {out[-300:]}"
         url = self.mgr.settings.get("selftest_url")
+        if url and not str(url).lower().startswith(("http://", "https://")):
+            return False, "adresa kontrolního videa musí začínat http(s)://"
         if not url:
             return True, f"--version OK ({out.strip()})"
-        cmd = [exe, "--ignore-config", "--no-warnings", "-J", "--skip-download", "--no-playlist", url]
+        cmd = [exe, "--ignore-config", "--no-warnings", "-J", "--skip-download", "--no-playlist", "--", url]
         deno = self.mgr.get("deno").bin_path()
         if deno:
             cmd[1:1] = ["--js-runtimes", f"deno:{deno}"]

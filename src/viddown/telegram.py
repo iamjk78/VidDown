@@ -213,7 +213,7 @@ class TelegramBot:
             return
         urls = extract_urls(text)
         for ent in msg.get("entities") or []:
-            if ent.get("type") == "text_link" and ent.get("url") not in urls:
+            if ent.get("type") == "text_link" and ent.get("url") not in urls and str(ent.get("url") or "").lower().startswith(("http://", "https://")):
                 urls.append(ent["url"])
         if not urls:
             await self.send(t(L, "no_url"))
