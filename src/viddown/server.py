@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import math
 import logging
 import os
 import re
@@ -981,11 +982,15 @@ def create_app(app_state) -> FastAPI:
     @app.get("/api/stats")
     async def stats(t0: float = 0, t1: float = 0, tz: int = 0, sub: int = 0):
         now = time.time()
-        t1 = t1 or now + 1
+        if not all(math.isfinite(x) for x in (t0, t1)):
+            raise HTTPException(400, "Neplatné období.")
+        t1 = min(t1 or now + 1, now + 86400 * 366)                       # obří čísla by vytvořila miliony prázdných intervalů
+        tz = max(-14 * 60, min(14 * 60, int(tz)))
         if not t0:   # celé období: od prvního záznamu
-            r = S.db.query("select min(ts) m from downloads")[0]["m"]
+            r = (await asyncio.to_thread(S.db.query, "select min(ts) m from downloads"))[0]["m"]
             t0 = min(r or now, t1 - 86400)
-        r = S.db.stats(t0, t1, tz, sub)
+        t0 = max(0.0, min(t0, t1 - 1))
+        r = await asyncio.to_thread(S.db.stats, t0, t1, tz, sub)
         # doplnit prázdné intervaly, ať graf nemá mezery
         step = {"%Y-%m-%d %H:00": 3600, "%Y-%m-%d": 86400}.get(r["fmt"])
         have = {x["b"]: x for x in r["series"]}
@@ -1003,7 +1008,7 @@ def create_app(app_state) -> FastAPI:
                 b = f"{y:04d}-{m:02d}"
                 out.append(have.get(b) or {"b": b, "n": 0, "bytes": 0, "failed": 0})
                 y, m = (y, m + 1) if m < 12 else (y + 1, 1)
-        r["series"] = out
+        r["series"] = out[-5000:]
         r["t0"], r["t1"] = t0, t1
         return r
 
@@ -1180,17 +1185,28 @@ def create_app(app_state) -> FastAPI:
                 "auto": S.settings.get("engine_auto_update"), "hours": S.settings.get("engine_update_hours"),
                 "last_auto": S.db.kv_get("engine_last_auto")}
 
+    engine_op = {"on": False}                                             # běží aktualizace/test/návrat enginu (jedna operace najednou)
+
+    def _engine_busy() -> bool:
+        return bool(S.engines.busy or engine_op["on"] or getattr(S, "chromium_busy", False))
+
     async def _bg(fn, *a):
+        engine_op["on"] = True
+
         async def run():
             try:
                 await asyncio.to_thread(fn, *a)
             except Exception as e:  # noqa: BLE001
                 S.engines.log(a[0] if a else "engine", f"chyba: {e}")
-        asyncio.create_task(run())
+            finally:
+                engine_op["on"] = False
+        t = asyncio.create_task(run())
+        bg_tasks.add(t)
+        t.add_done_callback(bg_tasks.discard)
 
     @app.post("/api/engines/check")
     async def engines_check():
-        if S.engines.busy:
+        if _engine_busy():
             raise HTTPException(409, "busy")
         await _bg(lambda: S.engines.update_all())
         return {"started": True}
@@ -1200,6 +1216,8 @@ def create_app(app_state) -> FastAPI:
         if name == "chromium":
             if action != "install":
                 raise HTTPException(404)
+            if _engine_busy():
+                raise HTTPException(409, "busy")
             S.chromium_busy = True
 
             async def inst():
@@ -1212,9 +1230,9 @@ def create_app(app_state) -> FastAPI:
             return {"started": True}
         if name not in S.engines.engines:
             raise HTTPException(404)
+        if action in ("update", "test", "rollback", "remove") and _engine_busy():
+            raise HTTPException(409, "busy")
         if action == "update":
-            if S.engines.busy:
-                raise HTTPException(409, "busy")
             await _bg(S.engines.update, name)
             return {"started": True}
         if action == "test":
