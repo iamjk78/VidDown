@@ -14,7 +14,7 @@ from pathlib import Path
 
 from .. import container
 from ..util import classify_error, host_key, is_http_url, mask_proxy
-from . import Cancelled, Ctx, ProcHolder, ResolveError, subprocess_kwargs
+from . import Cancelled, Ctx, ProcHolder, ResolveError, cookiepolicy, subprocess_kwargs
 
 PENDING = ".viddown-pending.json"      # hotové stažení čekající na přesun do cílové složky (nebo přerušené po zápisu do archivu yt-dlp)
 
@@ -54,7 +54,7 @@ def base_cmd(ctx: Ctx) -> list[str]:
     s = ctx.settings
     if ctx.cookies_file:
         cmd += ["--cookies", str(ctx.cookies_file)]
-    elif s.get("cookies_mode") == "browser":
+    elif s.get("cookies_mode") == "browser" and not ctx.no_cookies:
         cmd += ["--cookies-from-browser", s.get("cookies_browser") or "chrome"]
     if s.get("proxy"):
         cmd += ["--proxy", s["proxy"]]
@@ -101,7 +101,7 @@ AGE_RE = re.compile(r"confirm your age|confirm you.re not a bot|age[- ]restricte
 
 def cookie_hint(msg: str, ctx: Ctx) -> str:
     """YouTube s nahranými cookies pořád chce přihlášení: cookies přestala platit (zneplatnil je YouTube)."""
-    if msg and "[youtube" in msg and AGE_RE.search(msg) and (ctx.cookies_file or ctx.settings.get("cookies_mode") == "browser"):
+    if msg and "[youtube" in msg and AGE_RE.search(msg) and (ctx.cookies_file or (ctx.settings.get("cookies_mode") == "browser" and not ctx.no_cookies)):
         return (msg.split(" Use --cookies")[0].rstrip(". ") + f". {COOKIES_STALE}: "
                 "exportujte je znovu z anonymního okna prohlížeče a nahrajte je v Nastavení.")
     return msg
@@ -150,6 +150,10 @@ async def _run_json_inner(cmd: list[str], timeout: float, ctx: Ctx | None) -> di
 
 async def probe(url: str, ctx: Ctx, timeout: float = 300, playlist_end: int | None = None) -> dict:
     """Metadata bez stahování. Playlist/kanál vrací plochý seznam položek (volitelně jen prvních `playlist_end`)."""
+    return await cookiepolicy.attempt(ctx, url, lambda c: _probe(url, c, timeout, playlist_end))
+
+
+async def _probe(url: str, ctx: Ctx, timeout: float, playlist_end: int | None) -> dict:
     cctx, ck = with_copy(ctx)
     try:
         cmd = base_cmd(cctx) + ["-J", "--flat-playlist"]
@@ -168,6 +172,10 @@ def polite_args(url: str) -> list[str]:
 
 
 async def full_info(url: str, ctx: Ctx, timeout: float = 180) -> dict:
+    return await cookiepolicy.attempt(ctx, url, lambda c: _full_info(url, c, timeout))
+
+
+async def _full_info(url: str, ctx: Ctx, timeout: float) -> dict:
     cctx, ck = with_copy(ctx)
     try:
         cmd = base_cmd(cctx) + ["-J", "--no-playlist", *polite_args(url), *format_args(ctx.settings), "--", _checked(url)]
@@ -209,6 +217,11 @@ from ..cpu import MODES  # noqa: E402
 async def download(url: str, info: dict | None, ctx: Ctx, staging: Path, name: str, rate_bps: int | None,
                    on_progress, holder: ProcHolder, audio_only: bool | None = None, no_subs: bool = False) -> dict:
     """Stáhne video do staging. Vrací {"file": Path, "thumb": Path|None} nebo {"skipped": důvod}."""
+    return await cookiepolicy.attempt(ctx, url, lambda c: _download_copy(url, info, c, staging, name, rate_bps, on_progress, holder,
+                                                                         audio_only, no_subs))
+
+
+async def _download_copy(url, info, ctx: Ctx, staging, name, rate_bps, on_progress, holder, audio_only, no_subs) -> dict:
     cctx, ck = with_copy(ctx)
     try:
         return await _download(url, info, cctx, staging, name, rate_bps, on_progress, holder, audio_only, no_subs, ctx)

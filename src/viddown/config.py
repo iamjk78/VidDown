@@ -97,6 +97,8 @@ DEFAULTS: dict = {
     # přístup a síť
     "cookies_mode": "none",         # none | file | browser
     "cookies_browser": "chrome",
+    "cookies_use": "always",        # always | needed (nejdřív bez cookies, s nimi až když web chce přihlášení)
+    "cookies_always_hosts": "",     # weby (čárkami), které při „needed“ dostávají cookies vždy
     "proxy": "",
     "network_access": False,
     "port": 8765,
@@ -142,6 +144,7 @@ CHOICES = {
     "quality": ["max", "compat"],
     "audio_format": ["mp3", "m4a"],
     "cookies_mode": ["none", "file", "browser"],
+    "cookies_use": ["always", "needed"],
     "telegram_after_probe": ["download", "ask"],
     "telegram_notify": ["errors", "all"],
     "app_update_mode": ["off", "notify", "auto"],
@@ -282,6 +285,11 @@ class Settings:
                     raise ValueError(f"{k} must be 0-600")
                 if k == "catalog_hour_limit" and not (val == 0 or 60 <= val <= 5000):
                     raise ValueError("catalog_hour_limit must be 0 or 60-5000")
+                if k == "cookies_always_hosts":
+                    from .resolvers.cookiepolicy import parse_hosts
+                    if len(str(val or "")) > 4000:
+                        raise ValueError("cookies_always_hosts is too long")
+                    val = ", ".join(parse_hosts(str(val or "")))
                 if k == "catalog_proxy_fallback":
                     val = str(val or "").strip()
                     if val and not re.fullmatch(r"(?:(?:https?|socks5h?|socks4)://)?[^\s/]+(?::\d{1,5})?/?", val):

@@ -22,6 +22,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__, appupdate, autobackup, backup, catalog, catalogdetails, pagelist, schedule, subscriptions, thumbs, updater
+from .resolvers import cookiepolicy
 from .config import DEFAULTS, CHOICES, cookies_path
 from .probe import probe_url
 from .util import check_dir_writable, env_flag, extract_urls, in_docker, in_schedule, mask_proxy, sanitize_filename
@@ -1025,6 +1026,7 @@ def create_app(app_state) -> FastAPI:
                 "locked": S.settings.locked_keys(), "has_password": S.secrets.has_password(),
                 "telegram_token_set": bool(S.secrets.telegram_token),
                 "cookies_file": {"exists": cp.exists(), "mtime": cp.stat().st_mtime if cp.exists() else None},
+                "cookie_hosts": [{"host": h, "until": u} for h, u in sorted(cookiepolicy.learned(S.data).items())],
                 "docker": in_docker()}
 
     @app.get("/api/settings")
@@ -1115,6 +1117,16 @@ def create_app(app_state) -> FastAPI:
         S.settings.update({"cookies_mode": "file"})
         S.db.kv_set("yt_cookies_bad", None)
         S.db.kv_set("yt_cookies_notice_at", None)       # nové cookies: příští neplatnost se oznámí hned
+        return settings_out()
+
+    @app.delete("/api/settings/cookie-hosts")
+    async def forget_cookie_host(host: str = ""):
+        """Zapomenout naučený web (příště se na něj zase půjde nejdřív bez cookies)."""
+        if host:
+            cookiepolicy.forget(S.data, host)
+        else:
+            for h in list(cookiepolicy.learned(S.data)):
+                cookiepolicy.forget(S.data, h)
         return settings_out()
 
     @app.delete("/api/settings/cookies")

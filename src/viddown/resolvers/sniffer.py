@@ -14,7 +14,7 @@ from urllib.parse import urljoin, urlparse
 
 from .. import netsafe
 from ..util import classify_error, is_hls_response
-from . import Cancelled, Ctx, ProcHolder, ResolveError, subprocess_kwargs
+from . import Cancelled, Ctx, ProcHolder, ResolveError, cookiepolicy, subprocess_kwargs
 
 log = logging.getLogger("viddown.sniffer")
 
@@ -229,6 +229,7 @@ class Renderer:
     def __init__(self, ctx: Ctx):
         self.ctx = ctx
         self._pw = self._browser = self._context = None
+        self._ck_hosts: set[str] | None = None        # režim „cookies jen když je potřeba“: weby, jejichž cookies už jsou načtené
 
     async def __aenter__(self):
         try:
@@ -250,7 +251,10 @@ class Renderer:
         try:
             self._context = await self._browser.new_context(user_agent=UA, viewport={"width": 1280, "height": 900}, locale="cs-CZ")
             if self.ctx.cookies_file:
-                await add_cookies(self._context, self.ctx.cookies_file)
+                if cookiepolicy.needed_mode(self.ctx.settings) and self.ctx.no_cookies is None:
+                    self._ck_hosts = set()                                  # cookies se přidají až pro web, který je potřebuje
+                else:
+                    await add_cookies(self._context, self.ctx.cookies_file)
         except BaseException:                                       # `__aexit__` se po neúspěšném vstupu nevolá: prohlížeč i ovladač se zavřou tady
             await self.__aexit__(None, None, None)
             raise
@@ -269,6 +273,11 @@ class Renderer:
         a vrátí (HTML, konečná adresa)."""
         from playwright.async_api import TimeoutError as PWTimeout
         timeout = float(self.ctx.settings.get("sniff_timeout", 40))
+        if self._ck_hosts is not None and self.ctx.cookies_file and cookiepolicy.wanted(self.ctx, url):
+            host = (urlparse(url).hostname or "").lower()
+            if host and host not in self._ck_hosts:
+                self._ck_hosts.add(host)
+                await add_cookies(self._context, self.ctx.cookies_file, host)
         page = await self._context.new_page()
         try:
             try:
@@ -347,7 +356,13 @@ async def candidate_ok(url: str, referer: str) -> bool:
 
 
 async def sniff(url: str, ctx: Ctx) -> dict:
-    """Načte stránku a vrátí {title, thumbnail, candidates[], drm, headers}."""
+    """Načte stránku a vrátí {title, thumbnail, candidates[], drm, headers}. Cookies podle `cookiepolicy` (při „jen když je
+    potřeba“ se stránka bez nalezeného videa zkusí jednou znovu s cookies, pokud cookies.txt obsahuje přihlášení k tomuto webu)."""
+    return await cookiepolicy.attempt(ctx, url, lambda c: _sniff(url, c),
+                                      empty=lambda sn: not sn.get("candidates") and not sn.get("drm"))
+
+
+async def _sniff(url: str, ctx: Ctx) -> dict:
     try:
         from playwright.async_api import TimeoutError as PWTimeout
         from playwright.async_api import async_playwright

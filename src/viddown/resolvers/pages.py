@@ -15,7 +15,7 @@ import re
 import time
 from urllib.parse import parse_qsl, urlencode, urlparse
 
-from . import ResolveError
+from . import ResolveError, cookiepolicy
 from .sniffer import UA, add_cookies
 
 log = logging.getLogger("viddown.pages")
@@ -80,6 +80,10 @@ def _finite(v):
 
 
 async def open_story(url: str, ctx) -> dict:
+    return await cookiepolicy.attempt(ctx, url, lambda c: _open_story(url, c))
+
+
+async def _open_story(url: str, ctx) -> dict:
     try:
         from playwright.async_api import TimeoutError as PWTimeout
         from playwright.async_api import async_playwright

@@ -18,7 +18,7 @@ i **příkazy v terminálu**.
 - **Katalog:** projděte si videa z kanálů jako mřížku náhledů a stáhněte jen ta, která chcete.
 - **Telegram:** pošlete botovi odkaz, odpoví počtem nalezených videí a rozlišením prvního. Pak hlásí jen chyby videí, která jste zadali přes Telegram, a důležitá systémová oznámení.
 - **Enginy** (yt-dlp, Deno, ffmpeg) se aktualizují s testem. Když nová verze nefunguje, zůstane předchozí. **Aplikace** se umí aktualizovat sama z GitHubu.
-- Nastavení: souběžná stahování, limit rychlosti, časový rozvrh, šablona názvů, cookies, proxy, heslo, čeština i angličtina, světlý i tmavý režim.
+- Nastavení: souběžná stahování, limit rychlosti, časový rozvrh, šablona názvů, cookies (vždy, nebo jen když je web vyžaduje), proxy, heslo, čeština i angličtina, světlý i tmavý režim.
 
 > Používejte jen pro obsah, ke kterému máte práva. DRM (Netflix, Disney+ apod.) se neobchází.
 
@@ -495,7 +495,7 @@ Runs in **Docker** (Synology NAS, Windows, Mac, Linux; Intel/AMD and ARM process
 - **Catalog:** browse the videos of channels as a grid of thumbnails and download only the ones you want.
 - **Telegram:** send the bot a link; it replies with the number of videos found and the resolution, then only reports errors.
 - **Engines** (yt-dlp, Deno, ffmpeg) update with a test and roll back on failure. The **app** can update itself from GitHub.
-- Settings: parallel downloads, speed limit, schedule, file name template, cookies, proxy, password, Czech and English, light and dark mode.
+- Settings: parallel downloads, speed limit, schedule, file name template, cookies (always, or only when a site asks for them), proxy, password, Czech and English, light and dark mode.
 
 > Only use it for content you have the rights to. DRM (Netflix, Disney+ etc.) is not circumvented.
 

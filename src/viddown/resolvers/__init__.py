@@ -26,9 +26,12 @@ class Ctx:
     engines: object
     data: Path
     cookies_override: Path | None = None        # soukromá kopie cookies pro jeden běh yt-dlp (viz ytdlp.with_cookie_copy)
+    no_cookies: bool | None = None              # None = rozhodne cookiepolicy, True = tento pokus bez cookies, False = s cookies
 
     @property
     def cookies_file(self) -> Path | None:
+        if self.no_cookies:
+            return None
         if self.cookies_override is not None:
             return self.cookies_override
         p = self.data / "cookies.txt"
