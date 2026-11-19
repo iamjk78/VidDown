@@ -1317,7 +1317,8 @@ const CAT_LIMITS = [25, 50, 100, 200, 500];
 function catPref(k, def, allowed) { try { const v = localStorage.getItem('vd_cat_' + k); return v != null && (!allowed || allowed.map(String).includes(v)) ? v : def; } catch (e) { return def; } }
 function catSetPref(k, v) { try { localStorage.setItem('vd_cat_' + k, v); } catch (e) { /* bez úložiště */ } }
 const CAT = { q: '', source: 0, res: [], state: [], anim: [], age: '', dur: [], done: new Set(), offset: 0, sel: new Set(), selAll: null, exclude: new Set(), data: null, ov: null, sig: '', seq: 0, qt: null,
-  sort: catPref('sort', 'pos', CAT_SORTS().map(x => x[0])), dir: catPref('dir', 'asc', ['asc', 'desc']), limit: +catPref('limit', 100, CAT_LIMITS), thumb: catPref('thumb', 'M', ['S', 'M', 'L']) };
+  sort: catPref('sort', 'pos', CAT_SORTS().map(x => x[0])), dir: catPref('dir', 'asc', ['asc', 'desc']), limit: +catPref('limit', 100, CAT_LIMITS), thumb: catPref('thumb', 'M', ['S', 'M', 'L']), showThumbs: catPref('thumbs', '1', ['0', '1']) === '1' };
+function catThumbLabel() { return `${ic('film', 13)} ${T('Miniatury', 'Thumbnails')}: ${CAT.showThumbs ? T('zap', 'on') : T('vyp', 'off')}`; }
 
 function catFilter() { return { source: CAT.source || null, q: CAT.q, res: CAT.res.slice(), state: CAT.state.slice(), anim: CAT.anim.slice(), age: CAT.age, dur: CAT.dur.slice() }; }
 function catQuery() {
@@ -1347,7 +1348,8 @@ function renderCatalog() {
       <select class="input sm" id="catsort">${CAT_SORTS().map(([v, l]) => `<option value="${v}" ${CAT.sort === v ? 'selected' : ''}>${T('Řadit', 'Sort')}: ${l}</option>`).join('')}</select>
       <button class="btn sm" id="catdir" title="${T('Směr řazení: ↑ vzestupně (u data od nejstaršího), ↓ sestupně (u data od nejnovějšího)', 'Sort direction: ↑ ascending (oldest first for dates), ↓ descending (newest first for dates)')}">${CAT.dir === 'desc' ? '↓' : '↑'}</button>
       <select class="input sm" id="catlimit">${CAT_LIMITS.map(n => `<option value="${n}" ${CAT.limit === n ? 'selected' : ''}>${T('Na stránku', 'Per page')}: ${n}</option>`).join('')}</select>
-      <span class="seg" id="catsize" title="${T('Velikost miniatur', 'Thumbnail size')}">${['S', 'M', 'L'].map(s => `<button data-size="${s}" class="${CAT.thumb === s ? 'on' : ''}">${s}</button>`).join('')}</span></div>
+      <span class="seg" id="catsize" title="${T('Velikost miniatur', 'Thumbnail size')}">${['S', 'M', 'L'].map(s => `<button data-size="${s}" class="${CAT.thumb === s ? 'on' : ''}">${s}</button>`).join('')}</span>
+      <button class="btn sm ${CAT.showThumbs ? '' : 'ghost'}" id="catth" title="${T('Zobrazit nebo skrýt miniatury v katalogu (stahování se nemění)', 'Show or hide thumbnails in the catalog (downloading does not change)')}">${catThumbLabel()}</button></div>
       <div class="row gap6 wrap" style="margin-top:8px"><span class="t2 fs12">${T('Délka', 'Length')}:</span><span id="catdur" class="row gap4 wrap"></span></div>
       <div class="row gap6 wrap" style="margin-top:8px"><span class="t2 fs12">${T('Rozlišení', 'Resolution')}:</span><span id="catres" class="row gap4 wrap"></span>
         <span class="t2 fs12" style="margin-left:10px">${T('Stav', 'State')}:</span><span id="catstate" class="row gap4 wrap"></span>
@@ -1368,6 +1370,7 @@ function renderCatalog() {
   $('#catdir').onclick = () => { CAT.dir = CAT.dir === 'asc' ? 'desc' : 'asc'; catSetPref('dir', CAT.dir); $('#catdir').textContent = CAT.dir === 'desc' ? '↓' : '↑'; reload(() => {}); };
   $('#catlimit').onchange = e => { CAT.limit = +e.target.value; catSetPref('limit', CAT.limit); reload(() => {}); };
   $$('#catsize [data-size]').forEach(b => b.onclick = () => { CAT.thumb = b.dataset.size; catSetPref('thumb', CAT.thumb); $$('#catsize [data-size]').forEach(x => x.classList.toggle('on', x === b)); catPaintGrid(); });
+  const cth = $('#catth'); if (cth) cth.onclick = () => { CAT.showThumbs = !CAT.showThumbs; catSetPref('thumbs', CAT.showThumbs ? '1' : '0'); cth.classList.toggle('ghost', !CAT.showThumbs); cth.innerHTML = catThumbLabel(); catPaintGrid(); };
   $('#catres').onclick = e => { const b = e.target.closest('[data-res]'); if (b) reload(() => { const v = b.dataset.res, i = CAT.res.indexOf(v); i >= 0 ? CAT.res.splice(i, 1) : CAT.res.push(v); }); };
   $('#catdur').onclick = e => { const b = e.target.closest('[data-dur]'); if (b) reload(() => { const v = b.dataset.dur, i = CAT.dur.indexOf(v); i >= 0 ? CAT.dur.splice(i, 1) : CAT.dur.push(v); }); };
   $('#catagef').onclick = e => { const b = e.target.closest('[data-age]'); if (b) reload(() => { CAT.age = CAT.age === b.dataset.age ? '' : b.dataset.age; }); };
@@ -1575,7 +1578,8 @@ async function catSrcClick(e) {
   const c = e.target.closest('[data-csrc]');
   if (c) { const id = +c.dataset.csrc; CAT.source = CAT.source === id ? 0 : id; CAT.offset = 0; catClearSel(); $('#catsrcsel').value = String(CAT.source); catTipHide(); catLoad(); }
 }
-function catCard(it) {
+function catCard(item) {
+  const it = CAT.showThumbs === false ? { ...item, thumb: null, anim: null } : item;      // jen zobrazení; miniatury se na serveru stahují dál
   const sel = catIsSel(it.id), h = it.height ? `${it.height}p` : '';
   const badges = [it.state === 'queued' ? `<span class="vbd q">${T('ve frontě', 'queued')}</span>` : '', it.downloaded_before ? `<span class="vbd d">${T('Staženo dříve', 'Downloaded before')}</span>` : '',
     it.rejected_before ? `<span class="vbd r">${T('Dříve odmítnuté', 'Rejected before')}</span>` : '', it.state === 'gone' ? `<span class="vbd g">${T('Nedostupné', 'Unavailable')}</span>` : '',
