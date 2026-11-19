@@ -546,6 +546,17 @@ class DB:
             return c.execute(f"update jobs set filepath=? || substr(filepath, ?) where {where}",
                              (new, len(old) + 1, *args)).rowcount
 
+    def rename_refs(self, old: str, new: str) -> dict:
+        """Po přejmenování složky přepíše cesty v úlohách (soubor, cílová složka) a v odběrech. Vrací počty změněných řádků."""
+        old, new = old.rstrip("/"), new.rstrip("/")
+        out = {}
+        with self.conn() as c:
+            for table, col in (("jobs", "filepath"), ("jobs", "target_dir"), ("subscriptions", "folder")):
+                cond = f"{col} is not null and ({col}=? or substr({col},1,?)=?)"
+                out[f"{table}.{col}"] = c.execute(f"update {table} set {col}=? || substr({col}, ?) where {cond}",
+                                                  (new, len(old) + 1, old, len(old) + 1, old + "/")).rowcount
+        return out
+
     def purge_older(self, days: int) -> int:
         if not days:
             return 0

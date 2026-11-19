@@ -1990,12 +1990,18 @@ function modal(html, cls = '') {
   return { el: $('.modal', wrap), close };
 }
 async function openDirPicker(start, cb) {
-  const m = modal(`<div class="mh">${ic('folder', 18)}<h2>${T('Vyberte složku', 'Choose a folder')}</h2></div><div class="mb"><input class="input sm mono fs12" id="dpath"><div class="dirs" id="dlist"></div></div>
+  const m = modal(`<div class="mh">${ic('folder', 18)}<h2>${T('Vyberte složku', 'Choose a folder')}</h2></div><div class="mb"><input class="input sm mono fs12" id="dpath"><div class="row gap8" style="margin-top:8px;flex-wrap:wrap"><button class="btn sm" id="dnew">${T('Nová složka', 'New folder')}</button><button class="btn sm" id="dren">${T('Přejmenovat tuto složku', 'Rename this folder')}</button></div>
+     <div id="dform"></div><div class="dirs" id="dlist"></div></div>
    <div class="mf"><button class="btn" id="dcancel">${T('Zrušit', 'Cancel')}</button><button class="btn primary" id="dok">${T('Vybrat tuto složku', 'Use this folder')}</button></div>`);
-  const load = async p => { const r = await act(() => api('/api/fs?path=' + encodeURIComponent(p || ''))); if (!r) return; $('#dpath').value = r.path;
+  const load = async p => { const r = await act(() => api('/api/fs?path=' + encodeURIComponent(p || ''))); if (!r) return; $('#dpath').value = r.path; $('#dform').innerHTML = '';
     $('#dlist').innerHTML = (r.parent ? `<button data-p="${esc(r.parent)}">${ic('up', 14)} ..</button>` : '') + r.dirs.map(d => `<button data-p="${esc(r.path.replace(/[\\/]$/, '') + (r.path.includes('\\') ? '\\' : '/') + d)}">${ic('folder', 14)} ${esc(d)}</button>`).join('');
     $$('#dlist button').forEach(b => b.onclick = () => load(b.dataset.p)); };
   $('#dpath').onchange = e => load(e.target.value);
+  const form = (label, initial, go) => { $('#dform').innerHTML = `<div class="row gap8" style="margin-top:8px"><input class="input sm" id="dname" value="${esc(initial)}" placeholder="${T('Název složky', 'Folder name')}" style="flex:1"><button class="btn sm primary" id="dgo">${label}</button><button class="btn sm" id="dstop">${T('Zrušit', 'Cancel')}</button></div>`;
+    $('#dname').focus(); $('#dstop').onclick = () => { $('#dform').innerHTML = ''; }; $('#dgo').onclick = () => go($('#dname').value.trim()); };
+  $('#dnew').onclick = () => form(T('Vytvořit', 'Create'), '', async name => { const r = await act(() => api('/api/fs/mkdir', { method: 'POST', body: { path: $('#dpath').value, name } }), T('Složka vytvořena', 'Folder created')); if (r) load(r.path); });
+  $('#dren').onclick = () => { const cur = $('#dpath').value.replace(/[\\/]+$/, ''); const base = cur.split(/[\\/]/).pop() || '';
+    form(T('Přejmenovat', 'Rename'), base, async name => { const r = await act(() => api('/api/fs/rename', { method: 'POST', body: { path: cur, name } }), T('Složka přejmenována', 'Folder renamed')); if (r) { if (r.updated && Object.values(r.updated).some(Boolean)) toast(T('Cesty v historii a odběrech jsou opravené', 'Paths in history and subscriptions updated')); load(r.path); } }); };
   $('#dcancel').onclick = m.close; $('#dok').onclick = () => { cb($('#dpath').value); m.close(); };
   load(start);
 }

@@ -1189,6 +1189,79 @@ def create_app(app_state) -> FastAPI:
         p, dirs = await fs_call(scan, timeout=15.0)
         return {"path": str(p), "parent": str(p.parent) if p.parent != p else None, "dirs": dirs}
 
+    def _fs_name(name: str) -> str:
+        n = (name or "").strip()
+        if (not n or n in (".", "..") or n.startswith(".") or len(n) > 200 or any(c in n for c in '/\\:*?"<>|')
+                or any(ord(c) < 32 for c in n)):
+            raise HTTPException(400, "Název složky je neplatný: nesmí být prázdný, začínat tečkou ani obsahovat / \\ : * ? \" < > |.")
+        return n
+
+    def _fs_on_volume(p: Path) -> None:
+        """V Dockeru jen složky na připojených svazcích (jinak by soubory skončily uvnitř kontejneru)."""
+        if in_docker():
+            anc = p
+            while not anc.exists() and anc != anc.parent:
+                anc = anc.parent
+            if os.stat(anc).st_dev == os.stat("/").st_dev:
+                raise HTTPException(400, "Tahle složka neleží na svazku připojeném do kontejneru.")
+
+    @app.post("/api/fs/mkdir")
+    async def fs_mkdir(req: Request):
+        """Vytvoří novou složku uvnitř zadané složky (jen jedna úroveň, existující složku nepřepíše)."""
+        body = await req.json()
+        parent = Path(str(body.get("path") or "")).expanduser()
+        name = _fs_name(str(body.get("name") or ""))
+
+        def make() -> str:
+            if not parent.is_absolute() or not parent.is_dir():
+                raise HTTPException(400, "Nadřazená složka neexistuje.")
+            _fs_on_volume(parent)
+            target = parent / name
+            if target.exists():
+                raise HTTPException(409, "Složka s tímto názvem už existuje.")
+            try:
+                os.mkdir(target)
+            except OSError as e:
+                raise HTTPException(400, f"Složku nelze vytvořit: {e.strerror or e}")
+            return str(target)
+        return {"path": await fs_call(make, timeout=15.0)}
+
+    @app.post("/api/fs/rename")
+    async def fs_rename(req: Request):
+        """Přejmenuje složku na disku a přepíše cesty v historii, frontě a odběrech. Nejde o kořen nastavení, o složku
+        s probíhajícím stahováním ani o složku obsahující nastavené složky aplikace."""
+        body = await req.json()
+        src = Path(str(body.get("path") or "")).expanduser()
+        name = _fs_name(str(body.get("name") or ""))
+        protected = [Path(str(S.settings.get(k) or "")).expanduser() for k in ("download_dir", "temp_dir", "auto_backup_dir", "catalog_thumbs_dir")]
+        protected = [str(p) for p in protected if str(p) not in ("", ".")] + [str(S.data), str(Path.home())]
+        busy = S.db.query("select filepath, target_dir from jobs where status in ('running', 'cancelling')")
+
+        def ren() -> dict:
+            if not src.is_absolute() or not src.is_dir() or src == Path(src.anchor):
+                raise HTTPException(400, "Tuhle složku nelze přejmenovat.")
+            _fs_on_volume(src)
+            old = str(src)
+            for root in protected:
+                if root == old or root.startswith(old.rstrip("/") + "/"):
+                    raise HTTPException(400, "Složku nelze přejmenovat: je to (nebo obsahuje) složku nastavenou v aplikaci. "
+                                             "Nejdřív změňte nastavení.")
+            for j in busy:
+                for p in (j["filepath"], j["target_dir"]):
+                    if p and (p == old or p.startswith(old.rstrip("/") + "/")):
+                        raise HTTPException(409, "V této složce právě probíhá stahování. Počkejte, až skončí, nebo ho zastavte.")
+            target = src.parent / name
+            if target.exists():
+                raise HTTPException(409, "Složka s tímto názvem už existuje.")
+            try:
+                os.rename(src, target)
+            except OSError as e:
+                raise HTTPException(400, f"Složku nelze přejmenovat: {e.strerror or e}")
+            return {"path": str(target), "old": old}
+        res = await fs_call(ren, timeout=30.0)
+        res["updated"] = await asyncio.to_thread(S.db.rename_refs, res.pop("old"), res["path"])
+        return res
+
     # ------------------------------------------------------------ enginy
     @app.get("/api/engines")
     async def engines():
