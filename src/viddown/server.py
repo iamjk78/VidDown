@@ -1025,6 +1025,7 @@ def create_app(app_state) -> FastAPI:
         return {"values": S.settings.all(), "defaults": DEFAULTS, "choices": CHOICES,
                 "locked": S.settings.locked_keys(), "has_password": S.secrets.has_password(),
                 "telegram_token_set": bool(S.secrets.telegram_token),
+                "k2s_login_set": S.secrets.k2s_login() is not None,
                 "cookies_file": {"exists": cp.exists(), "mtime": cp.stat().st_mtime if cp.exists() else None},
                 "cookie_hosts": [{"host": h, "until": u} for h, u in sorted(cookiepolicy.learned(S.data).items())],
                 "docker": in_docker()}
@@ -1091,6 +1092,16 @@ def create_app(app_state) -> FastAPI:
         if pw:
             r.set_cookie("vd_session", token(), httponly=True, samesite="strict", max_age=60 * 60 * 24 * 30)
         return r
+
+    @app.post("/api/settings/k2s_login")
+    async def set_k2s_login(req: Request):
+        """Přihlášení k Keep2Share (volitelné). Prázdné jméno i heslo = zrušit přihlášení a uložený token."""
+        body = await req.json()
+        user, pw = str(body.get("username") or "").strip(), str(body.get("password") or "")
+        if user and not pw:
+            raise HTTPException(400, "Zadejte heslo.")
+        S.secrets.set_k2s_login(user, pw)
+        return JSONResponse(settings_out())
 
     @app.post("/api/settings/telegram_token")
     async def set_tg(req: Request):

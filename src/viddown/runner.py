@@ -23,7 +23,7 @@ from .db import ACTIVE, DB
 from .i18n import t
 from .probe import probe_url, trim_info
 from .resolvers import Cancelled, Ctx, ProcHolder, ResolveError
-from .resolvers import pages, sniffer, ytdlp
+from .resolvers import k2s, pages, sniffer, ytdlp
 from .resolvers.ytdlp import COOKIES_STALE
 from .util import (classify_error, fallback_allowed, free_space, host_key, in_schedule, is_rate_limited, render_template,
                    retry_allowed, sanitize_filename, unique_target)
@@ -74,6 +74,9 @@ class Runner:
         self._sub_task: asyncio.Task | None = None
         self._disk_warned = False
         self._target_checked = -1e9
+        self.captcha_sender = None                          # async (jid, obrázek) -> None; posílá captchu uživateli (Telegram)
+        self.k2s_waiters: dict[int, asyncio.Future] = {}    # jid -> čekání na odpověď na captchu
+        self.secrets = None                                 # Secrets (přihlášení Keep2Share); bez nich běží anonymně
 
     # ------------------------------------------------------------ pomocné
     def ctx(self) -> Ctx:
@@ -262,8 +265,20 @@ class Runner:
         if qpaused or not window:
             return
 
+        # 4a) pomalý pruh Keep2Share: jedna položka najednou, nezabírá sloty běžného stahování (viz `_dl_k2s`)
+        if s.get("k2s_enabled", True) and not self._k2s_busy():
+            for cand in self.db.query(
+                    "select * from jobs where status='queued' and paused=0 and (not_before is null or not_before<=?) "
+                    "and (url like '%k2s.cc/%' or url like '%keep2share.cc/%') order by pos limit 50", (now,)):
+                if not self.is_k2s(cand["url"]):
+                    continue
+                holder = ProcHolder()
+                self.db.update(cand["id"], status="running", started_at=now, error=None, speed=None, eta=None)
+                self.running[cand["id"]] = (asyncio.create_task(self._execute(cand["id"], holder)), holder)
+                break
+
         # 4) spuštění dalších úloh v pořadí fronty
-        slots = self.eff_concurrency(s) - len(self.running)
+        slots = self.eff_concurrency(s) - self._normal_running()
         if slots <= 0:
             return
         self.host_pause = {k: v for k, v in self.host_pause.items() if v["until"] > now or v.get("n")}
@@ -279,6 +294,8 @@ class Runner:
                 if slots <= 0:
                     break
                 if job["id"] in self.running:
+                    continue
+                if self.is_k2s(job["url"]):                                    # Keep2Share má vlastní pruh (4a)
                     continue
                 key = host_key(job["url"])
                 pause = self.host_pause.get(key)
@@ -651,6 +668,8 @@ class Runner:
         staging = self.staging(jid)
         info = json.loads(job["info"]) if job["info"] else {}
         methods = list(s.get("methods") or ["ytdlp", "sniffer"])
+        if self.is_k2s(job["url"]) and s.get("k2s_enabled", True):
+            methods = ["k2s"]
         if job["method"] == "sniffer" and "sniffer" in methods:
             methods = ["sniffer"]
         errors: list[tuple[str, ResolveError]] = []
@@ -689,6 +708,8 @@ class Runner:
                         result = await self._dl_ytdlp(job, info, ctx, staging, holder, on_progress)
                     elif m == "sniffer":
                         result = await self._dl_sniffer(job, info, ctx, staging, holder, on_progress)
+                    elif m == "k2s":
+                        result = await self._dl_k2s(job, info, ctx, staging, holder, on_progress)
                     used = m
                     break
                 except ResolveError as e:
@@ -732,6 +753,123 @@ class Runner:
             key = host_key(job["url"])                                          # pauza se počítá i od konce videa, ne jen od jeho začátku
             self.host_gates.setdefault(key, []).append(time.time() + self._sleep_for(key, s))
             self._check_parent(jid)
+
+    # ------------------------------------------------------------ Keep2Share (oficiální API, viz resolvers/k2s.py)
+    K2S_MIN_RETRY_MIN = 15
+
+    @staticmethod
+    def is_k2s(url: str) -> bool:
+        return k2s.file_id_of(url or "") is not None
+
+    def _k2s_busy(self) -> bool:
+        """Pruh Keep2Share je obsazený, pokud v něm něco běží (stahuje se, čeká na odpočet nebo na captchu)."""
+        for jid in self.running:
+            j = self.db.get(jid)
+            if j and self.is_k2s(j["url"]):
+                return True
+        return False
+
+    def _normal_running(self) -> int:
+        """Počet běžících úloh mimo pruh Keep2Share (jen ty se počítají do souběžnosti fronty)."""
+        n = 0
+        for jid in self.running:
+            j = self.db.get(jid)
+            if not (j and self.is_k2s(j["url"])):
+                n += 1
+        return n
+
+    def _k2s_retry_s(self, s: dict) -> float:
+        minutes = max(self.K2S_MIN_RETRY_MIN, min(1440, float(s.get("k2s_retry_minutes", 60) or 60)))
+        return minutes * 60
+
+    async def _k2s_sleep(self, job: dict, holder: ProcHolder, seconds: float, stage: str) -> None:
+        """Čeká (zobrazí zbývající čas v `eta`); pauza nebo zrušení se pozná nejdéle za 10 s."""
+        end = time.monotonic() + seconds
+        while True:
+            holder.check()
+            left = end - time.monotonic()
+            if left <= 0:
+                return
+            self.db.update(job["id"], stage=stage, eta=round(left))
+            await asyncio.sleep(min(10.0, left))
+
+    async def _k2s_ask_captcha(self, job: dict, client, holder: ProcHolder, s: dict):
+        """Vyžádá captchu od API, pošle obrázek uživateli a čeká na jeho odpověď. Vrací (výzva, odpověď) nebo (None, None)."""
+        if self.captcha_sender is None:                                       # bez Telegramu nejde captchu vyřešit: úloha počká
+            return None, None
+        ch = await asyncio.to_thread(client.request_captcha)
+        img = await asyncio.to_thread(client.captcha_image, ch)
+        fut = asyncio.get_running_loop().create_future()
+        self.k2s_waiters[job["id"]] = fut
+        try:
+            self.db.update(job["id"], stage="captcha", eta=None)
+            await self.captcha_sender(job["id"], img)
+            limit = time.monotonic() + float(s.get("k2s_captcha_minutes", 30) or 30) * 60
+            while not fut.done():
+                holder.check()
+                if time.monotonic() >= limit:
+                    return None, None
+                await asyncio.sleep(1.0)
+            return ch, fut.result()
+        finally:
+            self.k2s_waiters.pop(job["id"], None)
+
+    def answer_captcha(self, jid: int, answer: str) -> bool:
+        """Odpověď uživatele na captchu (volá Telegram). Vrací False, pokud na ni úloha nečeká."""
+        fut = self.k2s_waiters.get(jid)
+        if fut is None or fut.done():
+            return False
+        fut.set_result(answer)
+        return True
+
+    async def _dl_k2s(self, job, info, ctx, staging, holder, on_progress):
+        """Stažení z Keep2Share přes oficiální API. Odpočet a limit se jen čekají, captchu vyřeší uživatel."""
+        from datetime import datetime, timedelta
+        from pathlib import PurePosixPath
+        from urllib.parse import unquote, urlparse
+        s = ctx.settings
+        fid = k2s.file_id_of(job["url"])
+        self.db.update(job["id"], method="k2s")
+        retry = self._k2s_retry_s(s)
+        client = k2s.Client()
+        token = None
+        if self.secrets is not None and self.secrets.k2s_login():
+            token = self.secrets.k2s_token() or None
+            if token is None:                                                 # přihlášení jen když ho uživatel vyplnil
+                user, pw = self.secrets.k2s_login()
+                token = await asyncio.to_thread(client.login, user, pw)
+                self.secrets.set_k2s_token(token)
+        try:
+            ch = answer = None
+            while True:
+                holder.check()
+                try:
+                    link = await asyncio.to_thread(client.get_url, fid, token, None, ch, answer)
+                    break
+                except k2s.K2SError as e:
+                    ch = answer = None
+                    if e.kind == "captcha":
+                        ch, answer = await self._k2s_ask_captcha(job, client, holder, s)
+                        if answer is None:
+                            await self._k2s_sleep(job, holder, retry, "wait")
+                        continue
+                    if e.kind in ("wait", "network", "rate"):
+                        await self._k2s_sleep(job, holder, retry, "wait")
+                        continue
+                    if e.kind == "limit_daily":                                # denní limit: čeká se do půlnoci
+                        now = datetime.now()
+                        midnight = datetime(now.year, now.month, now.day) + timedelta(days=1)
+                        await self._k2s_sleep(job, holder, max(60.0, (midnight - now).total_seconds()), "wait")
+                        continue
+                    raise
+        finally:
+            client.close()
+        self.db.update(job["id"], stage="download", eta=None)
+        ext = PurePosixPath(unquote(urlparse(link).path)).suffix or ".bin"
+        dest = staging / f"{self._name(job, info)}{ext}"
+        staging.mkdir(parents=True, exist_ok=True)
+        size = await k2s.fetch_file(link, dest, on_progress, holder.check)
+        return {"file": dest, "thumb": None, "log": f"Keep2Share: staženo {size} B"}
 
     async def _dl_ytdlp(self, job, info, ctx, staging, holder, on_progress):
         if not info.get("full") or not info.get("requested_formats"):

@@ -100,6 +100,7 @@ class AppState:
         self.bot = None
         self.engines = EngineManager(self.data, self.settings, self.db, notify=self._engine_notify)
         self.runner = Runner(self.db, self.settings, self.engines, self.data)
+        self.runner.secrets = self.secrets
         self._eng_cache = (0.0, [])
         self.chromium_busy = False
         self.stopping = False

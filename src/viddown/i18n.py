@@ -41,6 +41,8 @@ T = {
         "help": ("Pošlete mi odkaz na video, playlist nebo kanál a stáhnu ho.\n\n"
                  "/fronta – co se stahuje a čeká\n/historie – posledních 10 položek\n"
                  "/engine – verze enginů\n/aktualizovat – zkontrolovat aktualizace enginů\n/aplikace – verze aplikace a její aktualizace"),
+        "k2s_captcha": "Keep2Share chce ověřit, že jste člověk (položka #{id}). Odpovězte zprávou: #{id} kód z obrázku.",
+        "k2s_captcha_ok": "Odpověď pro položku #{id} odeslána.",
         "not_allowed": "Tento bot je soukromý. Vaše chat ID je {id}. Pokud jste vlastník, zadejte ho v Nastavení › Telegram.",
         "no_url": "Ve zprávě není žádný odkaz. Pošlete URL videa, playlistu nebo kanálu.",
         "queue_empty": "Fronta je prázdná.",
@@ -89,6 +91,8 @@ T = {
         "app_restarting": "Restarting the app…",
         "help": ("Send me a link to a video, playlist or channel and I'll download it.\n\n"
                  "/fronta – queue\n/historie – last 10 items\n/engine – engine versions\n/aktualizovat – check engine updates\n/aplikace – app version and its updates"),
+        "k2s_captcha": "Keep2Share asks to verify you are human (item #{id}). Reply with: #{id} code from the image.",
+        "k2s_captcha_ok": "Answer for item #{id} sent.",
         "not_allowed": "This bot is private. Your chat ID is {id}. If you're the owner, enter it in Settings › Telegram.",
         "no_url": "There's no link in the message. Send a video, playlist or channel URL.",
         "queue_empty": "The queue is empty.",

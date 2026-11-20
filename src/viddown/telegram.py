@@ -12,6 +12,7 @@ import time
 import httpx
 
 from .i18n import t
+from .resolvers import k2s
 from .util import extract_urls, fmt_bytes
 
 log = logging.getLogger("viddown.telegram")
@@ -30,6 +31,7 @@ class TelegramBot:
         self._offset: int | None = None            # poslední potvrzená aktualizace; přežije výpadek spojení (jinak by se zprávy zpracovaly znovu)
         self._offset_token: str | None = None
         self.loop: asyncio.AbstractEventLoop | None = None
+        runner.captcha_sender = self.send_captcha            # captcha z Keep2Share posílá runner sem (viz runner._k2s_ask_captcha)
 
     # ------------------------------------------------------------ stav
     def status(self) -> dict:
@@ -74,6 +76,18 @@ class TelegramBot:
         except Exception as e:  # noqa: BLE001
             log.warning("sendMessage: %s", e)
             return None
+
+    async def send_captcha(self, jid: int, image: bytes) -> None:
+        """Pošle captchu Keep2Share do chatu vlastníka. Odpoví se „#<číslo položky> <kód>“."""
+        chat = self.chat()
+        if not chat or self.state != "ok" or not self._client or not self._token:
+            raise RuntimeError("Telegram není připojen")
+        r = await self._client.post(API.format(token=self._token, method="sendPhoto"),
+                                    data={"chat_id": chat, "caption": t(self.lang(), "k2s_captcha", id=jid)},
+                                    files={"photo": ("captcha.png", image, "image/png")}, timeout=30)
+        data = r.json()
+        if not data.get("ok"):
+            raise RuntimeError(data.get("description") or f"HTTP {r.status_code}")
 
     async def edit(self, chat, msg_id, text, keyboard=None):
         try:
@@ -192,6 +206,12 @@ class TelegramBot:
                 await self.call("sendMessage", chat_id=chat, text=t(L, "not_allowed", id=chat))
             return
         if not self.sender_ok(msg["chat"], msg.get("from")):                 # skupina: jen povolení uživatelé
+            return
+        text = msg.get("text") or msg.get("caption") or ""
+        reply = k2s.parse_captcha_reply(text)                                # odpověď na captchu Keep2Share: „#12 kód“
+        if reply and not text.strip().startswith("/"):
+            if self.runner.answer_captcha(reply[0], reply[1]):
+                await self.send(t(L, "k2s_captcha_ok", id=reply[0]))
             return
         text = msg.get("text") or msg.get("caption") or ""
         cmd = text.strip().split()[0].lower().split("@")[0] if text.strip().startswith("/") else ""

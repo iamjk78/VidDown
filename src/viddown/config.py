@@ -121,6 +121,9 @@ DEFAULTS: dict = {
     "catalog_thumbs_dir": "",               # složka miniatur katalogu; prázdné = <data>/catalog/thumbs
     "catalog_proxy_fallback": "",           # záložní proxy pro Katalog: zkusí se jednou po chybě spojení nebo serveru (ne po omezení 429)
     "catalog_hour_limit": 600,              # nejvýš tolik dotazů na jeden web za hodinu při zjišťování podrobností a stránek (0 = bez stropu)
+    "k2s_enabled": True,                    # Keep2Share přes oficiální API (viz resolvers/k2s.py); jen pro adresy k2s.cc / keep2share.cc
+    "k2s_retry_minutes": 60,                # jak často se čekající položka Keep2Share zkouší znovu (min 15, max 1440)
+    "k2s_captcha_minutes": 30,              # jak dlouho se čeká na odpověď na captchu z Telegramu (5–120)
     "catalog_gap": 3,                       # pauza mezi dotazy na stejný web při zjišťování podrobností (s, 0–60)
     "catalog_auto": False,                  # automaticky hledat nová videa ve zdrojích (jen nenabídnutá; v rozvrhu, je-li zapnutý)
     "catalog_auto_hours": 24,               # jak často (hodiny): 6 | 12 | 24 | 72 | 168
@@ -165,7 +168,7 @@ ENV_MAP = {
 
 _lock = threading.RLock()
 
-RANGES = {"port": (1, 65535), "probe_concurrency": (1, 16)}           # další meze se přidávají sem; mimo rozsah = chyba při ukládání, oříznutí při čtení
+RANGES = {"port": (1, 65535), "probe_concurrency": (1, 16), "k2s_retry_minutes": (15, 1440), "k2s_captcha_minutes": (5, 120)}           # další meze se přidávají sem; mimo rozsah = chyba při ukládání, oříznutí při čtení
 
 
 def _coerce(default, value):
@@ -378,6 +381,32 @@ class Secrets:
     def set_telegram_token(self, token: str) -> None:
         d = self._load()
         d["telegram_token"] = token.strip()
+        self._save(d)
+
+    def k2s_login(self) -> tuple[str, str] | None:
+        d = self._load()
+        u, p = d.get("k2s_user", ""), d.get("k2s_password", "")
+        return (u, p) if u and p else None
+
+    def set_k2s_login(self, user: str, password: str) -> None:
+        """Přihlášení k Keep2Share (volitelné). Prázdné hodnoty přihlášení zruší i uložený token."""
+        d = self._load()
+        if user.strip() and password:
+            d["k2s_user"], d["k2s_password"] = user.strip(), password
+        else:
+            for k in ("k2s_user", "k2s_password", "k2s_token"):
+                d.pop(k, None)
+        self._save(d)
+
+    def k2s_token(self) -> str:
+        return self._load().get("k2s_token", "")
+
+    def set_k2s_token(self, token: str) -> None:
+        d = self._load()
+        if token:
+            d["k2s_token"] = token
+        else:
+            d.pop("k2s_token", None)
         self._save(d)
 
     # --- token pro čtení vydání aplikace z (soukromého) GitHub repozitáře
