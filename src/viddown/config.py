@@ -391,11 +391,12 @@ class Secrets:
     def set_k2s_login(self, user: str, password: str) -> None:
         """Přihlášení k Keep2Share (volitelné). Prázdné hodnoty přihlášení zruší i uložený token."""
         d = self._load()
+        d.pop("k2s_token", None)                                             # nový účet nesmí používat starý token
         if user.strip() and password:
             d["k2s_user"], d["k2s_password"] = user.strip(), password
         else:
-            for k in ("k2s_user", "k2s_password", "k2s_token"):
-                d.pop(k, None)
+            d.pop("k2s_user", None)
+            d.pop("k2s_password", None)
         self._save(d)
 
     def k2s_token(self) -> str:

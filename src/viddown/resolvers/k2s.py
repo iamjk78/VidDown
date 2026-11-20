@@ -6,6 +6,7 @@ Bez přihlášení se volá anonymně, s přihlášením (auth_token) jen když 
 """
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from urllib.parse import urlparse
@@ -13,6 +14,8 @@ from urllib.parse import urlparse
 import httpx
 
 from . import ResolveError
+
+log = logging.getLogger("viddown.k2s")
 
 API = "https://keep2share.cc/api/v2"
 TIMEOUT = 30.0
@@ -90,6 +93,7 @@ class Client:
     def __init__(self, transport: httpx.BaseTransport | None = None, base: str = API):
         self._http = httpx.Client(base_url=base, timeout=TIMEOUT, transport=transport,
                                   headers={"User-Agent": "VidDown"})
+        self.free_key: str | None = None        # klíč pro volné stahování, který server vrátí místo odkazu (viz get_url)
 
     def close(self) -> None:
         self._http.close()
@@ -112,7 +116,12 @@ class Client:
         return data
 
     def login(self, username: str, password: str) -> str:
-        data = self._post("/login", {"username": username, "password": password})
+        try:
+            data = self._post("/login", {"username": username, "password": password})
+        except K2SError as e:
+            if e.code == E_LOGIN_RECAPTCHA:                                  # přihlášení vyžaduje ověření člověka: nezkouší se znovu
+                raise K2SError("přihlášení vyžaduje ověření člověka (Keep2Share), přihlaste se v prohlížeči", e.code, "login")
+            raise
         token = data.get("auth_token")
         if not token:
             raise K2SError("přihlášení nevrátilo token", None, "login")
@@ -123,15 +132,26 @@ class Client:
         body: dict = {"file_id": file_id}
         if auth_token:
             body["auth_token"] = auth_token
+        free_download_key = free_download_key or self.free_key
         if free_download_key:
             body["free_download_key"] = free_download_key
         if captcha and captcha_response:
             body["captcha_challenge"] = captcha.challenge
             body["captcha_response"] = captcha_response
-        data = self._post("/getUrl", body)
+        try:
+            data = self._post("/getUrl", body)
+        except K2SError as e:
+            if e.code == E_FREE_KEY_WRONG:                                   # klíč neplatí: příště se bez něj začíná znovu
+                self.free_key = None
+            raise
         url = data.get("url")
         if not url:
-            raise K2SError("odpověď neobsahuje odkaz ke stažení", None, "other")
+            # server nevrátil odkaz: buď volné stahování čeká (vrátí klíč a odpočet), nebo je odpověď jiná než v dokumentaci
+            log.info("getUrl bez odkazu, pole odpovědi: %s", sorted(data))
+            if data.get("free_download_key"):
+                self.free_key = str(data["free_download_key"])
+                raise K2SError("čeká se na volné stahování", E_WAIT_FREE, "wait")
+            raise K2SError(f"odpověď bez odkazu (pole: {', '.join(sorted(data))})", None, "other")
         return url
 
     def request_captcha(self) -> Challenge:

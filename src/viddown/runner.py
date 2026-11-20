@@ -295,7 +295,7 @@ class Runner:
                     break
                 if job["id"] in self.running:
                     continue
-                if self.is_k2s(job["url"]):                                    # Keep2Share má vlastní pruh (4a)
+                if self.is_k2s(job["url"]) and s.get("k2s_enabled", True):    # Keep2Share má vlastní pruh (4a)
                     continue
                 key = host_key(job["url"])
                 pause = self.host_pause.get(key)
@@ -634,7 +634,8 @@ class Runner:
         if not s.get("rate_limit_enabled"):
             return None
         total = float(s.get("rate_limit_mbps", 10)) * 1024 * 1024
-        return int(total / max(1, len(self.running)))
+        stahuje_k2s = any(self.db.get(j) and self.is_k2s(self.db.get(j)['url']) and (self.db.get(j) or {}).get('stage') == 'download' for j in self.running)
+        return int(total / max(1, self._normal_running() + (1 if stahuje_k2s else 0)))   # K2S se počítá jen když skutečně stahuje
 
     def _name(self, job: dict, info: dict) -> str:
         s = self.settings.all()
@@ -794,16 +795,25 @@ class Runner:
             await asyncio.sleep(min(10.0, left))
 
     async def _k2s_ask_captcha(self, job: dict, client, holder: ProcHolder, s: dict):
-        """Vyžádá captchu od API, pošle obrázek uživateli a čeká na jeho odpověď. Vrací (výzva, odpověď) nebo (None, None)."""
+        """Vyžádá captchu od API, pošle obrázek uživateli a čeká na jeho odpověď. Vrací (výzva, odpověď) nebo (None, None).
+        (None, None) znamená „zatím nejde vyřešit“ – volající počká a zkusí to znovu. Chyby API ani Telegramu úlohu neshodí."""
         if self.captcha_sender is None:                                       # bez Telegramu nejde captchu vyřešit: úloha počká
             return None, None
-        ch = await asyncio.to_thread(client.request_captcha)
-        img = await asyncio.to_thread(client.captcha_image, ch)
+        try:
+            ch = await asyncio.to_thread(client.request_captcha)
+            img = await asyncio.to_thread(client.captcha_image, ch)
+        except k2s.K2SError as e:
+            log.info("úloha %s: captchu nejde získat (%s)", job["id"], e.kind)
+            return None, None
         fut = asyncio.get_running_loop().create_future()
         self.k2s_waiters[job["id"]] = fut
         try:
             self.db.update(job["id"], stage="captcha", eta=None)
-            await self.captcha_sender(job["id"], img)
+            try:
+                await self.captcha_sender(job["id"], img)
+            except Exception as e:  # noqa: BLE001 – Telegram není připojen nebo odeslání selhalo: počká se
+                log.warning("úloha %s: captchu nejde poslat do Telegramu: %s", job["id"], e)
+                return None, None
             limit = time.monotonic() + float(s.get("k2s_captcha_minutes", 30) or 30) * 60
             while not fut.done():
                 holder.check()
@@ -823,7 +833,8 @@ class Runner:
         return True
 
     async def _dl_k2s(self, job, info, ctx, staging, holder, on_progress):
-        """Stažení z Keep2Share přes oficiální API. Odpočet a limit se jen čekají, captchu vyřeší uživatel."""
+        """Stažení z Keep2Share přes oficiální API. Odpočet a limit se jen čekají, captchu vyřeší uživatel.
+        Přihlášení (jen když ho uživatel vyplnil) se provede jednou a token se ukládá; při chybě tokenu se přihlásí znovu jednou."""
         from datetime import datetime, timedelta
         from pathlib import PurePosixPath
         from urllib.parse import unquote, urlparse
@@ -832,22 +843,25 @@ class Runner:
         self.db.update(job["id"], method="k2s")
         retry = self._k2s_retry_s(s)
         client = k2s.Client()
-        token = None
-        if self.secrets is not None and self.secrets.k2s_login():
-            token = self.secrets.k2s_token() or None
-            if token is None:                                                 # přihlášení jen když ho uživatel vyplnil
-                user, pw = self.secrets.k2s_login()
-                token = await asyncio.to_thread(client.login, user, pw)
-                self.secrets.set_k2s_token(token)
         try:
+            login = self.secrets.k2s_login() if self.secrets is not None else None
+            token = (self.secrets.k2s_token() or None) if login else None
+            relogged = False
             ch = answer = None
             while True:
                 holder.check()
+                if login and token is None:                                  # chyba přihlášení zde vyhodí a úloha skončí (bez opakování)
+                    token = await asyncio.to_thread(client.login, *login)
+                    self.secrets.set_k2s_token(token)
                 try:
                     link = await asyncio.to_thread(client.get_url, fid, token, None, ch, answer)
                     break
                 except k2s.K2SError as e:
                     ch = answer = None
+                    if token and e.kind == "other" and not relogged:          # token mohl vypršet: jednou se přihlásit znovu
+                        relogged, token = True, None
+                        self.secrets.set_k2s_token("")
+                        continue
                     if e.kind == "captcha":
                         ch, answer = await self._k2s_ask_captcha(job, client, holder, s)
                         if answer is None:
@@ -865,9 +879,11 @@ class Runner:
         finally:
             client.close()
         self.db.update(job["id"], stage="download", eta=None)
-        ext = PurePosixPath(unquote(urlparse(link).path)).suffix or ".bin"
-        dest = staging / f"{self._name(job, info)}{ext}"
+        name = self._name(job, info)
+        url_ext = PurePosixPath(unquote(urlparse(link).path)).suffix
+        fname = name if PurePosixPath(name).suffix else name + (url_ext or ".bin")
         staging.mkdir(parents=True, exist_ok=True)
+        dest = staging / fname
         size = await k2s.fetch_file(link, dest, on_progress, holder.check)
         return {"file": dest, "thumb": None, "log": f"Keep2Share: staženo {size} B"}
 

@@ -22,7 +22,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__, appupdate, autobackup, backup, catalog, catalogdetails, pagelist, schedule, subscriptions, thumbs, updater
-from .resolvers import cookiepolicy
+from .resolvers import cookiepolicy, k2s
 from .config import DEFAULTS, CHOICES, cookies_path
 from .probe import probe_url
 from .util import check_dir_writable, env_flag, extract_urls, in_docker, in_schedule, mask_proxy, sanitize_filename
@@ -35,7 +35,7 @@ MAX_RESTORE_BYTES = 8 * 1024 ** 3                  # největší povolená nahra
 JOB_FIELDS = ("id", "url", "title", "status", "kind", "method", "parent_id", "pos", "paused", "source", "channel",
               "duration", "height", "size_est", "approx", "progress", "downloaded", "total", "speed", "eta", "filepath",
               "filesize", "error", "error_kind", "attempts", "not_before", "created_at", "finished_at", "thumb_url", "subdir",
-              "sub_id")
+              "sub_id", "stage")
 
 
 def job_out(j: dict) -> dict:
@@ -165,7 +165,7 @@ def create_app(app_state) -> FastAPI:
     def state() -> dict:
         s = S.settings.all()
         q = [job_out(j) for j in S.db.queue()]
-        running = [j for j in q if j["status"] == "running"]
+        running = [j for j in q if j["status"] == "running" and not k2s.file_id_of(j["url"] or "")]   # pruh Keep2Share má vlastní limit
         waiting = [j for j in q if j["status"] in ("queued", "new", "probing") and j["kind"] == "video"]
         playlists_pending = sum((j.get("count") or 0) for j in q if j["status"] == "confirm" and j["kind"] != "video")
         counts = S.db.sub_counts()
@@ -1098,8 +1098,8 @@ def create_app(app_state) -> FastAPI:
         """Přihlášení k Keep2Share (volitelné). Prázdné jméno i heslo = zrušit přihlášení a uložený token."""
         body = await req.json()
         user, pw = str(body.get("username") or "").strip(), str(body.get("password") or "")
-        if user and not pw:
-            raise HTTPException(400, "Zadejte heslo.")
+        if bool(user) != bool(pw):
+            raise HTTPException(400, "Zadejte jméno i heslo, nebo obojí nechte prázdné pro zrušení.")
         S.secrets.set_k2s_login(user, pw)
         return JSONResponse(settings_out())
 

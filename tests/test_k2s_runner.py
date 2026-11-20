@@ -195,3 +195,99 @@ def test_settings_endpoint_saves_login_without_showing_password(data, tmp_path):
     assert "tajne" not in r.text
     r = c.post("/api/settings/k2s_login", json={"username": "", "password": ""})
     assert r.json()["k2s_login_set"] is False
+
+
+def test_probe_accepts_keep2share_url_without_yt_dlp(data):
+    from viddown import probe
+    from viddown.resolvers import Ctx
+    res = asyncio.run(probe.probe_url(URL, Ctx(Settings().all(), FakeEngines(), data)))
+    assert res["type"] == "video" and res["method"] == "k2s" and res["title"] == "film.rar"
+
+
+def test_captcha_answer_forms(rt):
+    import asyncio as aio
+    from viddown.telegram import TelegramBot
+    r, db = rt
+    bot = TelegramBot.__new__(TelegramBot)
+    bot.runner = r
+    sent = []
+
+    async def fake_send(text, chat=None, **kw):
+        sent.append(text)
+    bot.send = fake_send
+    bot._captcha_msgs = {555: 7}
+    bot.lang = lambda: "cs"
+
+    async def scenario():
+        fut = aio.get_running_loop().create_future()
+        r.k2s_waiters[7] = fut
+        # 1) jen kód, když čeká jedna captcha
+        assert await bot._captcha_answer({}, "GeMNSB") is True and fut.result() == "GeMNSB"
+        fut2 = aio.get_running_loop().create_future()
+        r.k2s_waiters[8] = fut2
+        # 2) více čekajících: odpověď na zprávu s captchou
+        assert await bot._captcha_answer({"reply_to_message": {"message_id": 555}}, "abc") is False   # položka 7 už má odpověď
+        assert fut.result() == "GeMNSB"
+        bot._captcha_msgs[556] = 8
+        assert await bot._captcha_answer({"reply_to_message": {"message_id": 556}}, "abc") is True and fut2.result() == "abc"
+        assert await bot._captcha_answer({}, "abc") is False      # nejednoznačné: nic nepřiřazuje
+        # 3) prefix „#9 xyz“ (zároveň se nečeká na jinou položku)
+        fut3 = aio.get_running_loop().create_future()
+        r.k2s_waiters[9] = fut3
+        assert await bot._captcha_answer({}, "#9 xyz") is True and fut3.result() == "xyz"
+        # 4) běžné zprávy a adresy se nezachytí
+        assert await bot._captcha_answer({}, "https://k2s.cc/file/abc/x.rar") is False
+        assert await bot._captcha_answer({}, "/fronta") is False
+        r.k2s_waiters.clear()
+        return sent
+
+    asyncio.run(scenario())
+
+
+def test_captcha_send_failure_postpones_instead_of_failing(rt, monkeypatch):
+    r, db = rt
+
+    async def broken_sender(jid, img):
+        raise RuntimeError("Telegram není připojen")
+
+    r.captcha_sender = broken_sender
+    ScriptedClient.script = [k2s.K2SError("captcha", 30, "captcha"), "https://dl.example.test/f.rar"]
+    jid, res = run_job(r, db, monkeypatch)
+    assert res["file"].read_bytes() == b"video-bytes"
+
+
+def test_captcha_reply_ignores_addresses_without_scheme():
+    from viddown.telegram import TelegramBot
+    from viddown.resolvers import k2s as k
+    r = runner_mod.Runner.__new__(runner_mod.Runner)
+    r.k2s_waiters = {}
+    fut = asyncio.new_event_loop().create_future()
+    r.k2s_waiters[3] = fut
+    bot = TelegramBot.__new__(TelegramBot)
+    bot.runner = r
+    bot._captcha_msgs = {}
+    bot.lang = lambda: "cs"
+
+    async def nosend(text, chat=None, **kw):
+        return None
+    bot.send = nosend
+    assert asyncio.run(bot._captcha_answer({}, "youtube.com/watch?v=abc")) is False
+    assert not fut.done()
+    assert k.parse_captcha_reply("12 abc") == (12, "abc")
+
+
+def test_changing_login_drops_old_token(tmp_path):
+    from viddown.config import Secrets
+    sec = Secrets(tmp_path / "secrets.json")
+    sec.set_k2s_login("a", "b")
+    sec.set_k2s_token("stary-token")
+    sec.set_k2s_login("c", "d")
+    assert sec.k2s_token() == "" and sec.k2s_login() == ("c", "d")
+
+
+def test_password_without_username_is_rejected(data):
+    from fastapi.testclient import TestClient
+    from viddown.server import create_app
+    from tests.test_api import State
+    c = TestClient(create_app(State(data)))
+    assert c.post("/api/settings/k2s_login", json={"username": "", "password": "x"}).status_code == 400

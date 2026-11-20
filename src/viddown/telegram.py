@@ -6,6 +6,7 @@ podle nastavení stáhne hned nebo se zeptá tlačítky. Dál hlásí jen chyby 
 from __future__ import annotations
 
 import asyncio
+import re
 import logging
 import time
 
@@ -31,6 +32,7 @@ class TelegramBot:
         self._offset: int | None = None            # poslední potvrzená aktualizace; přežije výpadek spojení (jinak by se zprávy zpracovaly znovu)
         self._offset_token: str | None = None
         self.loop: asyncio.AbstractEventLoop | None = None
+        self._captcha_msgs: dict[int, int] = {}            # id zprávy s captchou -> číslo položky
         runner.captcha_sender = self.send_captcha            # captcha z Keep2Share posílá runner sem (viz runner._k2s_ask_captcha)
 
     # ------------------------------------------------------------ stav
@@ -77,6 +79,35 @@ class TelegramBot:
             log.warning("sendMessage: %s", e)
             return None
 
+    async def _captcha_answer(self, msg: dict, text: str) -> bool:
+        """Odpověď na captchu z chatu. Jde to třemi způsoby: odpovědět na zprávu s captchou (určí položku),
+        napsat jen kód, když čeká právě jedna captcha, nebo „#číslo kód“. Ostatní zprávy vrací False."""
+        t_ = (text or "").strip()
+        if not t_ or t_.startswith("/") or "://" in t_ or extract_urls(t_):     # adresy (i bez https://) nejsou odpověď na captchu
+            return False
+        pending = {j for j, f in self.runner.k2s_waiters.items() if not f.done()}
+        if not pending:
+            return False
+        jid, answer = None, None
+        reply = k2s.parse_captcha_reply(t_)
+        if reply and reply[0] in pending:
+            jid, answer = reply
+        else:
+            rt = msg.get("reply_to_message") or {}
+            if rt.get("message_id") in self._captcha_msgs:                    # odpověď na konkrétní captchu
+                jid = self._captcha_msgs[rt["message_id"]]
+                if jid not in pending:
+                    return False                                              # tahle captcha už vyřízená nebo zrušená
+            elif len(pending) == 1:
+                jid = next(iter(pending))
+            if jid is not None and re.fullmatch(r"[A-Za-z0-9]{2,32}", t_):   # kód z captchy je jen písmena a číslice (ne adresa ani věta)
+                answer = t_
+        if jid is None or not answer:
+            return False
+        if self.runner.answer_captcha(jid, answer):
+            await self.send(t(self.lang(), "k2s_captcha_ok", id=jid))
+        return True
+
     async def send_captcha(self, jid: int, image: bytes) -> None:
         """Pošle captchu Keep2Share do chatu vlastníka. Odpoví se „#<číslo položky> <kód>“."""
         chat = self.chat()
@@ -88,6 +119,9 @@ class TelegramBot:
         data = r.json()
         if not data.get("ok"):
             raise RuntimeError(data.get("description") or f"HTTP {r.status_code}")
+        self._captcha_msgs[int(data["result"]["message_id"])] = jid
+        for old in [m for m, j in self._captcha_msgs.items() if j not in self.runner.k2s_waiters][:-20]:
+            self._captcha_msgs.pop(old, None)
 
     async def edit(self, chat, msg_id, text, keyboard=None):
         try:
@@ -208,10 +242,7 @@ class TelegramBot:
         if not self.sender_ok(msg["chat"], msg.get("from")):                 # skupina: jen povolení uživatelé
             return
         text = msg.get("text") or msg.get("caption") or ""
-        reply = k2s.parse_captcha_reply(text)                                # odpověď na captchu Keep2Share: „#12 kód“
-        if reply and not text.strip().startswith("/"):
-            if self.runner.answer_captcha(reply[0], reply[1]):
-                await self.send(t(L, "k2s_captcha_ok", id=reply[0]))
+        if await self._captcha_answer(msg, text):                            # odpověď na captchu Keep2Share (viz _captcha_answer)
             return
         text = msg.get("text") or msg.get("caption") or ""
         cmd = text.strip().split()[0].lower().split("@")[0] if text.strip().startswith("/") else ""

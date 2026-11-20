@@ -108,3 +108,42 @@ def test_captcha_image_is_fetched_with_id():
         return httpx.Response(200, content=b"\x89PNG-fake")
 
     assert client(handler).captcha_image(k2s.Challenge("ch1")) == b"\x89PNG-fake"
+
+
+def test_free_key_without_url_means_wait_and_key_is_reused():
+    seen = []
+
+    def handler(req):
+        seen.append(json.loads(req.content))
+        if len(seen) == 1:
+            return httpx.Response(200, json={"status": "success", "free_download_key": "fk1", "wait_time": 60})
+        return httpx.Response(200, json={"status": "success", "url": "https://dl.example.test/x"})
+
+    c = client(handler)
+    with pytest.raises(k2s.K2SError) as e:
+        c.get_url("abc")
+    assert e.value.kind == "wait"
+    assert c.get_url("abc") == "https://dl.example.test/x"
+    assert seen[1]["free_download_key"] == "fk1"
+
+
+def test_response_without_url_or_key_is_reported_by_field_names_only():
+    c = client(reply({"status": "success", "something": "x"}))
+    with pytest.raises(k2s.K2SError) as e:
+        c.get_url("abc")
+    assert e.value.kind == "other" and "something" in str(e.value)
+
+
+def test_wrong_free_key_is_forgotten():
+    c = client(reply({"status": "error", "errorCode": 40, "message": "bad key"}))
+    c.free_key = "stary"
+    with pytest.raises(k2s.K2SError):
+        c.get_url("abc")
+    assert c.free_key is None
+
+
+def test_login_recaptcha_is_not_retried_as_captcha():
+    c = client(reply({"status": "error", "errorCode": 33, "message": "recaptcha"}))
+    with pytest.raises(k2s.K2SError) as e:
+        c.login("u", "p")
+    assert e.value.kind == "login"

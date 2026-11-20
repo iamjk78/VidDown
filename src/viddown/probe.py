@@ -10,7 +10,7 @@ import time
 
 from . import nested
 from .resolvers import Ctx, ResolveError
-from .resolvers import pages, sniffer, ytdlp
+from .resolvers import k2s, pages, sniffer, ytdlp
 from .util import url_list_name, domain, fallback_allowed, youtube_channel_base
 
 log = logging.getLogger("viddown.probe")
@@ -184,6 +184,12 @@ def _sniff_result(sn: dict, url: str) -> dict:
 
 async def probe_url(url: str, ctx: Ctx) -> dict:
     """Projde metody podle nastaveného pořadí. Na další metodu přejde jen když video nebylo nalezeno."""
+    if k2s.file_id_of(url) and ctx.settings.get("k2s_enabled", True):
+        # Keep2Share: o dostupnosti souboru rozhodne až API při stahování (odpočet, captcha), tady se jen zařadí
+        from pathlib import PurePosixPath
+        from urllib.parse import unquote, urlparse
+        name = PurePosixPath(unquote(urlparse(url).path)).name or None
+        return {"type": "video", "title": name, "info": {}, "method": "k2s"}
     if pages.is_story_url(url):
         # Facebook Story: video leží za odkazem (sdílený reel) – najdeme ho a zkontrolujeme jako běžné video
         try:
