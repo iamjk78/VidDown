@@ -474,3 +474,25 @@ Pět recenzentů (fronta/DB, backend Katalogu, server/bezpečnost, GUI, sniffer/
 **Přepínač miniatur v katalogu (verze 0.3.1):** tlačítko „Miniatury: zap/vyp“ v hlavičce katalogu (jako u fronty) jen řídí zobrazení karet v tomto prohlížeči (`localStorage` `vd_cat_thumbs`, v `CAT.showThumbs`). Stahování miniatur a animací na serveru se nemění.
 
 **Cookies jen když je potřeba (16. 11. 2026, verze 0.3.0):** nastavení `cookies_use` = `always` (výchozí, chování jako dřív) | `needed`. Při `needed` (`resolvers/cookiepolicy.py`, `attempt`) jde první pokus bez cookies (`Ctx.no_cookies=True`: `cookies_file` vrací None, yt-dlp nedostane `--cookies` ani `--cookies-from-browser`); když skončí chybou druhu `login` (věk, „nejste robot“, jen pro členy, soukromé) a nejde o omezení 429, zopakuje se hned s cookies (nepočítá se do pokusů) a po úspěchu se web (`host_key`, YouTube = jeden web) zapíše do `<data>/cookie_hosts.json` na 7 dní (`LEARN_DAYS`), pak chodí rovnou s cookies. Weby z `cookies_always_hosts` (čárkami, normalizuje se na domény) dostávají cookies vždy – pro weby, které bez přihlášení tiše vrátí horší kvalitu nebo neúplný seznam (katalog, odběry); tam chyba nepřijde a poznat se to nedá. Platí pro `ytdlp.probe`, `full_info`, `download` (tím kontrola odkazu, fronta, odběry, katalog), `sniffer.sniff` (bez nalezeného videa a bez DRM se zkusí jednou znovu s cookies, jen když `cookies.txt` obsahuje cookies k tomuto webu; stažení přes sniffer používá cookies, se kterými proběhl sniff), `pages.open_story` a `sniffer.Renderer` (cookies se přidají jen pro weby, které je podle pravidla mají dostat; bez opakování). Vnořené volání (`Ctx.no_cookies` už nastavené) rozhodnutí nemění. „Nahrané cookies už YouTube neuznává“ se hlásí jen po pokusu s cookies. GUI: Nastavení › Přístup a síť › Používat cookies (Vždy / Jen když je potřeba), pole Weby vždy s cookies a seznam Naučené weby s tlačítkem Zapomenout (`DELETE /api/settings/cookie-hosts?host=`; bez `host` zapomene všechny); `GET /api/settings` vrací `cookie_hosts`. Seznam naučených webů se nezálohuje.
+
+## 28. Pomalá bezplatná stahování (schváleno 20. 11. 2026, čeká na vzorovou stránku)
+
+Obecný resolver pro servery s pomalým bezplatným stahováním (první Keep2Share, Rapidgator až po ověření jeho podmínek a stránek). Aplikace otevře odkaz, zjistí, zda server nabízí odpočet, počká jeho konec a stáhne soubor. Průběh, rychlost a zbývající čas jsou vidět ve frontě. Odpočet a limity se zobrazí s časem zbývajícím do konce.
+
+- **Profily serverů:** každý server má profil s rozpoznáním odpočtu, odkazu ke stažení, hlášky „soubor neexistuje“, denního limitu a captchy. Společný kód je stejný. Keep2Share se začne psát až po vzorové stránce s odpočtem (uložená HTML bez přihlášení a osobních údajů).
+- **Pruhy podle serveru:** fronta má pro každý server vlastní pruh a z každého serveru se stahuje jedna položka. Pět různých serverů znamená až pět souborů najednou. Pomalé položky běží souběžně s běžným stahováním a nezabírají jeho sloty.
+- **Stavy položky:** odpočet (zbývající čas), čeká na další kontrolu (čas další kontroly), stahuje se (průběh, rychlost, zbývající čas), neexistuje (vyřazeno, do historie jako chyba „soubor neexistuje“).
+- **Captcha nebo neznámá stránka:** spojení se ukončí a položka se zařadí na konec pruhu svého serveru. Čeká se nastavený interval. Captchu aplikace nikdy neřeší ani neobchází.
+- **Denní limit serveru:** platí jen pro daný server, ostatní servery pokračují. Položka čeká do dalšího dne.
+- **Nastavení:** interval kontrol (výchozí 60 minut, minimum 15 minut) a zapnutí nebo vypnutí každého profilu serveru.
+- **Testy:** jen smyšlené lokální stránky, nikdy skutečné servery.
+
+## 29. Více adres ve frontě (navrženo 20. 11. 2026, čeká na provedení)
+
+Fronta dosud přijímá jen jedno URL z jednořádkového pole, ale `POST /api/jobs` přijme více adres v jednom textu. Úprava je hlavně v GUI.
+
+- **Rychlé přidání** zůstává jednořádkové pole a tlačítko Přidat.
+- **Tlačítko „Více adres…“** otevře okno jako v Katalogu: vícerádkové pole a „Načíst ze souboru .txt…“. Počítadlo řádků.
+- **Výsledek:** kolik adres přibylo, kolik už ve frontě bylo a které řádky nebyly platné.
+- **Vložení více řádků** do rychlého pole otevře okno Více adres s obsahem.
+- **Komentáře `#`:** řádky začínající `#` se přeskočí v GUI i na serveru (`extract_urls` dnes bere URL z celého textu, včetně komentářů).

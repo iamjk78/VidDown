@@ -13,3 +13,6 @@ dist/
 build/
 *.spec.bak
 docker-compose.override.yml
+
+# Plán vývoje je jen lokální (nenahrává se do repozitáře)
+PLAN.md
