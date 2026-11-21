@@ -867,6 +867,9 @@ class Runner:
                         if answer is None:
                             await self._k2s_sleep(job, holder, retry, "wait")
                         continue
+                    if e.kind == "wait" and e.wait_seconds:                 # server řekl, jak dlouho čekat (time_wait)
+                        await self._k2s_sleep(job, holder, min(3600.0, max(5.0, float(e.wait_seconds)) + 5.0), "wait")
+                        continue
                     if e.kind in ("wait", "network", "rate"):
                         await self._k2s_sleep(job, holder, retry, "wait")
                         continue

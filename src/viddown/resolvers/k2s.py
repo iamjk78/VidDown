@@ -37,9 +37,10 @@ E_FILE_NOT_FOUND = 20        # soubor neexistuje
 class K2SError(ResolveError):
     """Chyba API. `kind` slouží k rozhodování ve frontě, `code` je kód z API."""
 
-    def __init__(self, message: str, code: int | None, kind: str):
+    def __init__(self, message: str, code: int | None, kind: str, wait_seconds: float | None = None):
         super().__init__(message, kind)
         self.code = code
+        self.wait_seconds = wait_seconds      # u čekání na volné stahování: doba z odpovědi (time_wait), pokud přišla
 
 
 @dataclass
@@ -150,7 +151,11 @@ class Client:
             log.info("getUrl bez odkazu, pole odpovědi: %s", sorted(data))
             if data.get("free_download_key"):
                 self.free_key = str(data["free_download_key"])
-                raise K2SError("čeká se na volné stahování", E_WAIT_FREE, "wait")
+                try:
+                    wait = float(data.get("time_wait") or 0) or None      # time_wait: počet sekund (ověřeno v logu z 21. 11. 2026, ověřte jednotku při dalším běhu)
+                except (TypeError, ValueError):
+                    wait = None
+                raise K2SError("čeká se na volné stahování", E_WAIT_FREE, "wait", wait_seconds=wait)
             raise K2SError(f"odpověď bez odkazu (pole: {', '.join(sorted(data))})", None, "other")
         return url
 

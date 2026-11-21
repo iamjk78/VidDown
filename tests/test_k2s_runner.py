@@ -291,3 +291,15 @@ def test_password_without_username_is_rejected(data):
     from tests.test_api import State
     c = TestClient(create_app(State(data)))
     assert c.post("/api/settings/k2s_login", json={"username": "", "password": "x"}).status_code == 400
+
+
+def test_wait_uses_time_wait_from_server(rt, monkeypatch, tmp_path):
+    r, db = rt
+    waits = []
+
+    async def fake_sleep(job, holder, seconds, stage):
+        waits.append(seconds)
+    monkeypatch.setattr(r, "_k2s_sleep", fake_sleep)
+    ScriptedClient.script = [k2s.K2SError("čeká", 41, "wait", wait_seconds=300), "https://dl.example.test/f.rar"]
+    jid, res = run_job(r, db, monkeypatch)
+    assert waits == [305.0] and res["file"].exists()

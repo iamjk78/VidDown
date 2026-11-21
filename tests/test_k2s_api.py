@@ -147,3 +147,12 @@ def test_login_recaptcha_is_not_retried_as_captcha():
     with pytest.raises(k2s.K2SError) as e:
         c.login("u", "p")
     assert e.value.kind == "login"
+
+
+def test_time_wait_is_kept_on_the_wait_error():
+    def handler(req):
+        return httpx.Response(200, json={"status": "success", "free_download_key": "fk", "time_wait": 300, "code": 0})
+    c = client(handler)
+    with pytest.raises(k2s.K2SError) as e:
+        c.get_url("abc")
+    assert e.value.kind == "wait" and e.value.wait_seconds == 300
