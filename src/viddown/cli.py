@@ -242,18 +242,7 @@ def cmd_app(a) -> int:
             man = au.pack(Path(a.arg), version=a.version, commit=a.commit)
             print(f"{man['file']}\nverze {man['version']}, schéma {man['schema_version']}, sha256 {man['sha256']}")
             if a.json:
-                body = json.dumps({k: v for k, v in man.items() if k != "file"}, ensure_ascii=False, indent=1).encode("utf-8")
-                Path(a.json).write_bytes(body)
-                key = _signing_key(a)
-                if key:                                                     # podpis přesných bajtů manifestu (ověřuje aplikace)
-                    sig_path = Path(a.json).with_name(au.MANIFEST_SIG_ASSET)
-                    sig_path.write_text(au.sign_manifest(body, key) + "\n", "ascii")
-                    print(f"manifest podepsán: {sig_path}")
-                elif a.require_signature:
-                    print("Vydání bez podpisu: chybí --sign-key-file nebo VIDDOWN_UPDATE_SIGNING_KEY.", file=sys.stderr)
-                    return 1
-                else:
-                    print("Pozor: manifest není podepsán (chybí --sign-key-file nebo VIDDOWN_UPDATE_SIGNING_KEY).", file=sys.stderr)
+                Path(a.json).write_text(json.dumps({k: v for k, v in man.items() if k != "file"}, ensure_ascii=False, indent=1), "utf-8")
         elif a.action == "install":
             if not a.arg:
                 print("Použití: viddown app install ARCHIV.zip [--sha256 SOUČET]", file=sys.stderr)
@@ -402,13 +391,6 @@ def cmd_doctor(a) -> int:
     return 0 if ok_all else 1
 
 
-def _signing_key(a) -> str | None:
-    """Soukromý klíč pro podpis vydání: soubor z `--sign-key-file`, jinak proměnná prostředí (v CI z tajemství)."""
-    if getattr(a, "sign_key_file", None):
-        return Path(a.sign_key_file).read_text("utf-8").strip() or None
-    return os.environ.get("VIDDOWN_UPDATE_SIGNING_KEY", "").strip() or None
-
-
 def _daemon_running() -> bool:
     """Běží instance aplikace? (zámek daemon.lock drží běžící proces)"""
     from .daemon import Lock
@@ -475,8 +457,6 @@ def main(argv=None) -> int:
     sp.add_argument("--version", help="pack: přepíše verzi v archivu (pro zkoušky)")
     sp.add_argument("--commit", help="pack: zkrácený commit zapsaný do manifestu")
     sp.add_argument("--json", help="pack: zapíše manifest vydání (včetně sha256) do tohoto souboru")
-    sp.add_argument("--sign-key-file", help="pack: soubor se soukromým klíčem (base64) pro podpis manifestu; jinak VIDDOWN_UPDATE_SIGNING_KEY")
-    sp.add_argument("--require-signature", action="store_true", help="pack: bez podpisu skončí chybou (pro vydání)")
     sp.add_argument("--force", action="store_true", help="update: zkusí znovu i dřív přeskočenou verzi")
     sp.add_argument("--sha256", help="install: očekávaný kontrolní součet")
     sp.add_argument("--no-test", action="store_true", help="activate: přeskočí samotest")

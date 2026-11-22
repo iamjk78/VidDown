@@ -15,7 +15,6 @@ Stav je v `<data>/app/state.json`:
 from __future__ import annotations
 
 import asyncio
-import base64
 import hashlib
 import json
 import logging
@@ -439,30 +438,8 @@ async def health_task(data: Path, stop: asyncio.Event, after: float | None = Non
 
 # --- vydání na GitHubu: kontrola a aktualizace -------------------------------------------------
 MANIFEST_ASSET = "manifest.json"
-MANIFEST_SIG_ASSET = "manifest.sig"          # Ed25519 podpis přesných bajtů manifest.json (podepisuje vydavatel, ne GitHub)
 MAX_MANIFEST_BYTES = 64 * 1024
 MAX_SIG_BYTES = 256
-# Veřejný klíč vydavatele. Ověřuje manifest každého vydání, který aplikace stáhne; soukromý klíč nesmí být v repozitáři ani v obraze.
-UPDATE_PUBKEY_B64 = "PWd4WtJTW/wLDO05RzESxUSvtj8CuslLsw7I82wvfrI="
-
-
-def sign_manifest(data: bytes, private_b64: str) -> str:
-    """Podepíše přesné bajty manifestu (používá vydavatel: `app pack --sign-key-file`). Vrací podpis v base64."""
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-    key = Ed25519PrivateKey.from_private_bytes(base64.b64decode(private_b64.strip()))
-    return base64.b64encode(key.sign(data)).decode("ascii")
-
-
-def verify_manifest(data: bytes, sig_b64: str, pubkey_b64: str | None = None) -> bool:
-    """Ověří podpis manifestu veřejným klíčem vydavatele. Jakákoli chyba (špatný podpis, poškozený zápis) = False."""
-    from cryptography.exceptions import InvalidSignature
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-    try:
-        pub = Ed25519PublicKey.from_public_bytes(base64.b64decode(pubkey_b64 or UPDATE_PUBKEY_B64))
-        pub.verify(base64.b64decode(sig_b64.strip()), data)
-        return True
-    except (InvalidSignature, ValueError, TypeError):
-        return False
 
 
 def github_api() -> str:
@@ -532,29 +509,22 @@ def _download_asset(repo: str, token: str | None, asset_id: int, dest, max_bytes
 
 def _release_manifest(repo: str, token: str | None, rel: dict) -> dict:
     a = rel["assets"].get(MANIFEST_ASSET)
-    sig = rel["assets"].get(MANIFEST_SIG_ASSET)
     zname = f"viddown-{rel['version']}.zip"
-    if not a or not sig or zname not in rel["assets"]:
-        raise UpdateError(f"vydání {rel['tag']} nemá očekávané soubory ({MANIFEST_ASSET}, {MANIFEST_SIG_ASSET}, {zname})")
+    if not a or zname not in rel["assets"]:
+        raise UpdateError(f"vydání {rel['tag']} nemá očekávané soubory ({MANIFEST_ASSET}, {zname})")
     with tempfile.TemporaryDirectory() as t:
-        mp, sp = Path(t) / "m.json", Path(t) / "m.sig"
+        mp = Path(t) / "m.json"
         _download_asset(repo, token, a["id"], mp, MAX_MANIFEST_BYTES)
-        _download_asset(repo, token, sig["id"], sp, MAX_SIG_BYTES)
-        raw = mp.read_bytes()
-        sig_text = sp.read_text("ascii", errors="replace")
-    # podpis se ověřuje nad přesnými bajty před jakýmkoli použitím obsahu (kontrolní součet v manifestu sám o sobě nestačí:
-    # manifest i archiv by mohl podvrhnout ten, kdo umí nahrát soubory do vydání)
-    if not verify_manifest(raw, sig_text):
-        raise UpdateError("podpis manifestu vydání neodpovídá: vydání nepochází od vydavatele, aktualizace se nepoužije")
-    try:
-        man = json.loads(raw.decode("utf-8"))
-    except ValueError as e:
-        raise UpdateError("manifest vydání je poškozený") from e
+        try:
+            man = json.loads(mp.read_text("utf-8"))
+        except ValueError as e:
+            raise UpdateError("manifest vydání je poškozený") from e
     if str(man.get("version")) != rel["version"]:
         raise UpdateError(f"manifest ({man.get('version')}) neodpovídá vydání ({rel['version']})")
     if not re.fullmatch(r"[0-9a-fA-F]{64}", str(man.get("sha256", ""))):
         raise UpdateError("manifest nemá platný kontrolní součet")
     return man
+
 
 
 def check(store: AppStore, repo: str, token: str | None) -> dict:

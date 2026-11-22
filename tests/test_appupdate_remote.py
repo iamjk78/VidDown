@@ -9,7 +9,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from tests._update_test_key import TEST_PRIV_B64, TEST_PUB_B64
 from viddown import appupdate as au
 
 TOKEN = "tajny-token-123"
@@ -86,11 +85,8 @@ class Fake:
             man["sha256"] = hashlib.sha256(zp.read_bytes()).hexdigest()
         manifest = {"version": manifest_version or version, "sha256": sha or man["sha256"],
                     "requires_image_api": man["requires_image_api"], "schema_version": man["schema_version"]}
-        mbytes = json.dumps(manifest).encode()
-        sig = au.sign_manifest(mbytes, TEST_PRIV_B64).encode()          # podpis přesných bajtů manifestu (testovací klíč)
-        self.assets = {1: (au.MANIFEST_ASSET, mbytes), 2: (zp.name, zp.read_bytes()), 3: (au.MANIFEST_SIG_ASSET, sig)}
-        assets = [{"id": 1, "name": au.MANIFEST_ASSET, "size": len(self.assets[1][1])},
-                  {"id": 3, "name": au.MANIFEST_SIG_ASSET, "size": len(sig)}]
+        self.assets = {1: (au.MANIFEST_ASSET, json.dumps(manifest).encode()), 2: (zp.name, zp.read_bytes())}
+        assets = [{"id": 1, "name": au.MANIFEST_ASSET, "size": len(self.assets[1][1])}]
         if with_zip:
             assets.append({"id": 2, "name": zp.name, "size": zip_size if zip_size is not None else len(self.assets[2][1])})
         self.release = {"tag_name": tag or f"v{version}", "body": "- nová věc\n- oprava", "assets": assets}
@@ -99,7 +95,6 @@ class Fake:
 @pytest.fixture
 def gh(monkeypatch):
     f = Fake()
-    monkeypatch.setattr(au, "UPDATE_PUBKEY_B64", TEST_PUB_B64)           # ověřování podpisu testovacím klíčem
     monkeypatch.setenv("VIDDOWN_GITHUB_API", f.url)
     for k in ("VIDDOWN_APP_ACTIVE", "VIDDOWN_BASE_VERSION", "VIDDOWN_IMAGE_API", "VIDDOWN_BASE_SCHEMA"):
         monkeypatch.delenv(k, raising=False)
@@ -221,7 +216,7 @@ def test_oversized_archive_is_refused(gh, store, tmp_path, monkeypatch):
         au.update(store, REPO, TOKEN)
     gh.publish(tmp_path)
     monkeypatch.setattr(au, "MAX_ZIP_BYTES", 5000)                        # skutečný soubor větší než limit při stahování
-    next(a for a in gh.release["assets"] if a["name"].endswith(".zip"))["size"] = 10                                  # GitHub hlásí menší velikost, než soubor má
+    gh.release["assets"][1]["size"] = 10                                  # GitHub hlásí menší velikost, než soubor má
     with pytest.raises(au.UpdateError, match="větší, než se čekalo"):
         au.update(store, REPO, TOKEN)
     assert store.installed() == []

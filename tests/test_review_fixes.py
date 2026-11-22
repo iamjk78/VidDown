@@ -110,35 +110,6 @@ def test_public_address_is_pinned_and_transport_is_used(monkeypatch):
     assert "transport" not in netsafe.client_kw("http://proxy.example:3128")
 
 
-# --- podpis vydání (appupdate) -------------------------------------------------------------------
-from tests._update_test_key import TEST_PRIV_B64, TEST_PUB_B64  # noqa: E402
-from viddown import appupdate as au  # noqa: E402
-
-
-def test_manifest_signature_roundtrip_and_tamper_detection():
-    data = b'{"version":"1.0.0","sha256":"' + b"a" * 64 + b'"}'
-    sig = au.sign_manifest(data, TEST_PRIV_B64)
-    assert au.verify_manifest(data, sig, TEST_PUB_B64)
-    assert not au.verify_manifest(data + b" ", sig, TEST_PUB_B64)     # změněný manifest
-    assert not au.verify_manifest(data, "AAAA", TEST_PUB_B64)          # nesmyslný podpis
-    assert not au.verify_manifest(data, sig)                           # jiný (produkční) klíč podpis neuzná
-
-
-def test_release_with_forged_manifest_is_refused(monkeypatch):
-    monkeypatch.setattr(au, "UPDATE_PUBKEY_B64", TEST_PUB_B64)
-    body = b'{"version":"1.0.0","sha256":"' + b"a" * 64 + b'"}'
-    rel = {"version": "1.0.0", "tag": "v1.0.0", "assets": {
-        au.MANIFEST_ASSET: {"id": 1, "size": len(body)},
-        au.MANIFEST_SIG_ASSET: {"id": 2, "size": 4},
-        "viddown-1.0.0.zip": {"id": 3, "size": 1}}}
-
-    def fake_download(repo, token, aid, dest, max_bytes):
-        dest.write_bytes(body if aid == 1 else b"AAAA")                  # podvržený manifest s neplatným podpisem
-    monkeypatch.setattr(au, "_download_asset", fake_download)
-    with pytest.raises(au.UpdateError, match="podpis"):
-        au._release_manifest("o/r", None, rel)
-
-
 # --- pomalý NAS nesmí zastavit frontu po jediné odpovědi --------------------------------------------
 import time as _time  # noqa: E402
 

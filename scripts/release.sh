@@ -90,8 +90,7 @@ docker buildx build "${ARGS[@]}" --push .
 
 # 3) GitHub Release (vytvoří i značku v<verze> na odeslaném commitu)
 if [ -n "$PREV" ]; then NOTES="$(git log --pretty='- %s' "$PREV"..HEAD)"; else NOTES="$(git log --pretty='- %s' -n 20)"; fi
-[ -f "$OUT/manifest.sig" ] || { echo "Vydání bez podpisu manifestu: nastavte VIDDOWN_UPDATE_SIGNING_KEY nebo použijte --sign-key-file." >&2; exit 1; }
-gh release create "v$VERSION" "$OUT/viddown-$VERSION.zip" "$OUT/manifest.json" "$OUT/manifest.sig" \
+gh release create "v$VERSION" "$OUT/viddown-$VERSION.zip" "$OUT/manifest.json" \
   --target "$(git rev-parse HEAD)" --title "VidDown $VERSION" --notes "$NOTES"
 git fetch -q --tags origin || true
 echo "Vydáno. Aplikace si novou verzi najde sama (viddown app check / update); obraz na Synology:"

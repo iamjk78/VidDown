@@ -6,7 +6,6 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
-from tests._update_test_key import TEST_PUB_B64
 from tests.test_appupdate_remote import REPO, TOKEN, Fake, break_module  # noqa: F401
 from tests.test_subscriptions import State, rt  # noqa: F401
 from viddown import appupdate as au
@@ -42,7 +41,6 @@ class St:
 @pytest.fixture
 def gh(monkeypatch):
     f = Fake()
-    monkeypatch.setattr(au, "UPDATE_PUBKEY_B64", TEST_PUB_B64)
     monkeypatch.setenv("VIDDOWN_GITHUB_API", f.url)
     for k in ("VIDDOWN_APP_ACTIVE", "VIDDOWN_BASE_VERSION", "VIDDOWN_IMAGE_API", "VIDDOWN_BASE_SCHEMA", "VIDDOWN_APP_UPDATE_TOKEN"):
         monkeypatch.delenv(k, raising=False)
