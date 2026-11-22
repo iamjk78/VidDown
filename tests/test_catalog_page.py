@@ -416,7 +416,7 @@ def test_fetch_limits_memory_and_rejects_non_html(monkeypatch):
     real = httpx.AsyncClient
 
     def client(*a, **kw):
-        return real(*a, transport=httpx.MockTransport(lambda req: handlers[req.url.path]), **kw)
+        return real(*a, **{**kw, "transport": httpx.MockTransport(lambda req: handlers[req.url.path])})
     monkeypatch.setattr(pagelist.httpx, "AsyncClient", client)
     text, final = asyncio.run(pagelist.fetch("https://w.example/big"))
     assert len(text) <= pagelist.MAX_BYTES and final == "https://w.example/big"

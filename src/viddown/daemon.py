@@ -168,12 +168,24 @@ def serve(open_browser: bool = False, host: str | None = None, port: int | None 
             pass
     if st.restart and not in_docker():
         # mimo Docker se spustí nový proces (v Dockeru se kontejner restartuje sám díky `restart: unless-stopped`)
-        argv = [sys.executable, *getattr(sys, "orig_argv", sys.argv)[1:]]
+        # přes spouštěč (viddown.bootstrap), ať se vybere správná verze; proměnné staré verze se nedědí
+        env = dict(os.environ)
+        env.pop("VIDDOWN_APP_ACTIVE", None)
+        env.pop("VIDDOWN_BASE_VERSION", None)
+        env.pop("VIDDOWN_IMAGE_API", None)
+        env.pop("VIDDOWN_BASE_SCHEMA", None)
+        if "VIDDOWN_ORIG_PYTHONPATH" in env:                               # PYTHONPATH před přidáním složky aktualizace
+            orig = env.pop("VIDDOWN_ORIG_PYTHONPATH")
+            if orig:
+                env["PYTHONPATH"] = orig
+            else:
+                env.pop("PYTHONPATH", None)
+        argv = [sys.executable, "-m", "viddown.bootstrap", *sys.argv[1:]]
         log.info("Restart: %s", argv)
         if sys.platform == "win32":
-            subprocess.Popen(argv)
+            subprocess.Popen(argv, env=env)
         else:
-            os.execv(argv[0], argv)
+            os.execve(argv[0], argv, env)
     return 0
 
 

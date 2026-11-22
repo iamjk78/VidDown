@@ -220,7 +220,11 @@ def test_unavailable_target_pauses_and_resumes_queue(rt, tmp_path):
     rt.settings.update({"download_dir": str(ro / "VidDown")})
     ro.chmod(0o500)  # „odpojený NAS“
     try:
-        asyncio.run(rt._check_target(rt.settings.all()))
+        async def checks():                                 # pauza nastane až po několika neúspěšných kontrolách v řadě
+            for _ in range(runner_mod.TARGET_FAILS_BEFORE_PAUSE):
+                rt._target_checked = -1e9
+                await rt._check_target(rt.settings.all())
+        asyncio.run(checks())
         assert rt.queue_paused() and rt.db.kv_get("queue_pause_reason") == "target"
     finally:
         ro.chmod(0o700)

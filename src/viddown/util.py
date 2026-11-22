@@ -1,6 +1,7 @@
 """Pomocné funkce: názvy souborů, šablony, URL, chyby, formátování."""
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import shutil
@@ -8,6 +9,16 @@ import time
 import unicodedata
 from pathlib import Path
 from urllib.parse import unquote, urlparse
+
+_BG_TASKS: set = set()
+
+
+def spawn(aw):
+    """Spustí úlohu na pozadí a drží na ni odkaz, aby ji GC uprostřed práce neuklidil."""
+    t = asyncio.ensure_future(aw)
+    _BG_TASKS.add(t)
+    t.add_done_callback(_BG_TASKS.discard)
+    return t
 
 URL_RE = re.compile(r"https?://[^\s<>\"'`]+", re.I)
 

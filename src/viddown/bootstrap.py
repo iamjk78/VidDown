@@ -19,7 +19,13 @@ def _choose(argv: list[str]):
     store = AppStore(data_dir())
     if not store.file.exists():
         return None
-    count = not argv or argv[0] == "serve"      # jen start aplikace se počítá do zkušební doby
+    from .daemon import Lock
+    from .config import data_dir as _dd
+    lk = Lock(_dd() / "daemon.lock")
+    running = not lk.acquire()                  # druhá instance (dvojklik) se do zkušební doby nepočítá
+    if not running:
+        lk.release()
+    count = (not argv or argv[0] == "serve") and not running    # jen start aplikace se počítá do zkušební doby
     return store.begin_start(count=count)
 
 
@@ -29,6 +35,7 @@ def _exec(target, argv: list[str]):
     env = dict(os.environ)
     env.update(VIDDOWN_APP_ACTIVE=target.name, VIDDOWN_BASE_VERSION=__version__, VIDDOWN_IMAGE_API=str(IMAGE_API),
                VIDDOWN_BASE_SCHEMA=str(MIGRATIONS[-1][0]))
+    env["VIDDOWN_ORIG_PYTHONPATH"] = env.get("PYTHONPATH", "")                  # aby se při restartu vrátilo původní PYTHONPATH
     env["PYTHONPATH"] = str(target) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     os.execve(sys.executable, [sys.executable, "-m", "viddown.cli", *argv], env)
 

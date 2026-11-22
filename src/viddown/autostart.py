@@ -13,7 +13,7 @@ LABEL = "cz.viddown.app"
 def command() -> list[str]:
     if getattr(sys, "frozen", False):
         return [sys.executable, "serve"]
-    return [sys.executable, "-m", "viddown", "serve"]
+    return [sys.executable, "-m", "viddown.bootstrap", "serve"]          # přes spouštěč, ať se spustí i aktualizovaná verze
 
 
 def _mac_plist() -> Path:

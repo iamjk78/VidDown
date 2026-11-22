@@ -163,6 +163,7 @@ ENV_MAP = {
     "VIDDOWN_PORT": "port",
     "VIDDOWN_LANGUAGE": "language",
     "VIDDOWN_TELEGRAM_CHAT_ID": "telegram_chat_id",
+    "VIDDOWN_APP_UPDATE_REPO": "app_update_repo",
     "VIDDOWN_NETWORK_ACCESS": "network_access",
 }
 
@@ -312,7 +313,10 @@ class Settings:
                     raise ValueError("channel_tabs must be videos/shorts/streams")
                 current[k] = val
             tmp = self.path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(current, indent=2, ensure_ascii=False), encoding="utf-8")
+            with open(tmp, "w", encoding="utf-8") as f:                 # fsync: po výpadku proudu nezůstane prázdný soubor
+                f.write(json.dumps(current, indent=2, ensure_ascii=False))
+                f.flush()
+                os.fsync(f.fileno())
             os.replace(tmp, self.path)
             self._cache = None
             return self.all()

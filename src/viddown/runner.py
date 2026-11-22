@@ -25,12 +25,16 @@ from .probe import probe_url, trim_info
 from .resolvers import Cancelled, Ctx, ProcHolder, ResolveError
 from .resolvers import k2s, pages, sniffer, ytdlp
 from .resolvers.ytdlp import COOKIES_STALE
+from .util import spawn
 from .util import (classify_error, fallback_allowed, free_space, host_key, in_schedule, is_rate_limited, render_template,
                    retry_allowed, sanitize_filename, unique_target)
 
 _PLACE_LOCK = threading.Lock()
 TARGET_TIMEOUT = 10.0                  # nejdéle tak dlouho čeká kontrola cílové složky
+TARGET_FAILS_BEFORE_PAUSE = 3          # frontu pozastaví až tolik neúspěšných kontrol v řadě (jedna pomalá odpověď NASu ji nezastaví)
 PENDING = ytdlp.PENDING  # hotové stažení čekající na přesun do cílové složky
+PART_SUFFIX = ".viddown-part"  # rozdělané přejmenování v cíli (viz _place)
+MEDIA_EXT = {".mp4", ".mkv", ".webm", ".m4v", ".mov", ".mp3", ".m4a", ".opus", ".ogg", ".flac", ".wav", ".aac", ".ts", ".avi", ".flv", ".gif"}
 
 
 def target_available(path: str) -> tuple[bool, str]:
@@ -94,7 +98,7 @@ class Runner:
                 try:
                     res = fn(*args, **kw)
                     if asyncio.iscoroutine(res):
-                        asyncio.ensure_future(res)
+                        spawn(res)
                 except Exception:  # noqa: BLE001
                     log.exception("listener %s", event)
 
@@ -226,7 +230,7 @@ class Runner:
                 reason = "disk"
             if reason and jid not in self.stop_reason:
                 self.stop_reason[jid] = reason
-                asyncio.create_task(holder.stop())
+                spawn(holder.stop())
 
         if disk_low:
             if not self._disk_warned:
@@ -451,8 +455,12 @@ class Runner:
             ok, msg = await asyncio.wait_for(asyncio.shield(task), TARGET_TIMEOUT)
         except asyncio.TimeoutError:
             ok, msg = False, "cílová složka neodpovídá (zaseknutý síťový disk?)"
+        self._target_fails = 0 if ok else getattr(self, "_target_fails", 0) + 1
         reason = self.db.kv_get("queue_pause_reason")
         if not ok:
+            if self._target_fails < TARGET_FAILS_BEFORE_PAUSE:               # zaseknutý nebo zpomalený NAS: počká se na další kontrolu
+                log.info("cílová složka neodpověděla (%d/%d): %s", self._target_fails, TARGET_FAILS_BEFORE_PAUSE, msg)
+                return
             if not self.queue_paused():
                 self.db.kv_set("queue_paused", True)
                 self.db.kv_set("queue_pause_reason", "target")
@@ -852,7 +860,8 @@ class Runner:
                 holder.check()
                 if login and token is None:                                  # chyba přihlášení zde vyhodí a úloha skončí (bez opakování)
                     token = await asyncio.to_thread(client.login, *login)
-                    self.secrets.set_k2s_token(token)
+                    if self.secrets.k2s_login() == login:               # účet se mezitím nezměnil: token patří k němu
+                        self.secrets.set_k2s_token(token)
                 try:
                     link = await asyncio.to_thread(client.get_url, fid, token, None, ch, answer)
                     break
@@ -884,7 +893,9 @@ class Runner:
         self.db.update(job["id"], stage="download", eta=None)
         name = self._name(job, info)
         url_ext = PurePosixPath(unquote(urlparse(link).path)).suffix
-        fname = name if PurePosixPath(name).suffix else name + (url_ext or ".bin")
+        sfx = PurePosixPath(name).suffix                                 # „Film 1.5“ nemá příponu: za příponu se bere jen písmeno + alfanumerika
+        has_ext = len(sfx) in range(2, 6) and sfx[1].isalpha() and sfx[1:].isalnum()
+        fname = name if has_ext else name + (url_ext or ".bin")
         staging.mkdir(parents=True, exist_ok=True)
         dest = staging / fname
         size = await k2s.fetch_file(link, dest, on_progress, holder.check)
@@ -944,6 +955,10 @@ class Runner:
         msg = {"archive": "Již staženo dříve (archiv)", "live": t(self.lang(), "live_skip")}.get(result["skipped"], result["skipped"])
         self.db.update(jid, status="skipped", error=msg, error_kind=result["skipped"], finished_at=time.time(),
                        speed=None, eta=None, method=method)
+        # hotový soubor z dřívějšího běhu (archiv ho už zná) se nesmí smazat: nechá se na místě a upozorní se v protokolu
+        if staging.is_dir() and any(p.is_file() and p.suffix.lower() in MEDIA_EXT for p in staging.iterdir()):
+            log.warning("úloha %s: archiv hlásí dříve staženo, ale v dočasné složce zůstal soubor – nemaže se", jid)
+            return True
         shutil.rmtree(staging, ignore_errors=True)
         return True
 
@@ -956,31 +971,50 @@ class Runner:
         # úloha z odběru má vlastní cílovou složku, ostatní ukládá do download_dir (případně do podsložky playlistu)
         target_dir = Path(job["target_dir"]) if job.get("target_dir") else Path(s["download_dir"]) / (job["subdir"] or "")
         part = None
+        moved = False                                                     # zdroj už byl přesunut do `part` (a je tedy jediná kopie)
         try:
             root = Path(job["target_dir"]) if job.get("target_dir") else Path(s["download_dir"])
             if not root.is_dir():                                           # odpojený NAS: kořen cíle se nezakládá (video by skončilo v kontejneru)
                 root.mkdir(exist_ok=True)
             target_dir.mkdir(parents=True, exist_ok=True)
+            # zdroj `.viddown-part` zůstal po nezdařeném přejmenování v cíli: nepřesouvá se znovu, jen se dokončí jeho přejmenování
+            resumed = src.name.endswith(PART_SUFFIX) and src.is_file()
             with _PLACE_LOCK:                                              # volba názvu a jeho rezervace jsou jeden krok (souběžné přesuny)
-                dest = unique_target(target_dir, src.stem, src.suffix)
-                part = dest.with_name(dest.name + ".viddown-part")
-                with open(part, "xb"):
-                    pass
-            shutil.move(str(src), part)
+                if resumed:
+                    base = src.name[: -len(PART_SUFFIX)]
+                    stem, sfx = Path(base).stem, Path(base).suffix
+                    # původní název patří právě tomuto souboru (jeho rozdělaná rezervace), proto se zkusí nejdřív on
+                    if not (target_dir / base).exists() and not (target_dir / f"{stem}.jpg").exists():
+                        dest = target_dir / base
+                    else:
+                        dest = unique_target(target_dir, stem, sfx)
+                    part = src
+                else:
+                    dest = unique_target(target_dir, src.stem, src.suffix)
+                    part = dest.with_name(dest.name + PART_SUFFIX)
+                    with open(part, "xb"):
+                        pass
+            if not resumed:
+                shutil.move(str(src), part)
+                moved = True
             os.replace(part, dest)
             part = None
         except OSError as e:
-            if part is not None:
+            if part is not None and not moved:                             # kopie se nepovedla, zdroj je nedotčený: rozdělaný cíl se smaže
                 try:
-                    part.unlink(missing_ok=True)                       # poloviční kopie se v cíli nenechává
+                    part.unlink(missing_ok=True)
                 except OSError:
                     pass
-            # cíl nedostupný (např. odpojený NAS) – hotový soubor zůstane v dočasné složce a přesune se později
-            ytdlp.save_pending(staging, src if src.exists() else Path(str(part or src)), result.get("thumb"), result.get("log") or "", method)
+                part = None
+            # po přesunu je jediná kopie v `part`, proto se nesmí smazat; jinak zůstává zdroj v dočasné složce
+            kept = part if part is not None else src
+            # cíl nedostupný (např. odpojený NAS) – hotový soubor zůstane a přesune se později
+            ytdlp.save_pending(staging, kept, result.get("thumb"), result.get("log") or "", method)
             self._target_checked = -1e9
             if e.errno in (errno.ENOSPC, errno.EDQUOT):
                 self.db.kv_set("queue_paused", True)
                 self.db.kv_set("queue_pause_reason", "disk")
+                self.emit("on_notice", "disk", free=free_space(str(target_dir))[0] or 0)     # upozornění (Telegram, GUI), ne tiché pozastavení
                 raise ResolveError(f"V cílové složce není místo ({target_dir}): {e.strerror or e}", "disk")
             raise ResolveError(f"Cílová složka není dostupná ({target_dir}): {e.strerror or e}", "target")
         try:
@@ -1138,6 +1172,7 @@ class Runner:
                 self.db.update(j["id"], status="cancelling")
             elif j["status"] in ("new", "probing", "confirm", "queued", "expanded"):
                 shutil.rmtree(self.staging(j["id"]), ignore_errors=True)
+                self._scrub_sniff(j["id"])                               # cookies ze sniffu se nesmí nechat v databázi ani u zrušené úlohy
                 self.db.update(j["id"], status="cancelled", finished_at=time.time())
                 if j["status"] == "probing" and j["id"] in self.probing:
                     self.probing[j["id"]].cancel()

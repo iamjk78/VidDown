@@ -1404,6 +1404,8 @@ function renderCatalog() {
   $('#catside').onclick = catSrcClick;
   $('#catsrc').onmouseover = catTipShow; $('#catsrc').onmouseout = catTipHide; $('#catsrc').onfocusin = catTipShow; $('#catsrc').onfocusout = catTipHide;
   $('#catgrid').onclick = catGridClick;
+  $('#catgrid').onmousedown = catGridDown;
+  $('#catgrid').oncontextmenu = e => { if (IS_MAC && e.ctrlKey && e.target.closest('.vcard') && !catInteractive(e.target)) e.preventDefault(); };   // Ctrl+klik na macOS nevolá kontextovou nabídku
   catAnimTrack();
   $('#catgrid').onmouseover = catAnimHover; $('#catgrid').onmouseout = catAnimHover;
   $('#catgrid').onchange = e => { const c = e.target.closest('[data-csel]'); if (c) catToggle(+c.dataset.csel, c.checked); };
@@ -1729,6 +1731,74 @@ function catGridClick(e) {
     if (again && !confirm(T('Toto video už bylo staženo dříve. Stáhnout ho znovu?', 'This video was downloaded before. Download it again?'))) return;
     catDownload({ ids: [+b.dataset.id] }, again, true);
   }
+}
+/* Výběr karet myší: Ctrl (na macOS i Cmd) + klik přepne kartu. Tažení z prázdné plochy (nebo z karty mimo odkaz a tlačítko)
+   vybere karty pod obdélníkem: bez klávesy dělá nový výběr, s Ctrl/Cmd jen přidá. Na dotyku tažení není (posouvá se stránka). */
+const catModKey = e => e.ctrlKey || e.metaKey;
+const IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || '');   // Ctrl+klik na macOS vyvolá kontextovou nabídku; na Windows je to výběr
+const catInteractive = t => !!(t.closest && t.closest('a, button, input, label, select'));
+function catSetOne(id, on) {
+  if (CAT.selAll) { on ? CAT.exclude.delete(id) : CAT.exclude.add(id); } else { on ? CAT.sel.add(id) : CAT.sel.delete(id); }
+  const card = $(`[data-cid="${id}"]`); if (!card) return;
+  card.classList.toggle('on', on);
+  const k = $('[data-csel]', card); if (k) k.checked = on;
+}
+function catGridDown(e) {
+  if (e.button !== 0 || !CAT.data || catInteractive(e.target)) return;
+  if (matchMedia('(hover: none)').matches) return;                              // dotyk: výběr zaškrtávátkem, bez tažení
+  e.preventDefault();                                                           // jinak by prohlížeč začal označovat text nebo táhnout obrázek
+  if (document.activeElement && document.activeElement.blur) document.activeElement.blur();   // klik do mřížky ukončí psaní v hledání
+  const card = e.target.closest('.vcard'), mod = catModKey(e), tid = card ? +card.dataset.cid : null;
+  const wrap = $('#mainwrap'), add = mod, x0 = e.clientX, y0 = e.clientY;
+  // posouvá se hlavní kontejner, a když je rozložení jednosloupcové (úzké okno), posouvá se celé okno
+  const sc = wrap.scrollHeight > wrap.clientHeight + 1 ? wrap : document.scrollingElement;
+  const view = () => (sc === wrap ? wrap.getBoundingClientRect() : { top: 0, bottom: innerHeight });
+  const docX = x0 + sc.scrollLeft, docY = y0 + sc.scrollTop;                    // počátek obdélníku v souřadnicích obsahu (sleduje posun)
+  const snap = new Map($$('#catgrid .vcard').map(c => [+c.dataset.cid, catIsSel(+c.dataset.cid)]));
+  let box = null, raf = 0, cx = x0, cy = y0, started = false;
+  const edgeScroll = () => {                                                    // u okraje se obsah posouvá sám
+    const v = view();
+    if (cy < v.top + 40) { sc.scrollTop -= 14; return true; }
+    if (cy > v.bottom - 40) { sc.scrollTop += 14; return true; }
+    return false;
+  };
+  const update = () => {
+    const ax = docX - sc.scrollLeft, ay = docY - sc.scrollTop;
+    const L = Math.min(ax, cx), R = Math.max(ax, cx), T = Math.min(ay, cy), B = Math.max(ay, cy);
+    box.style.left = L + 'px'; box.style.top = T + 'px'; box.style.width = (R - L) + 'px'; box.style.height = (B - T) + 'px';
+    const cards = $$('#catgrid .vcard'), hit = new Set();
+    cards.forEach(c => { const r = c.getBoundingClientRect(); if (r.left < R && r.right > L && r.top < B && r.bottom > T) hit.add(+c.dataset.cid); });
+    let changed = false;
+    for (const c of cards) {                                                    // karty přidané během tažení (obnova mřížky) se berou jako nevybrané
+      const id = +c.dataset.cid, was = snap.has(id) ? snap.get(id) : false;
+      const want = hit.has(id) || (add && was);
+      if (want !== catIsSel(id)) { catSetOne(id, want); changed = true; }
+    }
+    if (changed) catPaintSel();
+  };
+  const frame = () => { raf = 0; if (edgeScroll()) { update(); raf = requestAnimationFrame(frame); } };
+  const endDrag = () => {                                                       // konec tažení: puštění, ztráta okna nebo odchod z katalogu
+    document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', endDrag);
+    window.removeEventListener('blur', endDrag);
+    cancelAnimationFrame(raf); raf = 0;
+    if (box) { update(); box.remove(); box = null; document.body.classList.remove('catdrag'); catPaintSel(); }
+    else if (mod && tid != null) { catSetOne(tid, !catIsSel(tid)); catPaintSel(); }   // Ctrl/Cmd + klik bez tažení přepne tuto kartu
+  };
+  const onMove = ev => {
+    if (ev.buttons === 0 || App.view !== 'catalog') return endDrag();          // tlačítko už není stisknuté (puštěno mimo okno)
+    cx = ev.clientX; cy = ev.clientY;
+    if (!started) {
+      if (Math.hypot(cx - x0, cy - y0) < 5) return;                            // pod 5 px je to jen klik
+      started = true;
+      if (!add) { catClearSel(); $$('#catgrid .vcard').forEach(c => { c.classList.remove('on'); const k = $('[data-csel]', c); if (k) k.checked = false; }); }
+      box = document.createElement('div'); box.className = 'marquee'; document.body.appendChild(box);
+      document.body.classList.add('catdrag');
+      window.addEventListener('blur', endDrag);
+    }
+    update();                                                                  // přepočet jen při pohybu (ne v každém snímku)
+    if (!raf && edgeScroll()) raf = requestAnimationFrame(frame);             // u okraje běží posouvání, dokud myš tam zůstává
+  };
+  document.addEventListener('mousemove', onMove); document.addEventListener('mouseup', endDrag);
 }
 function catSelClick(e) {
   const b = e.target.closest('[data-cs]'); if (!b || b.disabled) return;

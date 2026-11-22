@@ -126,7 +126,7 @@ def test_thumbnail_fetch_refuses_private_targets_and_redirects(tmp_path, monkeyp
             return httpx.Response(302, headers={"location": "http://192.168.1.1/admin.jpg"})
         return httpx.Response(200, content=b"\xff\xd8\xff" + b"x" * 50)
     real = httpx.Client
-    monkeypatch.setattr(netsafe.httpx, "Client", lambda *a, **kw: real(*a, transport=httpx.MockTransport(handler), **kw))
+    monkeypatch.setattr(netsafe.httpx, "Client", lambda *a, **kw: real(*a, **{**kw, "transport": httpx.MockTransport(handler)}))
     monkeypatch.setattr(netsafe, "host_ok", lambda url: netsafe.literal_ok(url))
     assert thumbs.fetch("http://192.168.1.1/x.jpg", tmp_path / "a.jpg") is False          # přímo soukromá adresa
     assert thumbs.fetch("https://cdn.example/x.jpg", tmp_path / "b.jpg") is False         # přesměrování do domácí sítě

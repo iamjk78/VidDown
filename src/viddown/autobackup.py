@@ -113,7 +113,10 @@ def next_due(settings, db) -> float | None:
 
 def run_once(data: Path, settings, db) -> dict:
     fold = folder(data, settings)
-    fold.mkdir(parents=True, exist_ok=True)
+    from .util import check_dir_writable
+    ok, msg = check_dir_writable(str(fold))                          # v Dockeru odmítne cestu mimo svazky: záloha by skončila v kontejneru
+    if not ok:
+        raise backup.BackupError(f"složka záloh není zapisovatelná: {msg}")
     _cleanup_stale(fold)
     out = _unique_path(fold)
     backup.create(data, out, include_thumbs=False, encrypt=True)

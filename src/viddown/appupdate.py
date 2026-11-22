@@ -15,6 +15,7 @@ Stav je v `<data>/app/state.json`:
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import logging
@@ -25,11 +26,13 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import zipfile
 from pathlib import Path
 
 log = logging.getLogger("viddown.appupdate")
+_STATE_LOCK = threading.RLock()     # stav aktualizací se upravuje z více vláken (smyčka, selftest, API): zápisy se nesmí prolínat
 
 MAX_FAILED_STARTS = 2        # po tolika startech, které nedosáhly „zdravého“ stavu, se vrátí předchozí verze
 HEALTHY_AFTER = 120.0        # sekund běhu, po kterých se nová verze považuje za zdravou
@@ -108,10 +111,11 @@ class AppStore:
         return d
 
     def save(self, st: dict) -> None:
-        self.root.mkdir(parents=True, exist_ok=True)
-        tmp = self.file.with_suffix(".tmp")
-        tmp.write_text(json.dumps(st, ensure_ascii=False, indent=1), "utf-8")
-        os.replace(tmp, self.file)
+        with _STATE_LOCK:                                    # zápisy stavu z různých vláken se nesmí prolínat
+            self.root.mkdir(parents=True, exist_ok=True)
+            tmp = self.file.with_suffix(".tmp")
+            tmp.write_text(json.dumps(st, ensure_ascii=False, indent=1), "utf-8")
+            os.replace(tmp, self.file)
 
     @staticmethod
     def _event(st: dict, kind: str, version: str | None, msg: str) -> None:
@@ -321,28 +325,31 @@ class AppStore:
         return None
 
     def mark_healthy(self, ver: str) -> bool:
-        st = self.state()
-        pr = st.get("probation")
-        if not pr or pr.get("version") != ver:
-            return False
-        st["probation"] = None
-        self._event(st, "healthy", ver, "zkušební doba proběhla bez chyby")
-        self.save(st)
-        return True
+        with _STATE_LOCK:                                    # čtení i zápis stavu jako jeden krok
+            st = self.state()
+            pr = st.get("probation")
+            if not pr or pr.get("version") != ver:
+                return False
+            st["probation"] = None
+            self._event(st, "healthy", ver, "zkušební doba proběhla bez chyby")
+            self.save(st)
+            return True
 
     def note_clean_stop(self, ver: str) -> None:
         """Řádné ukončení (např. ruční restart) ve zkušební době není selhání, nezapočítá se."""
-        st = self.state()
-        pr = st.get("probation")
-        if pr and pr.get("version") == ver and pr["attempts"] > 0:
-            pr["attempts"] -= 1
-            self.save(st)
+        with _STATE_LOCK:
+            st = self.state()
+            pr = st.get("probation")
+            if pr and pr.get("version") == ver and pr["attempts"] > 0:
+                pr["attempts"] -= 1
+                self.save(st)
 
     def update_state(self, **changes) -> None:
         """Zapíše drobné příznaky stavu (zavřený banner, už oznámené verze a události)."""
-        st = self.state()
-        st.update(changes)
-        self.save(st)
+        with _STATE_LOCK:
+            st = self.state()
+            st.update(changes)
+            self.save(st)
 
     # --- správa verzí -------------------------------------------------------------------------
     def skip(self, ver: str, reason: str) -> None:
@@ -432,7 +439,30 @@ async def health_task(data: Path, stop: asyncio.Event, after: float | None = Non
 
 # --- vydání na GitHubu: kontrola a aktualizace -------------------------------------------------
 MANIFEST_ASSET = "manifest.json"
+MANIFEST_SIG_ASSET = "manifest.sig"          # Ed25519 podpis přesných bajtů manifest.json (podepisuje vydavatel, ne GitHub)
 MAX_MANIFEST_BYTES = 64 * 1024
+MAX_SIG_BYTES = 256
+# Veřejný klíč vydavatele. Ověřuje manifest každého vydání, který aplikace stáhne; soukromý klíč nesmí být v repozitáři ani v obraze.
+UPDATE_PUBKEY_B64 = "PWd4WtJTW/wLDO05RzESxUSvtj8CuslLsw7I82wvfrI="
+
+
+def sign_manifest(data: bytes, private_b64: str) -> str:
+    """Podepíše přesné bajty manifestu (používá vydavatel: `app pack --sign-key-file`). Vrací podpis v base64."""
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    key = Ed25519PrivateKey.from_private_bytes(base64.b64decode(private_b64.strip()))
+    return base64.b64encode(key.sign(data)).decode("ascii")
+
+
+def verify_manifest(data: bytes, sig_b64: str, pubkey_b64: str | None = None) -> bool:
+    """Ověří podpis manifestu veřejným klíčem vydavatele. Jakákoli chyba (špatný podpis, poškozený zápis) = False."""
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    try:
+        pub = Ed25519PublicKey.from_public_bytes(base64.b64decode(pubkey_b64 or UPDATE_PUBKEY_B64))
+        pub.verify(base64.b64decode(sig_b64.strip()), data)
+        return True
+    except (InvalidSignature, ValueError, TypeError):
+        return False
 
 
 def github_api() -> str:
@@ -502,16 +532,24 @@ def _download_asset(repo: str, token: str | None, asset_id: int, dest, max_bytes
 
 def _release_manifest(repo: str, token: str | None, rel: dict) -> dict:
     a = rel["assets"].get(MANIFEST_ASSET)
+    sig = rel["assets"].get(MANIFEST_SIG_ASSET)
     zname = f"viddown-{rel['version']}.zip"
-    if not a or zname not in rel["assets"]:
-        raise UpdateError(f"vydání {rel['tag']} nemá očekávané soubory ({MANIFEST_ASSET}, {zname})")
+    if not a or not sig or zname not in rel["assets"]:
+        raise UpdateError(f"vydání {rel['tag']} nemá očekávané soubory ({MANIFEST_ASSET}, {MANIFEST_SIG_ASSET}, {zname})")
     with tempfile.TemporaryDirectory() as t:
-        mp = Path(t) / "m.json"
+        mp, sp = Path(t) / "m.json", Path(t) / "m.sig"
         _download_asset(repo, token, a["id"], mp, MAX_MANIFEST_BYTES)
-        try:
-            man = json.loads(mp.read_text("utf-8"))
-        except ValueError as e:
-            raise UpdateError("manifest vydání je poškozený") from e
+        _download_asset(repo, token, sig["id"], sp, MAX_SIG_BYTES)
+        raw = mp.read_bytes()
+        sig_text = sp.read_text("ascii", errors="replace")
+    # podpis se ověřuje nad přesnými bajty před jakýmkoli použitím obsahu (kontrolní součet v manifestu sám o sobě nestačí:
+    # manifest i archiv by mohl podvrhnout ten, kdo umí nahrát soubory do vydání)
+    if not verify_manifest(raw, sig_text):
+        raise UpdateError("podpis manifestu vydání neodpovídá: vydání nepochází od vydavatele, aktualizace se nepoužije")
+    try:
+        man = json.loads(raw.decode("utf-8"))
+    except ValueError as e:
+        raise UpdateError("manifest vydání je poškozený") from e
     if str(man.get("version")) != rel["version"]:
         raise UpdateError(f"manifest ({man.get('version')}) neodpovídá vydání ({rel['version']})")
     if not re.fullmatch(r"[0-9a-fA-F]{64}", str(man.get("sha256", ""))):

@@ -491,7 +491,8 @@ def test_pagelist_stops_paging_when_page_is_older_than_since(fake_pages):
     assert fake_pages[-1] == "https://w.example/tv?id=28&pg=2"   # strana 2 má jen starší díly → další se už nečte
 
 
-def test_page_subscription_check_queues_new_items_once(rt, tmp_path, fake_pages):
+def test_page_subscription_check_queues_new_items_once(rt, tmp_path, fake_pages, monkeypatch):
+    monkeypatch.setattr("viddown.netsafe.host_ok", lambda url: True)     # fiktivní doména: bez DNS dotazu
     d = run(subs.pagelist.analyze("https://w.example/tv"))
     cfg = {k: d[k] for k in ("item_regex", "page_param", "page_start", "page_template")}
     sid = rt.db.sub_add("https://w.example/tv", str(tmp_path / "f"), kind="page", title="Moje relace", since="2026-10-01", config=cfg)

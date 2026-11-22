@@ -333,6 +333,8 @@ async def _download(url, info, ctx: Ctx, staging: Path, name: str, rate_bps, on_
             return await download(url, info, ctx, staging, name, rate_bps, on_progress, holder, audio_only, no_subs=True)
         raise ResolveError(cookie_hint(msg, orig), classify_error(msg))
     fp = Path(filepath)
+    # yt-dlp už zapsal ID do archivu: hotový soubor se označí hned, aby pád před přesunem nezpůsobil ztrátu (další běh by ho přeskočil)
+    save_pending(staging, fp, None, "\n".join(tail))
     if s.get("mkv_to_mp4", True) and fp.suffix.lower() == ".mkv":       # jen změna kontejneru (kopie proudů), nic se nekóduje
         on_progress(progress=1.0, speed=None, eta=None, phase="post")
         ff = None
@@ -354,4 +356,5 @@ async def _download(url, info, ctx: Ctx, staging: Path, name: str, rate_bps, on_
     if not thumb.exists():
         jpgs = [p for p in staging.glob("*.jpg")]
         thumb = jpgs[0] if jpgs else None
+    save_pending(staging, fp, thumb, "\n".join(tail))                  # po přebalení je finální soubor, s miniaturou
     return {"file": fp, "thumb": thumb, "log": "\n".join(tail)}

@@ -50,12 +50,14 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Archiv aplikace a manifest
+      - name: Archiv aplikace a manifest (podepsaný)
+        env:
+          VIDDOWN_UPDATE_SIGNING_KEY: ${{ secrets.VIDDOWN_UPDATE_SIGNING_KEY }}
         run: |
           python -m pip install --quiet .
           mkdir -p dist/release
           python -m viddown.cli app pack "dist/release/viddown-${{ steps.v.outputs.version }}.zip" \
-            --commit "${{ steps.v.outputs.rev }}" --json dist/release/manifest.json
+            --commit "${{ steps.v.outputs.rev }}" --json dist/release/manifest.json --require-signature
 
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3

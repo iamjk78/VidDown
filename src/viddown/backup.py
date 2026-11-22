@@ -12,6 +12,7 @@ from __future__ import annotations
 import collections
 import contextlib
 import json
+import logging
 import os
 import shutil
 import sqlite3
@@ -21,6 +22,8 @@ import zipfile
 from pathlib import Path
 
 from . import dtb
+
+log = logging.getLogger("viddown.backup")
 
 FORMAT = 1
 FILES = ("settings.json", "secrets.json", "cookies.txt", "archive.txt")
@@ -254,6 +257,28 @@ def _remap_all(data: Path, old: str, new: str) -> dict:
     return n
 
 
+def _keep_old(src: Path, bak: Path) -> None:
+    """Zachová dosavadní soubor před přepsáním (hardlink, jinak kopie)."""
+    bak.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.link(src, bak)
+    except OSError:
+        shutil.copy2(src, bak)
+
+
+def _rollback(data: Path, keep: Path, done: list[str]) -> None:
+    """Vrátí dosavadní stav po nezdařené obnově (u souborů, které dřív nebyly, se nový soubor smaže)."""
+    for name in reversed(done):
+        bak, dst = keep / name, data / name
+        try:
+            if bak.exists():
+                os.replace(bak, dst)
+            else:
+                dst.unlink(missing_ok=True)
+        except OSError as e:
+            log.error("návrat po neúspěšné obnově: %s: %s", name, e)
+
+
 def apply(data: Path, zip_path: Path, remap: tuple[str, str] | None = None, key: str | None = None) -> dict:
     """Obnoví data ze zálohy. Dosavadní stav uloží do `<data>/restore/before-<čas>/`. Aplikace nesmí běžet."""
     data = Path(data)
@@ -267,17 +292,35 @@ def apply(data: Path, zip_path: Path, remap: tuple[str, str] | None = None, key:
         if (data / name).is_file():
             shutil.copy2(data / name, before / name)
     with _plain_zip(zip_path, key, data) as zp, zipfile.ZipFile(zp) as zf:
-        for suf in ("", "-wal", "-shm"):
-            Path(str(db) + suf).unlink(missing_ok=True)
-        for name in zf.namelist():
-            if name == "backup.json" or name.endswith("/"):
-                continue
-            dest = data / name
+        names = [n for n in zf.namelist() if n != "backup.json" and not n.endswith("/")]
+        incoming = before / ".incoming"                              # celá záloha se nejdřív rozbalí stranou
+        for name in names:
+            dest = incoming / name
             dest.parent.mkdir(parents=True, exist_ok=True)
             with zf.open(name) as src, open(dest, "wb") as out:
                 shutil.copyfileobj(src, out)
-            if name in ("secrets.json", "cookies.txt"):
-                os.chmod(dest, 0o600)
+        keep = before / ".replaced"                                  # dosavadní soubory (hardlink, jinak kopie) pro případ návratu
+        done: list[str] = []
+        try:
+            for name in ("viddown.db-wal", "viddown.db-shm"):        # zbytky staré databáze se nesmí přimíchat k nové
+                if (data / name).exists():
+                    _keep_old(data / name, keep / name)
+                    done.append(name)
+                    (data / name).unlink()
+            for name in names:
+                dst = data / name
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                if dst.exists():
+                    _keep_old(dst, keep / name)
+                done.append(name)
+                os.replace(incoming / name, dst)
+                if name in ("secrets.json", "cookies.txt"):
+                    os.chmod(dst, 0o600)
+        except BaseException:
+            _rollback(data, keep, done)
+            raise
+        shutil.rmtree(incoming, ignore_errors=True)
+        shutil.rmtree(keep, ignore_errors=True)
     res = {"ok": True, "at": time.time(), "manifest": man, "before": str(before), "remap": None}
     if remap and remap[0]:
         res["remap"] = _remap_all(data, *remap)

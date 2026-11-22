@@ -9,12 +9,13 @@ Pravidla:
 """
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import json
 import logging
 import time
 
-from . import pagelist
+from . import netsafe, pagelist
 from .probe import _flatten
 from .resolvers import ResolveError, ytdlp
 from .util import is_rate_limited, youtube_channel_base
@@ -196,6 +197,16 @@ async def check(runner, sid: int) -> dict:
             e["date"] = d
             new.append(e)
 
+    if new:                                                       # adresy z cizího feedu: jméno se ověří DNS (jinak by mohlo mířit do místní sítě)
+        ok_urls = await asyncio.to_thread(lambda: {e["url"] for e in new if netsafe.host_ok(e["url"])})
+        new = [e for e in new if e["url"] in ok_urls]
+    # odběr se mohl během dlouhé kontroly smazat nebo změnit (datum, složka, adresa): výsledek by pak neodpovídal nastavení
+    cur = db.sub_get(sid)
+    if not cur:
+        return {"error": "odběr byl smazán"}
+    if any(cur.get(k) != sub.get(k) for k in ("since", "folder", "url", "kind", "seen_old")):
+        log.info("odběr %s: nastavení se během kontroly změnilo, výsledek se zahazuje", sid)
+        return {"error": "odběr se během kontroly změnil, zkontroluje se příště"}
     if sub["kind"] == "page":      # už zařazené díly se znovu nenabídnou, ani když se záznam z historie smaže
         seen_old.update(dict.fromkeys(str(e.get("id") or e["url"]) for e in new))
     seen_json = json.dumps(list(seen_old)[-SEEN_OLD_CAP:])
@@ -204,7 +215,7 @@ async def check(runner, sid: int) -> dict:
         db.sub_update(sid, last_check=now, last_error=None, seen_old=seen_json, pending=pending)
         log.info("odběr %s: nalezeno %d videí, čeká na potvrzení", sid, len(new))
         return {"queued": 0, "pending": len(new)}
-    n = queue_entries(db, sub, new)
+    n = await asyncio.to_thread(queue_entries, db, sub, new)      # desítky zápisů do fronty mimo smyčku událostí
     db.sub_update(sid, last_check=now, last_error=None, seen_old=seen_json)
     if n:
         log.info("odběr %s (%s): do fronty přidáno %d videí", sid, sub["title"] or sub["url"], n)

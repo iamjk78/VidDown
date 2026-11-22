@@ -52,7 +52,7 @@ def web(monkeypatch):
         return httpx.Response(code, content=body, headers=hdr)
 
     def client(*a, **kw):
-        return real(*a, transport=httpx.MockTransport(handler), **kw)
+        return real(*a, **{**kw, "transport": httpx.MockTransport(handler)})
     monkeypatch.setattr(cd.httpx, "Client", client)
     return type("W", (), {"pages": pages, "hits": hits})
 
@@ -129,7 +129,7 @@ def test_download_anim_limit_without_content_length(tmp_path, monkeypatch):
                 for _ in range(20):
                     yield b"z" * 100
             return httpx.Response(200, content=gen())
-        return real(*a, transport=httpx.MockTransport(handler), **kw)
+        return real(*a, **{**kw, "transport": httpx.MockTransport(handler)})
     monkeypatch.setattr(cd.httpx, "Client", chunked)
     assert cd.download_anim(tmp_path / "t", 1, "https://c/x.gif", 1000) is None
     assert cd.download_anim(tmp_path / "t", 1, "https://c/x.gif", 100_000) == "1.anim.gif"
@@ -305,7 +305,7 @@ def test_thumbnails_and_animations_are_fetched_with_the_page_as_referer(st, fake
         seen["ua"], seen["ref"] = req.headers.get("user-agent"), req.headers.get("referer")
         return httpx.Response(200, content=GIF)
     real = cd.httpx.Client
-    cd.httpx.Client = lambda *a, **kw: real(*a, transport=httpx.MockTransport(handler), **kw)
+    cd.httpx.Client = lambda *a, **kw: real(*a, **{**kw, "transport": httpx.MockTransport(handler)})
     try:
         asyncio.run(run_until(st, lambda: anim_rows(st)["youtube a"]["anim_file"] and anim_rows(st)["youtube a"]["thumb_file"], thumbs=True))
     finally:
@@ -322,7 +322,7 @@ def test_thumbs_fetch_sends_referer_and_browser_agent(tmp_path, monkeypatch):
         seen.update(ua=req.headers.get("user-agent"), ref=req.headers.get("referer"))
         return httpx.Response(200 if req.headers.get("referer") else 403, content=JPEG)
     real = httpx.Client
-    monkeypatch.setattr(thumbs.httpx, "Client", lambda *a, **kw: real(*a, transport=httpx.MockTransport(handler), **kw))
+    monkeypatch.setattr(thumbs.httpx, "Client", lambda *a, **kw: real(*a, **{**kw, "transport": httpx.MockTransport(handler)}))
     assert REAL_THUMB_FETCH("https://cdn.example/x.jpg", tmp_path / "a") is False              # bez Referer CDN odmítne (403)
     assert REAL_THUMB_FETCH("https://cdn.example/x.jpg", tmp_path / "b", referer="https://web.example/") is True
     assert seen["ref"] == "https://web.example/" and "Chrome" in seen["ua"]
@@ -484,7 +484,7 @@ def mock_sheets(monkeypatch, pages, seen=None):
             seen.append((str(req.url), req.headers.get("referer"), req.headers.get("user-agent")))
         code, body = pages.get(str(req.url), (404, b""))
         return httpx.Response(code, content=body)
-    monkeypatch.setattr(sbm.httpx, "Client", lambda *a, **kw: real(*a, transport=httpx.MockTransport(handler), **kw))
+    monkeypatch.setattr(sbm.httpx, "Client", lambda *a, **kw: real(*a, **{**kw, "transport": httpx.MockTransport(handler)}))
 
 
 @needs_ffmpeg
@@ -829,7 +829,7 @@ def test_fetch_limited_follows_redirects_manually_and_blocks_private_hops(monkey
         if req.url.path == "/big":
             return httpx.Response(200, content=b"x" * 5000)
         return httpx.Response(200, content=GIF)
-    monkeypatch.setattr(_netsafe.httpx, "Client", lambda *a, **kw: real(*a, transport=httpx.MockTransport(handler), **kw))
+    monkeypatch.setattr(_netsafe.httpx, "Client", lambda *a, **kw: real(*a, **{**kw, "transport": httpx.MockTransport(handler)}))
     st_, hdr, body = _netsafe.fetch_limited("https://cdn.example/ok", {}, 10_000)
     assert st_ == 200 and body == GIF and seen[-1] == "https://cdn.example/final.gif"
     seen.clear()
@@ -846,7 +846,7 @@ def test_fetch_limited_enforces_a_total_deadline(monkeypatch):
 
     def handler(req):
         return httpx.Response(200, content=(b"z" * 10 for _ in range(50)))              # pomalý server: každé čtení „trvá“ 20 s
-    monkeypatch.setattr(_netsafe.httpx, "Client", lambda *a, **kw: real(*a, transport=httpx.MockTransport(handler), **kw))
+    monkeypatch.setattr(_netsafe.httpx, "Client", lambda *a, **kw: real(*a, **{**kw, "transport": httpx.MockTransport(handler)}))
     assert _netsafe.fetch_limited("https://cdn.example/slow", {}, 10_000, total_timeout=60) is None
 
 

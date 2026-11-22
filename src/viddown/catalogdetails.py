@@ -148,6 +148,8 @@ class DetailWorker:
         self.st = st
         self.next_at: dict[str, float] = {}          # web -> čas (monotonic), kdy smí další dotaz
         self.backoff: dict[str, dict] = {}           # web -> {until, delay, reason}
+        self.item_fails: dict[int, int] = {}         # video -> počet po sobě jdoucích chyb spojení; po třech se označí jako nedostupné
+        self._stop_evt: asyncio.Event | None = None  # ukončení aplikace (nastavuje pages_loop)
         self.active: dict[str, asyncio.Task] = {}
         self._thumb_locks: dict[int, asyncio.Lock] = {}
         self.hits: dict[str, collections.deque] = {}  # web -> časy dotazů za poslední hodinu (strop dotazů)
@@ -181,7 +183,11 @@ class DetailWorker:
         return True
 
     def note_request(self, host: str) -> None:
-        self.hits.setdefault(host, collections.deque()).append(time.monotonic())
+        q = self.hits.setdefault(host, collections.deque())
+        now = time.monotonic()
+        while q and q[0] < now - HOUR:                                  # starší dotazy se zahodí už při zápisu (jinak by seznam rostl bez mezí)
+            q.popleft()
+        q.append(now)
 
     def over_budget(self, host: str) -> bool:
         limit = int(self.st.settings.get("catalog_hour_limit") or 0)
@@ -254,7 +260,7 @@ class DetailWorker:
     def excluded_hosts(self) -> set[str]:
         """Weby, na které se teď nesmí sahat: právě zpracovávané, ve vychlazení po dotazu nebo odložené po omezení."""
         now = time.monotonic()
-        return (set(self.active) | self.page_hosts | {h for h, t in self.next_at.items() if t > now} | {h for h, b in self.backoff.items() if b["until"] > now}
+        return (set(self.active) | self.page_hosts | {h for h, t in list(self.next_at.items()) if t > now} | {h for h, b in list(self.backoff.items()) if b["until"] > now}
                 | self.limited_hosts())
 
     def pick(self, excluded: set[str] | None = None) -> dict | None:
@@ -306,16 +312,7 @@ class DetailWorker:
         urls = best_thumbnails(info)
         title = info.get("title")
         channel = info.get("channel") or info.get("uploader")
-        with self.db.conn() as c:
-            n = c.execute(
-                "update catalog_items set height=coalesce(?, height), size=coalesce(?, size), duration=coalesce(?, duration), "
-                "title=coalesce(?, title), channel=coalesce(?, channel), thumb_url=coalesce(?, thumb_url), thumb_alts=coalesce(?, thumb_alts), "
-                "anim_url=coalesce(?, anim_url), published_at=coalesce(?, published_at, 0), "
-                "search=?, detail_state='done', detail_error=null, updated_at=? "
-                "where id=? and detail_state=? and state in ('new','queued')",
-                (ytdlp.best_height(info), ytdlp.size_estimate(info), info.get("duration"), title, channel, urls[0] if urls else None,
-                 json.dumps(urls[1:1 + catalog.THUMB_ALTS_MAX]) if len(urls) > 1 else None, catalog.anim_source(info), catalog.published_ts(info),
-                 catalog.norm(f"{title or item['title'] or ''} {channel or item['channel'] or ''}"), time.time(), item["id"], expect)).rowcount
+        n = await asyncio.to_thread(_store_details, self.db, item, info, expect, urls)
         if n and urls and urls[0] != item.get("thumb_url"):      # jiná (obvykle lepší) miniatura než ze seznamu: nahradit
             async with self._thumb_lock(item["id"]):
                 name = await asyncio.to_thread(download_thumb, self.folder(), item["id"], urls, thumbs.referer_of(item.get("url")), self.proxy())
@@ -323,7 +320,14 @@ class DetailWorker:
                 with self.db.conn() as c:
                     c.execute("update catalog_items set thumb_file=?, updated_at=? where id=? and state in ('new','queued')", (name, time.time(), item["id"]))
 
+    def _video_failed_again(self, item: dict) -> bool:
+        """Počítá chyby spojení u jednoho videa. Vrací True, až když jich je tři v řadě (pak se video označí jako selhané)."""
+        n = self.item_fails.get(item["id"], 0) + 1
+        self.item_fails[item["id"]] = n
+        return n >= 3
+
     def _finish(self, item: dict, state: str, error: str | None, item_state: str | None = None) -> None:
+        self.item_fails.pop(item["id"], None)
         with self.db.conn() as c:
             c.execute("update catalog_items set detail_state=?, detail_error=?, state=case when ? is not null and state='new' then ? else state end, updated_at=? "
                       "where id=? and detail_state='pending'", (state, error, item_state, item_state, time.time(), item["id"]))
@@ -336,6 +340,8 @@ class DetailWorker:
             note("https://" + host + "/", msg)                                # omezení webu platí i pro frontu a odběry
         if kind == "network" or is_rate_limited(msg):               # omezení dotazů, výpadek: web odložit, video zůstane čekat
             self._back_off(host, BACKOFF_FIRST, "omezení nebo výpadek webu: " + msg[:120])
+            if kind == "network" and self._video_failed_again(item):   # jedno problémové video nesmí blokovat zbytek webu donekonečna
+                self._finish(item, "failed", "opakovaně nedostupné: " + msg[:200])
         elif kind == "cookies" or "not a bot" in low or re.search(r"confirm you(?:'|’)?(?:re| are) not", low):   # „confirm your age“ je chyba jednoho videa, ne webu
             self._back_off(host, BACKOFF_LOGIN, "web vyžaduje ověření nebo cookies: " + msg[:120])
         elif kind == "unsupported" and self.st.settings.get("catalog_slow_browser"):
@@ -355,7 +361,7 @@ class DetailWorker:
     def fast_work_left(self) -> bool:
         """Čeká ještě rychlá práce (podrobnosti přes yt-dlp) na webu, který není odložený? Pak pomalá vrstva počká."""
         now = time.monotonic()
-        away = sorted(h for h, b in self.backoff.items() if b["until"] > now)
+        away = sorted(h for h, b in list(self.backoff.items()) if b["until"] > now)
         sql = "select 1 from catalog_items where detail_state='pending' and state in ('new','queued')"
         if away:
             sql += " and coalesce(host,'') not in (%s)" % ",".join("?" * len(away))
@@ -431,7 +437,7 @@ class DetailWorker:
         """Podrobnosti po jednom videu na web, souběžně nejvýš `MAX_HOSTS` webů; až po dokončení seznamů všech zdrojů."""
         while not stop.is_set():
             try:
-                for h in [h for h, t in self.active.items() if t.done()]:
+                for h in [h for h, t in list(self.active.items()) if t.done()]:
                     t = self.active.pop(h)
                     if not t.cancelled() and t.exception():
                         log.error("katalog: podrobnosti: %s", t.exception())
@@ -476,12 +482,13 @@ class DetailWorker:
                     return
                 name = await asyncio.to_thread(download_thumb, self.folder(), row["id"], [row["thumb_url"], *[a for a in alts if isinstance(a, str)]],
                                                thumbs.referer_of(row.get("url")), self.proxy())
+        except OSError as e:                                             # výpadek zápisu (třeba NAS): nejde o vadnou miniaturu, zůstane čekat na další pokus
+            log.warning("katalog: miniaturu %s nejde uložit (%s), zkusí se znovu", row["id"], e)
+            return
         except Exception:  # noqa: BLE001 - chyba jedné miniatury nesmí zastavit smyčku (jinak by se pokaždé zkoušela znovu ta samá)
             log.exception("katalog: miniatura %s", row["id"])
             name = None
-        with self.db.conn() as c:
-            c.execute("update catalog_items set thumb_file=?, updated_at=? where id=? and thumb_file is null",
-                      (name if name else "", time.time(), row["id"]))
+        await asyncio.to_thread(_set_thumb_file, self.db, row["id"], name)
 
     async def _cdn_wait(self, url: str | None) -> None:
         """Pauza mezi dvěma staženími ze stejného serveru miniatur nebo animací (`THUMB_GAP` ± rozptyl)."""
@@ -532,9 +539,7 @@ class DetailWorker:
         except Exception:  # noqa: BLE001 - jedna vadná animace nesmí zastavit všechny ostatní
             log.exception("katalog: animace %s", row["id"])
             name = None
-        with self.db.conn() as c:
-            n = c.execute("update catalog_items set anim_file=?, updated_at=? where id=? and anim_file is null and state in ('new','queued')",
-                          (name if name else "", time.time(), row["id"])).rowcount
+        n = await asyncio.to_thread(_set_anim_file, self.db, row["id"], name)
         if name and not n:                                        # položka mezitím zmizela: soubor je k ničemu
             catalog.remove_anim(self.folder(), name)
 
@@ -603,7 +608,7 @@ class DetailWorker:
         """Weby, kterým se prohledání zdroje odloží: jen odložené po omezení a ty, kde už jiný sken stránky běží. Pauza mezi dotazy
         podrobností (`next_at`) se nezohledňuje, jinak by nepřetržitá práce na podrobnostech hledání animací nikdy nepustila."""
         now = time.monotonic()
-        return set(self.page_hosts) | {h for h, b in self.backoff.items() if b["until"] > now} | self.limited_hosts()
+        return set(self.page_hosts) | {h for h, b in list(self.backoff.items()) if b["until"] > now} | self.limited_hosts()
 
     def pick_source_scan(self, excluded: set[str]) -> dict | None:
         for r in self.db.query(
@@ -628,7 +633,7 @@ class DetailWorker:
         backoff_before = self.backoff.get(host)
         stack = contextlib.AsyncExitStack()
         try:
-            while url and url not in visited and page_no <= SRC_SCAN_PAGES:
+            while url and url not in visited and page_no <= SRC_SCAN_PAGES and not (self._stop_evt and self._stop_evt.is_set()):
                 visited.add(url)
                 if page_no > 1 and not await asyncio.to_thread(netsafe.host_ok, url):      # odkaz na další stránku je z cizího HTML
                     break
@@ -668,12 +673,7 @@ class DetailWorker:
                 if not ncand and page_no == 1:
                     break                                               # stránka žádné náhledy nenabízí (např. YouTube): nic neznačit
                 now = time.time()
-                with self.db.conn() as c:
-                    for iid, u in found.items():
-                        c.execute("update catalog_items set anim_url=?, updated_at=? where id=? and anim_url is null and state in ('new','queued')", (u, now, iid))
-                    if len(found) * 2 >= len(seen):                           # klipy jsou na výpisu běžné: videa bez klipu ho opravdu nemají
-                        for iid in seen - set(found):                         # jinak je to nejspíš chyba párování: videa zůstanou pro hledání na jejich stránce
-                            c.execute("update catalog_items set anim_url='', updated_at=? where id=? and anim_url is null and state in ('new','queued')", (now, iid))
+                await asyncio.to_thread(_write_listing_anims, self.db, found, seen, now)
                 if not seen:
                     break                                               # na stránce není žádné naše video: další už nepomůže
                 if len(seen) >= len(items):
@@ -694,6 +694,7 @@ class DetailWorker:
             self.next_at[host] = time.monotonic() + self.gap()
 
     async def pages_loop(self, stop: asyncio.Event) -> None:
+        self._stop_evt = stop                                           # dlouhé zjišťování zdroje se zastaví při ukončení aplikace
         while not stop.is_set():
             try:
                 if await asyncio.to_thread(self.source_scan_ready):
@@ -742,6 +743,8 @@ class DetailWorker:
                     "and state in ('new','queued') order by source_id, pos limit ?", (THUMB_BATCH,))
                 if rows:
                     for r in rows:                                          # po jedné, s pauzou mezi dotazy na stejný server (nezahlcovat CDN)
+                        if stop.is_set():
+                            break
                         await self._cdn_wait(r.get("thumb_url"))
                         await self._thumb_one(r)
                     continue
@@ -749,6 +752,8 @@ class DetailWorker:
                     arows = await asyncio.to_thread(self.pending_anims, 2)
                     if arows:
                         for r in arows:
+                            if stop.is_set():
+                                break
                             await self._cdn_wait(r.get("anim_url"))
                             await self._anim_one(r)
                         continue
@@ -775,8 +780,46 @@ class DetailWorker:
                 "paused": self.paused(), "waiting_for_lists": self.listing_busy(), "active_hosts": sorted(self.active),
                 "limited": sorted(self.limited_hosts()),
                 "fallback_hosts": sorted(h for h, t in self.used_fallback.items() if now - t < 600),
-                "backoff": [{"host": h, "seconds": int(b["until"] - now), "reason": b["reason"]} for h, b in sorted(self.backoff.items())
+                "backoff": [{"host": h, "seconds": int(b["until"] - now), "reason": b["reason"]} for h, b in sorted(list(self.backoff.items()))
                             if b["until"] > now]}
+
+
+def _store_details(db, item: dict, info: dict, expect: str, urls: list) -> int:
+    """Zápis podrobností videa (běží ve vlákně, ne ve smyčce událostí)."""
+    title = info.get("title")
+    channel = info.get("channel") or info.get("uploader")
+    with db.conn() as c:
+        return c.execute(
+            "update catalog_items set height=coalesce(?, height), size=coalesce(?, size), duration=coalesce(?, duration), "
+            "title=coalesce(?, title), channel=coalesce(?, channel), thumb_url=coalesce(?, thumb_url), thumb_alts=coalesce(?, thumb_alts), "
+            "anim_url=coalesce(?, anim_url), published_at=coalesce(?, published_at, 0), "
+            "search=?, detail_state='done', detail_error=null, updated_at=? "
+            "where id=? and detail_state=? and state in ('new','queued')",
+            (ytdlp.best_height(info), ytdlp.size_estimate(info), info.get("duration"), title, channel, urls[0] if urls else None,
+             json.dumps(urls[1:1 + catalog.THUMB_ALTS_MAX]) if len(urls) > 1 else None, catalog.anim_source(info), catalog.published_ts(info),
+             catalog.norm(f"{title or item['title'] or ''} {channel or item['channel'] or ''}"), time.time(), item["id"], expect)).rowcount
+
+
+def _set_thumb_file(db, item_id: int, name: str | None) -> None:
+    with db.conn() as c:
+        c.execute("update catalog_items set thumb_file=?, updated_at=? where id=? and thumb_file is null",
+                  (name if name else "", time.time(), item_id))
+
+
+def _set_anim_file(db, item_id: int, name: str | None) -> int:
+    with db.conn() as c:
+        return c.execute("update catalog_items set anim_file=?, updated_at=? where id=? and anim_file is null and state in ('new','queued')",
+                         (name if name else "", time.time(), item_id)).rowcount
+
+
+def _write_listing_anims(db, found: dict, seen: set, now: float) -> None:
+    """Zápis adres animací z výpisu zdroje (běží ve vlákně)."""
+    with db.conn() as c:
+        for iid, u in found.items():
+            c.execute("update catalog_items set anim_url=?, updated_at=? where id=? and anim_url is null and state in ('new','queued')", (u, now, iid))
+        if len(found) * 2 >= len(seen):                           # klipy jsou na výpisu běžné: videa bez klipu ho opravdu nemají
+            for iid in seen - set(found):                         # jinak je to nejspíš chyba párování: videa zůstanou pro hledání na jejich stránce
+                c.execute("update catalog_items set anim_url='', updated_at=? where id=? and anim_url is null and state in ('new','queued')", (now, iid))
 
 
 async def _sleep(stop: asyncio.Event, sec: float) -> None:

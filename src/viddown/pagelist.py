@@ -58,7 +58,7 @@ async def _fetch(url: str, settings: dict | None, timeout: float, public_only: b
                 raise PageError("adresa vede do vnitřní sítě")
         kw["event_hooks"] = {"request": [only_public]}
     try:
-        kw.update(netsafe.proxy_kw((settings or {}).get("proxy")))
+        kw.update(netsafe.client_kw((settings or {}).get("proxy"), asynchronous=True))
     except netsafe.ProxyError as e:
         raise PageError(f"stránku se nepodařilo načíst: {e}") from e
     try:
@@ -257,7 +257,7 @@ def detect(text: str, page_url: str) -> dict:
         if cand:
             pu = urlparse(cand[0])
             qq = [(k, "{n}" if k == page_param else v) for k, v in parse_qsl(pu.query, keep_blank_values=True)]
-            template = urlunparse(pu._replace(query="&".join(f"{k}={v}" for k, v in qq)))
+            template = urlunparse(pu._replace(query=urlencode(qq, safe="{}")))     # hodnoty se zakódují, ať „&“ nebo „%“ neporuší dotaz
     seen_c, items = set(), []
     for u in urls:
         c = canonical(u)
@@ -323,7 +323,7 @@ async def list_items(sub: dict, ctx, max_pages: int, since: str | None = None) -
     for k in range(max_pages):
         url = page_url(sub["url"], cfg, k)
         text, final = await fetch(url, ctx.settings)
-        items = [i for i in items_from(text, final, regex) if i["url"] not in seen]
+        items = [i for i in await asyncio.to_thread(items_from, text, final, regex) if i["url"] not in seen]
         if not items:
             break
         seen.update(i["url"] for i in items)
@@ -337,4 +337,4 @@ async def list_items(sub: dict, ctx, max_pages: int, since: str | None = None) -
 
 async def analyze(url: str, settings: dict | None = None) -> dict:
     text, final = await fetch(url, settings)
-    return detect(text, final)
+    return await asyncio.to_thread(detect, text, final)

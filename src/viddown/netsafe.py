@@ -4,12 +4,14 @@ sahat do domácí sítě ani na správcovská rozhraní. Pro zkoušky na místn�
 """
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import re
 import socket
 import time
 from urllib.parse import urljoin, urlsplit
 
+import httpcore
 import httpx
 
 from .util import env_flag
@@ -115,6 +117,64 @@ def host_ok(url: str) -> bool:
         return False
 
 
+def _pin_address(host: str) -> str:
+    """Adresa, na kterou se smí připojit. Kontroluje se při KAŽDÉM připojení (ne jen při předběžné kontrole), takže se DNS mezi
+    kontrolou a spojením nemůže přepnout na místní síť (DNS rebinding). Všechny adresy jména musí být veřejné."""
+    try:
+        ipaddress.ip_address(host)
+        addrs = [host]
+    except ValueError:
+        try:
+            infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+        except (OSError, UnicodeError) as e:
+            raise httpcore.ConnectError(f"jméno nejde přeložit: {host}") from e
+        addrs = [i[4][0].split("%")[0] for i in infos]
+    if not addrs:
+        raise httpcore.ConnectError(f"jméno nejde přeložit: {host}")
+    if not allow_private():
+        for a in addrs:
+            try:
+                ok = _global_ip(ipaddress.ip_address(a))
+            except ValueError:
+                ok = False
+            if not ok:
+                raise httpcore.ConnectError(f"adresa mimo veřejný internet ({host})")
+    return addrs[0]
+
+
+class _PinnedSyncBackend(httpcore.SyncBackend):
+    def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
+        # TLS (SNI, ověření certifikátu) dál používá jméno z URL; mění se jen cíl připojení
+        return super().connect_tcp(_pin_address(host), port, timeout=timeout, local_address=local_address, socket_options=socket_options)
+
+
+class _PinnedAsyncBackend(httpcore.AnyIOBackend):
+    async def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
+        ip = await asyncio.to_thread(_pin_address, host)
+        return await super().connect_tcp(ip, port, timeout=timeout, local_address=local_address, socket_options=socket_options)
+
+
+class _PinnedTransport(httpx.HTTPTransport):
+    def __init__(self):
+        super().__init__()
+        self._pool = httpcore.ConnectionPool(ssl_context=httpx.create_ssl_context(), network_backend=_PinnedSyncBackend(), http1=True, http2=False)
+
+
+class _PinnedAsyncTransport(httpx.AsyncHTTPTransport):
+    def __init__(self):
+        super().__init__()
+        self._pool = httpcore.AsyncConnectionPool(ssl_context=httpx.create_ssl_context(), network_backend=_PinnedAsyncBackend(), http1=True, http2=False)
+
+
+def client_kw(proxy: str | None, asynchronous: bool = False) -> dict:
+    """Parametry klienta httpx pro cizí adresy. Bez proxy se připojuje jen na ověřené adresy (`_pin_address`); s proxy se jméno
+    přeloží až v proxy, takže tam kontrola připojení nejde a platí jen předběžná kontrola `host_ok`."""
+    kw = proxy_kw(proxy)
+    if not kw:
+        kw["transport"] = _PinnedAsyncTransport() if asynchronous else _PinnedTransport()
+    return kw
+
+
 def fetch_limited(url: str, headers: dict, max_bytes: int, proxy: str | None = None, total_timeout: float = 60.0) -> tuple[int, dict, bytes] | None:
     """GET s ručními přesměrováními (nejvýš 5, každý skok se kontroluje), čtením po částech a celkovým časovým limitem.
     Vrací (stav, hlavičky, tělo), nebo None, když adresa není veřejná, přesměrování je moc, tělo přesáhne `max_bytes`
@@ -127,7 +187,7 @@ def fetch_limited(url: str, headers: dict, max_bytes: int, proxy: str | None = N
 
 
 def _fetch_limited(url: str, headers: dict, max_bytes: int, proxy: str | None, deadline: float, total_timeout: float):
-    kw = proxy_kw(proxy)
+    kw = client_kw(proxy)
     with httpx.Client(follow_redirects=False, timeout=min(30.0, total_timeout), headers=headers, **kw) as c:
         for _ in range(MAX_HOPS + 1):
             if not host_ok(url):

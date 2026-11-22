@@ -343,6 +343,15 @@ async def guard_routes(context, start_url: str) -> None:
     await context.route("**/*", handler)
 
 
+async def _get(context, u: str, referer: str):
+    """Dotaz mimo prohlížeč (context.request) obchází `guard_routes`, proto se veřejnost adresy ověřuje tady.
+    Stejný hostitel jako stránka se nekontroluje (web, který uživatel zadal, se kontroluje jen při přesměrování a podpožadavcích)."""
+    same = (urlparse(u).hostname or "").lower() == (urlparse(referer).hostname or "").lower()
+    if not same and not await asyncio.to_thread(netsafe.host_ok, u):
+        raise ValueError("adresa mimo veřejný internet")
+    return await context.request.get(u, headers={"Referer": referer}, timeout=20000)
+
+
 async def candidate_ok(url: str, referer: str) -> bool:
     """Adresa kandidáta pro ffmpeg: jen http(s) a veřejný hostitel (nebo stejný web, jaký uživatel zadal)."""
     try:
@@ -481,7 +490,7 @@ async def _sniff(url: str, ctx: Ctx) -> dict:
             hls_urls = [u for u, c in found.items() if c["kind"] == "hls"][:MAX_STREAMS]
             for u in hls_urls:
                 try:
-                    r = await context.request.get(u, headers={"Referer": url}, timeout=20000)
+                    r = await _get(context, u, url)
                     pl = parse_m3u8(await r.text(), u)
                 except Exception:  # noqa: BLE001
                     continue
@@ -495,7 +504,7 @@ async def _sniff(url: str, ctx: Ctx) -> dict:
                     variant_urls.update(v["uri"] for v in pl["variants"])
                     live = False
                     try:                                                               # šifrování bývá až v playlistu vybrané varianty, ne v master playlistu
-                        vr = await context.request.get(best["uri"], headers={"Referer": url}, timeout=20000)
+                        vr = await _get(context, best["uri"], url)
                         vp = parse_m3u8(await vr.text(), best["uri"])
                         if vp["drm"]:
                             drm = True
@@ -511,7 +520,7 @@ async def _sniff(url: str, ctx: Ctx) -> dict:
             candidates = [c for c in candidates if c["rank"] == 0 or c["url"] not in variant_urls]
             for u in [u for u, c in found.items() if c["kind"] == "dash"][:MAX_STREAMS]:
                 try:                                                               # šifrovaný DASH by se stáhl jako nepřehratelný soubor
-                    mr = await context.request.get(u, headers={"Referer": url}, timeout=20000)
+                    mr = await _get(context, u, url)
                     mpd = await mr.text()
                     if DASH_DRM_RE.search(mpd):
                         drm = True

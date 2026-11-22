@@ -143,10 +143,10 @@ def create_app(app_state) -> FastAPI:
         recent = [t for t in fails.get(ip, []) if now - t < 300]
         if len(recent) >= 5:
             raise HTTPException(429, "too many attempts, wait 5 minutes")
+        fails[ip] = recent + [now]                                      # pokus se zapíše hned (před čekáním), souběžné požadavky ho nepřepíšou
         body = await req.json()
-        if not S.secrets.check_password(str(body.get("password", ""))):
-            recent.append(now)
-            fails[ip] = recent
+        # PBKDF2 je pomalé: počítá se mimo smyčku událostí, ať záplava pokusů nezamrzne GUI ani Telegram
+        if not await asyncio.to_thread(S.secrets.check_password, str(body.get("password", ""))):
             await asyncio.sleep(1)
             raise HTTPException(401, "wrong password")
         fails.pop(ip, None)
@@ -422,8 +422,8 @@ def create_app(app_state) -> FastAPI:
 
     @app.get("/api/subscriptions")
     async def subs_list():
-        counts = S.db.sub_counts()
-        return {"items": [sub_out(s, counts) for s in S.db.sub_list()],
+        counts, subs = await asyncio.to_thread(lambda: (S.db.sub_counts(), S.db.sub_list()))
+        return {"items": [sub_out(s, counts) for s in subs],
                 "check_hours": S.settings.get("subscription_check_hours")}
 
     @app.post("/api/subscriptions/preview-page")
@@ -536,7 +536,7 @@ def create_app(app_state) -> FastAPI:
         need_sub(sid)
         for j in S.db.query("select id from jobs where sub_id=? and status='running'", (sid,)):
             S.runner.cancel(j["id"])
-        S.db.sub_delete(sid, keep_history=keep_history)
+        await asyncio.to_thread(S.db.sub_delete, sid, keep_history=keep_history)
         return {"ok": True}
 
     @app.post("/api/subscriptions/{sid}/check")
@@ -560,10 +560,13 @@ def create_app(app_state) -> FastAPI:
     async def history(q: str = "", status: str = "", days: int = 0, offset: int = 0, limit: int = 50, sub: int = 0):
         limit = max(1, min(int(limit), 500))
         offset = max(0, int(offset))
-        rows = S.db.history(q=q, status=status, days=days, offset=offset, limit=limit, sub=sub)
-        matched = S.db.history_count(q=q, status=status, days=days, sub=sub)
-        total = S.db.query("select count(*) n, coalesce(sum(filesize),0) b from jobs where status='done'" + (" and sub_id=? and hide_sub=0" if sub else " and hide_global=0"),
-                           (sub,) if sub else ())[0]
+        def read():                                                  # dotazy do databáze mimo smyčku událostí
+            rows = S.db.history(q=q, status=status, days=days, offset=offset, limit=limit, sub=sub)
+            matched = S.db.history_count(q=q, status=status, days=days, sub=sub)
+            total = S.db.query("select count(*) n, coalesce(sum(filesize),0) b from jobs where status='done'" + (" and sub_id=? and hide_sub=0" if sub else " and hide_global=0"),
+                               (sub,) if sub else ())[0]
+            return rows, matched, total
+        rows, matched, total = await asyncio.to_thread(read)
 
         def out():
             items = []
@@ -596,9 +599,9 @@ def create_app(app_state) -> FastAPI:
             forgot = S.runner.archive_forget_many([j for j in jobs if j["status"] in ("done", "skipped")])
         scope = "both" if body.get("scope") == "both" else "here"
         if isinstance(f, dict):  # hromadně podle aktuálního filtru (hledání, stav, období)
-            n = S.db.delete_history_matching(str(f.get("q") or ""), str(f.get("status") or ""), int(f.get("days") or 0), int(f.get("sub") or 0), scope)
+            n = await asyncio.to_thread(S.db.delete_history_matching, str(f.get("q") or ""), str(f.get("status") or ""), int(f.get("days") or 0), int(f.get("sub") or 0), scope)
         else:
-            n = S.db.delete_history(body.get("ids"), int(body.get("view") or 0), scope)
+            n = await asyncio.to_thread(S.db.delete_history, body.get("ids"), int(body.get("view") or 0), scope)
         return {"deleted": n, "archive_removed": forgot}
 
     def _schedule_restart():
@@ -627,6 +630,18 @@ def create_app(app_state) -> FastAPI:
     def _restore_status():
         pend = backup.pending(S.data)
         return {"pending": pend, "last": backup.last_result(S.data)}
+
+    @app.middleware("http")
+    async def _restore_size_guard(request: Request, call_next):
+        """Velikost nahrané zálohy se pozná z hlavičky ještě před uložením celého těla do dočasného souboru."""
+        if request.method == "POST" and request.url.path == "/api/restore":
+            try:
+                size = int(request.headers.get("content-length") or 0)
+            except ValueError:
+                size = 0
+            if size > MAX_RESTORE_BYTES:
+                return JSONResponse({"detail": "záloha je příliš velká"}, status_code=413)
+        return await call_next(request)
 
     @app.get("/api/restore")
     async def restore_status():
@@ -1053,6 +1068,10 @@ def create_app(app_state) -> FastAPI:
         body = await req.json()
         locked = S.settings.locked_keys()
         changes = {k: v for k, v in body.items() if k not in locked}
+        if "app_update_repo" in changes:                                # zdroj aktualizací se přes API měnit nedá (podvržený repozitář)
+            if str(changes["app_update_repo"]).strip() != str(S.settings.get("app_update_repo")):
+                raise HTTPException(400, "Repozitář aktualizací se nastavuje na serveru (VIDDOWN_APP_UPDATE_REPO), ne přes API.")
+            changes.pop("app_update_repo")
         if changes.get("cookies_mode") == "browser" and in_docker():
             raise HTTPException(400, "V Dockeru nelze číst cookies z prohlížeče – aplikace neběží na stejném počítači "
                                      "jako prohlížeč. Exportujte cookies do souboru cookies.txt a nahrajte ho.")
@@ -1324,7 +1343,9 @@ def create_app(app_state) -> FastAPI:
                     S.engines.log("chromium", "instalace OK" if ok else f"instalace selhala: {msg}")
                 finally:
                     S.chromium_busy = False
-            asyncio.create_task(inst())
+            t = asyncio.create_task(inst())
+            bg_tasks.add(t)
+            t.add_done_callback(bg_tasks.discard)
             return {"started": True}
         if name not in S.engines.engines:
             raise HTTPException(404)

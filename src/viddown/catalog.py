@@ -419,7 +419,7 @@ async def list_page(url: str, ctx, cause: Exception | None = None) -> dict:
                 raise ResolveError(str(e), "network") from e
         if renderer is None:
             try:
-                cfg = pagelist.detect(text, final)
+                cfg = await asyncio.to_thread(pagelist.detect, text, final)
             except pagelist.PageError:
                 if not slow:
                     raise
@@ -432,7 +432,7 @@ async def list_page(url: str, ctx, cause: Exception | None = None) -> dict:
     async with renderer as rd:
         try:
             text, final = await rd.render(final)
-            cfg = pagelist.detect(text, final)
+            cfg = await asyncio.to_thread(pagelist.detect, text, final)
         except pagelist.PageError as e:
             raise ResolveError(f"web není podporovaný a seznam videí se na stránce nenašel ({e})", "unsupported") from cause or e
         return await _page_entries(url, ctx, cfg, rd)
@@ -458,7 +458,7 @@ async def _page_entries(url: str, ctx, cfg: dict, rd) -> dict:
             except (pagelist.PageError, ResolveError) as e:
                 complete = complete and any(f"HTTP {c}" in str(e) for c in (404, 410))     # za poslední stránkou vrací mnoho webů 404
                 break
-            got = pagelist.items_from(text, final, cfg["item_regex"])
+            got = await asyncio.to_thread(pagelist.items_from, text, final, cfg["item_regex"])
             fresh = [i for i in got if i["url"] not in seen]
             if not fresh:
                 complete = complete and bool(got)                       # stránka bez jediného dílu (captcha, prázdný render) = neúplné
@@ -947,11 +947,20 @@ def expand_source(db, sid: int, urls: list[str], folder: Path | None = None) -> 
     return res
 
 
+def _mark_scanning(db, sid: int) -> int:
+    with db.conn() as c:
+        return c.execute("update catalog_sources set status='scanning', error=null where id=? and status != 'detached'", (sid,)).rowcount
+
+
+def _mark_queued(db, sid: int) -> None:
+    with db.conn() as c:
+        c.execute("update catalog_sources set status='queued' where id=? and status='scanning'", (sid,))
+
+
 async def scan_one(st, src: dict) -> dict:
     """Zjistí seznam jednoho zdroje a uloží ho. Chyba se zapíše ke zdroji (a zdroj zůstane k ručnímu opakování)."""
     db, sid = st.db, src["id"]
-    with db.conn() as c:
-        n = c.execute("update catalog_sources set status='scanning', error=null where id=? and status != 'detached'", (sid,)).rowcount
+    n = await asyncio.to_thread(_mark_scanning, db, sid)
     if not n:                                                           # mezitím odebraný (odpojený) nebo smazaný zdroj se nezjišťuje
         return {}
     try:
@@ -967,8 +976,7 @@ async def scan_one(st, src: dict) -> dict:
                      res["reoffered"], res["missing"])
         return res or {}
     except asyncio.CancelledError:
-        with db.conn() as c:
-            c.execute("update catalog_sources set status='queued' where id=? and status='scanning'", (sid,))
+        await asyncio.to_thread(_mark_queued, db, sid)
         raise
     except ResolveError as e:
         _fail(db, sid, str(e)[:500])

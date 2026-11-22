@@ -35,7 +35,9 @@ def test_hanging_target_check_pauses_queue_without_blocking_the_loop(rt, monkeyp
         await rt._check_target(rt.settings.all())
         took = time.monotonic() - t0                                         # měří se uvnitř smyčky (po jejím konci asyncio čeká na visící vlákno)
         rt._target_checked = -1e9
-        await rt._check_target(rt.settings.all())                            # předchozí kontrola ještě visí: nespouští se další vlákno
+        for _ in range(runner_mod.TARGET_FAILS_BEFORE_PAUSE - 1):           # předchozí kontrola ještě visí: nespouští se další vlákno
+            rt._target_checked = -1e9
+            await rt._check_target(rt.settings.all())
         release.set()
         return took
     took = asyncio.run(go())
