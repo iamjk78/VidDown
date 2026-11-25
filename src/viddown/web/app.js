@@ -1404,7 +1404,7 @@ function renderCatalog() {
   $('#catside').onclick = catSrcClick;
   $('#catsrc').onmouseover = catTipShow; $('#catsrc').onmouseout = catTipHide; $('#catsrc').onfocusin = catTipShow; $('#catsrc').onfocusout = catTipHide;
   $('#catgrid').onclick = catGridClick;
-  $('#catgrid').onmousedown = catGridDown;
+  $('#main').onmousedown = catGridDown;                                         // tažení začíná kdekoli v katalogu (kromě ovládacích prvků)
   $('#catgrid').oncontextmenu = e => { if (IS_MAC && e.ctrlKey && e.target.closest('.vcard') && !catInteractive(e.target)) e.preventDefault(); };   // Ctrl+klik na macOS nevolá kontextovou nabídku
   catAnimTrack();
   $('#catgrid').onmouseover = catAnimHover; $('#catgrid').onmouseout = catAnimHover;

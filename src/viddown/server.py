@@ -756,6 +756,9 @@ def create_app(app_state) -> FastAPI:
         if src is not None and (not isinstance(src, int) or isinstance(src, bool) or not 0 < src < 2 ** 62):
             raise HTTPException(400, "Neplatný zdroj.")
         res = await asyncio.to_thread(catalogdetails.refill_dates, S.db, src)
+        w = getattr(S, "catalog_details", None)
+        if w is not None and any(res.values()):
+            w.request_manual()                          # ruční akce spustí doplnění hned, i mimo okno rozvrhu
         return {**res, "overview": await asyncio.to_thread(_overview)}
 
     @app.post("/api/catalog/sources/{sid}/expand")
@@ -789,6 +792,8 @@ def create_app(app_state) -> FastAPI:
         w = getattr(S, "catalog_details", None)
         if w is not None:
             w.src_scanned.clear()                       # Doplnit animace: stránky zdrojů se prohledají znovu
+            if any(res.values()):
+                w.request_manual()                      # ruční akce spustí doplnění hned, i mimo okno rozvrhu
         return {**res, "overview": await asyncio.to_thread(_overview)}
 
     @app.post("/api/catalog/items/action")

@@ -159,6 +159,7 @@ class DetailWorker:
         self.src_scanned: dict[int, int] = {}        # zdroj -> nejvyšší číslo videa bez animace při prohledání jeho stránek (nová videa = znovu)
         self.page_hosts: set[str] = set()            # weby, na kterých právě běží sken stránky videa
         self.slow_task: asyncio.Task | None = None   # pomalá vrstva (prohlížeč): nejvýš jedno video najednou
+        self.manual = False                          # ruční „Doplnit …“ obchází okno rozvrhu, dokud zbývá práce
 
     # --- nastavení a stav -------------------------------------------------------------------------
     @property
@@ -250,8 +251,24 @@ class DetailWorker:
         return bool(self.db.query("select 1 from catalog_sources where status in ('queued','scanning') limit 1"))
 
     def allowed_now(self) -> bool:
-        """Smí teď začít další práce? Ruční pozastavení a časový rozvrh (rozsah „catalog“)."""
-        return not self.paused() and schedule.allowed(self.st.settings.all(), "catalog", db=self.db)
+        """Smí teď začít další práce? Ruční pozastavení a časový rozvrh (rozsah „catalog“). Ruční „Doplnit …“ rozvrh obejde,
+        dokud zbývají položky k doplnění."""
+        if self.paused():
+            return False
+        if schedule.allowed(self.st.settings.all(), "catalog", db=self.db):
+            return True
+        if self.manual and self._manual_left():
+            return True
+        self.manual = False
+        return False
+
+    def request_manual(self) -> None:
+        """Tlačítka „Doplnit animace“ a „Doplnit data“ spustí doplnění hned, i mimo okno rozvrhu (do vyřízení položek)."""
+        self.manual = True
+
+    def _manual_left(self) -> bool:
+        return bool(self.db.query("select 1 from catalog_items where state in ('new','queued') and detail_state='pending' limit 1")) \
+            or bool(self.pending_anims(1))
 
     def folder(self) -> Path:
         return catalog.thumbs_dir(self.st.data, self.st.settings)
