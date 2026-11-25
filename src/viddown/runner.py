@@ -320,7 +320,10 @@ class Runner:
 
     @staticmethod
     def _sleep_for(key: str, s: dict) -> float:
-        """Pauza před dalším videem z webu: u YouTube `sleep_youtube_min–max`, jinak `sleep_min–max`."""
+        """Pauza před dalším videem z webu: vlastní rozsah z `sleep_by_host`, jinak u YouTube `sleep_youtube_min–max`, jinak `sleep_min–max`."""
+        for e in s.get("sleep_by_host") or []:
+            if e.get("host") == key:
+                return random.uniform(float(e["min"]), max(float(e["min"]), float(e["max"])))
         lo, hi = ((s.get("sleep_youtube_min", 30), s.get("sleep_youtube_max", 60)) if key == "youtube.com" else (s.get("sleep_min", 5), s.get("sleep_max", 15)))
         lo, hi = float(lo or 0), float(hi or 0)
         return random.uniform(lo, max(lo, hi))

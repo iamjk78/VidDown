@@ -92,6 +92,7 @@ DEFAULTS: dict = {
     "sleep_max": 15,
     "sleep_youtube_min": 30,               # pauza mezi stahováním videí z YouTube (s); YouTube omezuje relace, které stahují příliš rychle
     "sleep_youtube_max": 60,
+    "sleep_by_host": [],                   # vlastní pauza pro jednotlivé weby: [{"host": "example.com", "min": 10, "max": 20}] (s); přepíše výchozí
     "retries": 5,
     "auto_retry_attempts": 2,
     # přístup a síť
@@ -172,6 +173,34 @@ _lock = threading.RLock()
 RANGES = {"port": (1, 65535), "probe_concurrency": (1, 16), "k2s_retry_minutes": (15, 1440), "k2s_captcha_minutes": (5, 120)}           # další meze se přidávají sem; mimo rozsah = chyba při ukládání, oříznutí při čtení
 
 
+SLEEP_HOSTS_MAX = 50
+
+
+def normalize_sleep_hosts(v) -> list[dict]:
+    """Pauzy po webech: seznam {host, min, max} v sekundách (0–600). Adresy YouTube se sjednotí na „youtube.com“ jako ve frontě."""
+    if not isinstance(v, list) or len(v) > SLEEP_HOSTS_MAX:
+        raise ValueError(f"sleep_by_host must be a list of at most {SLEEP_HOSTS_MAX} entries")
+    out: dict[str, dict] = {}
+    for e in v:
+        if not isinstance(e, dict):
+            raise ValueError("sleep_by_host entries must be objects")
+        host = str(e.get("host") or "").strip().lower()
+        if host.startswith("www."):
+            host = host[4:]
+        if host in ("youtu.be", "youtube.com") or host.endswith(".youtube.com"):
+            host = "youtube.com"
+        if not host or any(c in host for c in "/ :@?#"):
+            raise ValueError(f"invalid host: {host!r}")
+        lo, hi = e.get("min"), e.get("max")
+        if isinstance(lo, bool) or isinstance(hi, bool) or not isinstance(lo, (int, float)) or not isinstance(hi, (int, float)):
+            raise ValueError(f"sleep range for {host} must be numbers")
+        lo, hi = float(lo), float(hi)
+        if not 0 <= lo <= hi <= 600:
+            raise ValueError(f"sleep range for {host} must satisfy 0 <= min <= max <= 600")
+        out[host] = {"host": host, "min": lo, "max": hi}
+    return list(out.values())
+
+
 def _coerce(default, value):
     """Převede hodnotu na typ výchozí hodnoty. Vyhodí ValueError při nesmyslu."""
     if isinstance(default, bool):
@@ -237,6 +266,12 @@ class Settings:
                     if k == "schedule_rules":
                         out[k] = schedule.normalize_rules_safe(v)
                         continue
+                    if k == "sleep_by_host":
+                        try:
+                            out[k] = normalize_sleep_hosts(v)
+                        except ValueError:
+                            pass
+                        continue
                     try:
                         out[k] = _coerce(DEFAULTS[k], v)
                     except (TypeError, ValueError):
@@ -265,7 +300,7 @@ class Settings:
             for k, v in changes.items():
                 if k not in DEFAULTS:
                     raise ValueError(f"unknown setting: {k}")
-                val = schedule.normalize_rules(v) if k == "schedule_rules" else _coerce(DEFAULTS[k], v)
+                val = schedule.normalize_rules(v) if k == "schedule_rules" else normalize_sleep_hosts(v) if k == "sleep_by_host" else _coerce(DEFAULTS[k], v)
                 if k == "schedule_scope":
                     val = [x for x in dict.fromkeys(val)]
                     if not val or any(x not in schedule.SCOPES for x in val):

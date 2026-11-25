@@ -249,6 +249,7 @@ function renderQueue() {
   <div class="row gap16 wrap"><div><h1>${T('Fronta', 'Queue')}</h1><div class="t2" style="margin-top:3px">${T('Stahuje se postupně v pořadí přidání', 'Downloads run in the order they were added')}</div></div><div class="grow"></div>
    <form id="addf" class="row gap8" style="width:min(620px,100%)"><div class="inwrap grow">${ic('link', 16)}<input id="addurl" placeholder="${T('Vložte URL videa, playlistu nebo kanálu…', 'Paste a video, playlist or channel URL…')}" autocomplete="off"></div>
    <button class="btn primary lg" type="submit">${ic('plus', 15)} ${T('Přidat', 'Add')}</button></form></div>
+  <div id="qsleep"></div>
   <div id="qdyn" class="col gap16"></div>`;
   $('#addf').onsubmit = async e => {
     e.preventDefault(); const v = $('#addurl').value.trim(); if (!v) return;
@@ -391,8 +392,50 @@ document.addEventListener('change', e => {
   const q = App.subFilter ? App.st.queue.filter(j => j.sub_id === App.subFilter) : App.st.queue;
   qToggle(q, +cb.dataset.id, cb.checked); renderQueueDyn();
 });
+// Prodleva po zdrojích: panel se překreslí jen když se změní seznam webů nebo nastavení (ať nepřepisuje rozepsaná pole)
+const isK2SHost = h => /k2s|keep2share/.test(h);
+function renderSleepPanel(st) {
+  const box = $('#qsleep'); if (!box) return;
+  const cfg = (App.settings && App.settings.values) || {};
+  const over = new Map((cfg.sleep_by_host || []).map(e => [e.host, e]));
+  const hosts = [...new Set([...(st.sleep_hosts || []), ...over.keys()])].sort();
+  const key = JSON.stringify([hosts, cfg.sleep_by_host, cfg.sleep_min, cfg.sleep_max, cfg.sleep_youtube_min, cfg.sleep_youtube_max]);
+  if (box.dataset.key === key) return;
+  box.dataset.key = key;
+  if (!hosts.length) { box.innerHTML = ''; return; }
+  const rows = hosts.map(h => {
+    const yt = h === 'youtube.com', o = over.get(h);
+    const dMin = yt ? cfg.sleep_youtube_min : cfg.sleep_min, dMax = yt ? cfg.sleep_youtube_max : cfg.sleep_max;
+    const lo = o ? o.min : dMin, hi = o ? o.max : dMax, dis = isK2SHost(h) ? 'disabled' : '';
+    return `<div class="row gap8 wrap" style="padding:6px 16px;align-items:center">
+      <span class="grow b6">${esc(h)}</span>
+      <input class="input sm" type="number" min="0" max="600" data-sh-min="${esc(h)}" data-dmin="${dMin}" value="${lo}" style="width:80px" ${dis}>
+      <span class="t2 fs12">–</span>
+      <input class="input sm" type="number" min="0" max="600" data-sh-max="${esc(h)}" data-dmax="${dMax}" value="${hi}" style="width:80px" ${dis}>
+      <span class="t2 fs12">s</span>
+      ${isK2SHost(h) ? `<span class="t2 fs12">${T('řídí se odpočtem z Keep2Share', 'follows the Keep2Share countdown')}</span>` : ''}</div>`;
+  }).join('');
+  box.innerHTML = `<details class="card" style="padding:0" id="qsleepbox" ${App.sleepOpen ? 'open' : ''}>
+    <summary style="padding:12px 16px;cursor:pointer" class="b6">${T('Prodleva mezi soubory po zdrojích', 'Pause between files per source')}</summary>
+    <div class="t2 fs12" style="padding:0 16px 8px">${T('Platí pro každý web zvlášť. Po souboru z webu se na něm čeká, ostatní weby jedou dál.', 'Applies to each site separately. After a file from a site, that site waits while the others keep going.')}</div>
+    ${rows}
+    <div class="row gap8" style="padding:10px 16px"><button class="btn sm primary" id="qsleepsave">${T('Uložit prodlevy', 'Save pauses')}</button></div>
+  </details>`;
+  $('#qsleepbox', box).ontoggle = e => { App.sleepOpen = e.target.open; };
+  $('#qsleepsave', box).onclick = async () => {
+    const list = $$('[data-sh-min]', box).map(i => {
+      const h = i.dataset.shMin, mx = $(`[data-sh-max="${CSS.escape(h)}"]`, box);
+      return { host: h, min: +i.value, max: +mx.value, dmin: +i.dataset.dmin, dmax: +mx.dataset.dmax };
+    }).filter(e => !isK2SHost(e.host) && (e.min !== e.dmin || e.max !== e.dmax))   // jen odchylky od výchozích hodnot
+      .map(({ host, min, max }) => ({ host, min, max }));
+    const r = await act(() => api('/api/settings', { method: 'PUT', body: { sleep_by_host: list } }));
+    if (r) { App.settings = r; toast(T('Prodlevy uloženy', 'Pauses saved')); }
+  };
+}
+
 function renderQueueDyn() {
   const box = $('#qdyn'); const st = App.st; if (!box || !st) return;
+  renderSleepPanel(st);
   const q = App.subFilter ? st.queue.filter(j => j.sub_id === App.subFilter) : st.queue, s = st.stats;
   const top = q.filter(j => !j.parent_id);
   const running = q.filter(j => j.status === 'running');

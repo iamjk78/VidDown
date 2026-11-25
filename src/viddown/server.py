@@ -25,7 +25,7 @@ from . import __version__, appupdate, autobackup, backup, catalog, catalogdetail
 from .resolvers import cookiepolicy, k2s
 from .config import DEFAULTS, CHOICES, cookies_path
 from .probe import probe_url
-from .util import check_dir_writable, env_flag, extract_urls, in_docker, in_schedule, mask_proxy, sanitize_filename
+from .util import check_dir_writable, env_flag, extract_urls, host_key, in_docker, in_schedule, mask_proxy, sanitize_filename
 
 WEB = Path(__file__).parent / "web"
 
@@ -186,6 +186,7 @@ def create_app(app_state) -> FastAPI:
             "app": updater.banner_cached(S),
             "queue_paused": bool(S.db.kv_get("queue_paused", False)),
             "host_pauses": S.runner.host_pauses(),
+            "sleep_hosts": sorted({host_key(j["url"]) for j in waiting + running if j.get("url")}),   # weby, na které se čeká ve frontě
             "pause_reason": S.db.kv_get("queue_pause_reason"),
             "pause_hard": S.runner.pause_is_hard(),
             "target_error": S.db.kv_get("target_error"),
