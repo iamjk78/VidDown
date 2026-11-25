@@ -273,6 +273,25 @@ class DetailWorker:
     def folder(self) -> Path:
         return catalog.thumbs_dir(self.st.data, self.st.settings)
 
+    async def _stored(self, fn, *args):
+        """Stažení do složky platné při spuštění. Když se složka mezitím změnila v nastavení, soubor se přesune do nové
+        (jinak by databáze odkazovala na soubor, který v nové složce chybí)."""
+        folder = self.folder()
+        name = await asyncio.to_thread(fn, folder, *args)
+        return await asyncio.to_thread(self._move_to_current, folder, name) if name else None
+
+    def _move_to_current(self, used: Path, name: str) -> str | None:
+        cur = self.folder()
+        if cur == used:
+            return name
+        try:
+            cur.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(used / name), str(cur / name))
+            return name
+        except OSError as e:
+            log.warning("katalog: soubor %s se nepodařilo přesunout do nové složky: %s", name, e)
+            return None
+
     # --- výběr práce ------------------------------------------------------------------------------
     def excluded_hosts(self) -> set[str]:
         """Weby, na které se teď nesmí sahat: právě zpracovávané, ve vychlazení po dotazu nebo odložené po omezení."""
@@ -332,7 +351,7 @@ class DetailWorker:
         n = await asyncio.to_thread(_store_details, self.db, item, info, expect, urls)
         if n and urls and urls[0] != item.get("thumb_url"):      # jiná (obvykle lepší) miniatura než ze seznamu: nahradit
             async with self._thumb_lock(item["id"]):
-                name = await asyncio.to_thread(download_thumb, self.folder(), item["id"], urls, thumbs.referer_of(item.get("url")), self.proxy())
+                name = await self._stored(download_thumb, item["id"], urls, thumbs.referer_of(item.get("url")), self.proxy())
             if name:
                 with self.db.conn() as c:
                     c.execute("update catalog_items set thumb_file=?, updated_at=? where id=? and state in ('new','queued')", (name, time.time(), item["id"]))
@@ -497,7 +516,7 @@ class DetailWorker:
                 cur = self.db.query("select thumb_file from catalog_items where id=?", (row["id"],))
                 if not cur or cur[0]["thumb_file"] is not None:         # mezitím ji uložil `_store` nebo položka zmizela
                     return
-                name = await asyncio.to_thread(download_thumb, self.folder(), row["id"], [row["thumb_url"], *[a for a in alts if isinstance(a, str)]],
+                name = await self._stored(download_thumb, row["id"], [row["thumb_url"], *[a for a in alts if isinstance(a, str)]],
                                                thumbs.referer_of(row.get("url")), self.proxy())
         except OSError as e:                                             # výpadek zápisu (třeba NAS): nejde o vadnou miniaturu, zůstane čekat na další pokus
             log.warning("katalog: miniaturu %s nejde uložit (%s), zkusí se znovu", row["id"], e)
@@ -550,9 +569,9 @@ class DetailWorker:
         referer = thumbs.referer_of(row.get("url"))
         try:
             if storyboard.is_spec(row["anim_url"]):                   # storyboard: obrázky se složí ffmpegem do krátkého MP4
-                name = await asyncio.to_thread(storyboard.build, self.folder(), row["id"], row["anim_url"], self.ffmpeg(), max_bytes, referer, self.proxy())
+                name = await self._stored(storyboard.build, row["id"], row["anim_url"], self.ffmpeg(), max_bytes, referer, self.proxy())
             else:
-                name = await asyncio.to_thread(download_anim, self.folder(), row["id"], row["anim_url"], max_bytes, referer, self.proxy())
+                name = await self._stored(download_anim, row["id"], row["anim_url"], max_bytes, referer, self.proxy())
         except Exception:  # noqa: BLE001 - jedna vadná animace nesmí zastavit všechny ostatní
             log.exception("katalog: animace %s", row["id"])
             name = None

@@ -14,7 +14,7 @@ from pathlib import Path
 
 from .. import container
 from ..util import classify_error, host_key, is_http_url, mask_proxy
-from . import Cancelled, Ctx, ProcHolder, ResolveError, cookiepolicy, subprocess_kwargs
+from . import Cancelled, Ctx, ProcHolder, ResolveError, cookiepolicy, spawn_proc
 
 PENDING = ".viddown-pending.json"      # hotové stažení čekající na přesun do cílové složky (nebo přerušené po zápisu do archivu yt-dlp)
 
@@ -126,8 +126,7 @@ async def _run_json(cmd: list[str], timeout: float, ctx: Ctx | None = None, ck: 
 
 
 async def _run_json_inner(cmd: list[str], timeout: float, ctx: Ctx | None) -> dict:
-    proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-                                                **subprocess_kwargs())
+    proc = await spawn_proc(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     try:
         out, err = await asyncio.wait_for(proc.communicate(), timeout)
     except asyncio.TimeoutError:
@@ -266,8 +265,7 @@ async def _download(url, info, ctx: Ctx, staging: Path, name: str, rate_bps, on_
 
     log.debug("yt-dlp cmd: %s", [mask_proxy(c) if "://" in c and "@" in c else c for c in cmd])
     holder.check()
-    proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-                                                **subprocess_kwargs())
+    proc = await spawn_proc(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
     await holder.attach(proc)
     filepath = None
     skipped = None

@@ -73,10 +73,12 @@ class ProcHolder:
                     pass
 
 
-def subprocess_kwargs() -> dict:
+async def spawn_proc(*cmd, **kw):
+    """Spustí podproces; na Windows bez okna a s prioritou z režimu výkonu. Prioritu nastaví rodič hned po spuštění."""
     from .. import cpu
     if sys.platform == "win32":
         import subprocess
-        return {"creationflags": subprocess.CREATE_NO_WINDOW | cpu.win_flags()}
-    pre = cpu.preexec()
-    return {"preexec_fn": pre} if pre else {}
+        kw.setdefault("creationflags", subprocess.CREATE_NO_WINDOW | cpu.win_flags())
+    proc = await asyncio.create_subprocess_exec(*cmd, **kw)
+    cpu.apply_nice(proc.pid)
+    return proc

@@ -14,7 +14,7 @@ from urllib.parse import urljoin, urlparse
 
 from .. import netsafe
 from ..util import classify_error, is_hls_response
-from . import Cancelled, Ctx, ProcHolder, ResolveError, cookiepolicy, subprocess_kwargs
+from . import Cancelled, Ctx, ProcHolder, ResolveError, cookiepolicy, spawn_proc
 
 log = logging.getLogger("viddown.sniffer")
 
@@ -346,10 +346,21 @@ async def guard_routes(context, start_url: str) -> None:
 async def _get(context, u: str, referer: str):
     """Dotaz mimo prohlížeč (context.request) obchází `guard_routes`, proto se veřejnost adresy ověřuje tady.
     Stejný hostitel jako stránka se nekontroluje (web, který uživatel zadal, se kontroluje jen při přesměrování a podpožadavcích)."""
-    same = (urlparse(u).hostname or "").lower() == (urlparse(referer).hostname or "").lower()
-    if not same and not await asyncio.to_thread(netsafe.host_ok, u):
-        raise ValueError("adresa mimo veřejný internet")
-    return await context.request.get(u, headers={"Referer": referer}, timeout=20000)
+    rh = (urlparse(referer).hostname or "").lower()
+    cur = u
+    for _ in range(MAX_REDIRECTS + 1):
+        # každý krok (i přesměrování) se ověří zvlášť: přesměrování na vnitřní adresu nesmí projít
+        if (urlparse(cur).hostname or "").lower() != rh and not await asyncio.to_thread(netsafe.host_ok, cur):
+            raise ValueError("adresa mimo veřejný internet")
+        r = await context.request.get(cur, headers={"Referer": referer}, timeout=20000, max_redirects=0)
+        loc = r.headers.get("location") if r.status in (301, 302, 303, 307, 308) else None
+        if not loc:
+            return r
+        cur = urljoin(cur, loc)
+    raise ValueError("příliš mnoho přesměrování")
+
+
+MAX_REDIRECTS = 5
 
 
 async def candidate_ok(url: str, referer: str) -> bool:
@@ -569,8 +580,7 @@ async def _duration(ctx: Ctx, url: str, headers: str) -> float | None:
     cmd += ["-protocol_whitelist", WHITELIST, "-show_entries", "format=duration", "-of", "csv=p=0", url]
     proc = None
     try:
-        proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-                                                    **subprocess_kwargs())
+        proc = await spawn_proc(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
         out, _ = await asyncio.wait_for(proc.communicate(), 45)
         return float(out.decode().strip())
     except Exception:  # noqa: BLE001
@@ -620,8 +630,7 @@ async def download(sn: dict, ctx: Ctx, staging: Path, name: str, on_progress, ho
                 cmd += ["-bsf:a", "aac_adtstoasc", "-movflags", "+faststart"]
             cmd += ["-progress", "pipe:1", str(out)]
             holder.check()
-            proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-                                                        **subprocess_kwargs())
+            proc = await spawn_proc(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
             await holder.attach(proc)
             err_task = asyncio.create_task(proc.stderr.read())  # type: ignore[union-attr]
             t0, size, last = time.monotonic(), 0, 0.0

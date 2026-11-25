@@ -31,18 +31,15 @@ def current_nice() -> int:
     return _nice
 
 
-def preexec():
-    """Funkce pro `preexec_fn` – nově spuštěný podproces dostane aktuální nižší prioritu. None = nic nedělat."""
+def apply_nice(pid: int) -> None:
+    """Nastaví právě spuštěnému podprocesu aktuální nižší prioritu (rodičem, ne `preexec_fn`: ten je v aplikaci s vlákny nebezpečný)."""
     n = _nice
     if not n or sys.platform == "win32":
-        return None
-
-    def f() -> None:
-        try:
-            os.setpriority(os.PRIO_PROCESS, 0, n)
-        except OSError:
-            pass
-    return f
+        return
+    try:
+        os.setpriority(os.PRIO_PROCESS, pid, n)
+    except OSError:
+        pass
 
 
 def win_flags() -> int:

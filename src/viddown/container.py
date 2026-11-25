@@ -11,7 +11,7 @@ import asyncio
 import logging
 from pathlib import Path
 
-from .resolvers import subprocess_kwargs
+from .resolvers import spawn_proc
 
 log = logging.getLogger("viddown.container")
 
@@ -37,8 +37,8 @@ async def remux_mkv_to_mp4(ffmpeg: str | None, src: Path, holder=None, threads: 
     try:
         for subs in (True, False):
             tmp.unlink(missing_ok=True)
-            proc = await asyncio.create_subprocess_exec(*_cmd(ffmpeg, src, tmp, subs, threads), stdout=asyncio.subprocess.DEVNULL,
-                                                        stderr=asyncio.subprocess.PIPE, **subprocess_kwargs())
+            proc = await spawn_proc(*_cmd(ffmpeg, src, tmp, subs, threads), stdout=asyncio.subprocess.DEVNULL,
+                                                        stderr=asyncio.subprocess.PIPE)
             if holder is not None:
                 await holder.attach(proc)
             _, err = await proc.communicate()

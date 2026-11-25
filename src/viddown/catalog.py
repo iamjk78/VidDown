@@ -193,7 +193,8 @@ def prune_thumbs(db, folder: Path, min_age: float = 3600.0) -> int:
     try:
         with os.scandir(folder) as it:
             for e in list(it):
-                if not (THUMB_NAME.match(e.name) or ANIM_NAME.match(e.name)) or e.name in used or not e.is_file(follow_symlinks=False):
+                orphan_part = e.name.endswith(".part")                       # rozdělané stahování po pádu (jinak by zůstalo navždy)
+                if not (orphan_part or THUMB_NAME.match(e.name) or ANIM_NAME.match(e.name)) or e.name in used or not e.is_file(follow_symlinks=False):
                     continue
                 if now - e.stat(follow_symlinks=False).st_mtime < min_age:
                     continue
