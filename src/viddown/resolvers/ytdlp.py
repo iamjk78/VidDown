@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import signal
 import dataclasses
 import json
 import logging
@@ -14,7 +15,7 @@ from pathlib import Path
 
 from .. import container
 from ..util import classify_error, host_key, is_http_url, mask_proxy
-from . import Cancelled, Ctx, ProcHolder, ResolveError, cookiepolicy, spawn_proc
+from . import Cancelled, Ctx, ProcHolder, ResolveError, _signal_group, cookiepolicy, spawn_proc
 
 PENDING = ".viddown-pending.json"      # hotové stažení čekající na přesun do cílové složky (nebo přerušené po zápisu do archivu yt-dlp)
 
@@ -130,10 +131,10 @@ async def _run_json_inner(cmd: list[str], timeout: float, ctx: Ctx | None) -> di
     try:
         out, err = await asyncio.wait_for(proc.communicate(), timeout)
     except asyncio.TimeoutError:
-        proc.kill()
+        _signal_group(proc, signal.SIGKILL)
         raise ResolveError("vypršel časový limit kontroly", "network")
     except asyncio.CancelledError:      # zrušení (např. vypnutí aplikace) nesmí nechat yt-dlp běžet dál
-        proc.kill()
+        _signal_group(proc, signal.SIGKILL)
         raise
     text = out.decode("utf-8", "replace")
     etext = err.decode("utf-8", "replace")
@@ -263,7 +264,11 @@ async def _download(url, info, ctx: Ctx, staging: Path, name: str, rate_bps, on_
     for f in (info or {}).get("requested_formats") or []:
         parts[str(f.get("format_id"))] = [0, int(f.get("filesize") or f.get("filesize_approx") or 0)]
 
-    log.debug("yt-dlp cmd: %s", [mask_proxy(c) if "://" in c and "@" in c else c for c in cmd])
+    masked, nxt = [], False
+    for c in cmd:                                           # heslo proxy se do logu nesmí dostat ani bez schématu; adresy videí s údaji také
+        masked.append(mask_proxy(c) if nxt or ("@" in c and "://" in c) else c)
+        nxt = c == "--proxy"
+    log.debug("yt-dlp cmd: %s", masked)
     holder.check()
     proc = await spawn_proc(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
     await holder.attach(proc)
@@ -308,7 +313,7 @@ async def _download(url, info, ctx: Ctx, staging: Path, name: str, rate_bps, on_
             tail = tail[-40:]
     except BaseException:                                               # chyba při čtení výstupu nesmí nechat yt-dlp běžet dál
         if proc.returncode is None:
-            proc.kill()
+            _signal_group(proc, signal.SIGKILL)
         raise
     code = await proc.wait()
     holder.proc = None

@@ -29,6 +29,11 @@ from .util import check_dir_writable, env_flag, extract_urls, host_key, in_docke
 
 WEB = Path(__file__).parent / "web"
 
+
+def _norm_path(p) -> Path:
+    """Textová normalizace cesty (bez čtení z disku): `..` a `~`."""
+    return Path(os.path.normpath(os.path.expanduser(str(p or ""))))
+
 log = logging.getLogger("viddown.server")
 FS_TIMEOUT = 8.0                                  # nejdéle čeká souborový dotaz (NAS může viset)
 MAX_RESTORE_BYTES = 8 * 1024 ** 3                  # největší povolená nahraná záloha
@@ -270,7 +275,7 @@ def create_app(app_state) -> FastAPI:
         elif action == "cancel":
             S.runner.cancel(jid)
         elif action == "retry":
-            return {"id": S.runner.retry(jid)}
+            return {"id": await asyncio.to_thread(S.runner.retry, jid)}
         elif action == "confirm":
             if not S.runner.confirm(jid):
                 raise HTTPException(409, "not awaiting confirmation")
@@ -518,7 +523,8 @@ def create_app(app_state) -> FastAPI:
                 ch["since"] = subscriptions.parse_since(body["since"])
             except ValueError as e:
                 raise HTTPException(400, str(e))
-            ch["seen_old"] = None   # závěry „starší než datum“ platily pro původní datum
+            if ch["since"] != (S.db.sub_get(sid) or {}).get("since"):
+                ch["seen_old"] = None   # závěry „starší než datum“ platí jen pro původní datum (jinak by se zahozená videa vrátila)
         if "enabled" in body:
             ch["enabled"] = 1 if body["enabled"] else 0
         if "check_hours" in body:
@@ -550,7 +556,7 @@ def create_app(app_state) -> FastAPI:
     @app.post("/api/subscriptions/{sid}/confirm")
     async def subs_confirm(sid: int):
         need_sub(sid)
-        return {"queued": subscriptions.confirm_pending(S.db, sid)}
+        return {"queued": await asyncio.to_thread(subscriptions.confirm_pending, S.db, sid)}
 
     @app.post("/api/subscriptions/{sid}/reject")
     async def subs_reject(sid: int):
@@ -597,7 +603,7 @@ def create_app(app_state) -> FastAPI:
                 jobs = [j for j in (S.db.get(int(i)) for i in body["ids"]) if j]
             else:
                 jobs = S.db.history(limit=10 ** 9)
-            forgot = S.runner.archive_forget_many([j for j in jobs if j["status"] in ("done", "skipped")])
+            forgot = await asyncio.to_thread(S.runner.archive_forget_many, [j for j in jobs if j["status"] in ("done", "skipped")])
         scope = "both" if body.get("scope") == "both" else "here"
         if isinstance(f, dict):  # hromadně podle aktuálního filtru (hledání, stav, období)
             n = await asyncio.to_thread(S.db.delete_history_matching, str(f.get("q") or ""), str(f.get("status") or ""), int(f.get("days") or 0), int(f.get("sub") or 0), scope)
@@ -936,8 +942,8 @@ def create_app(app_state) -> FastAPI:
     @app.post("/api/app/rollback")
     async def app_rollback(req: Request):
         body = await req.json() if (await req.body()) else {}
-        if body.get("restore_db") and S.runner.running:
-            raise HTTPException(409, "Obnova databáze za běhu stahování není možná – nejdřív pozastavte frontu a počkejte na doběhnutí úloh.")
+        if body.get("restore_db"):   # databáze se za běhu přepsat nesmí (katalog, odběry i bot ji dál používají)
+            raise HTTPException(409, "Obnovu databáze lze provést jen z příkazové řádky při zastaveném programu: viddown app rollback --restore-db.")
         return await _app_call(updater.do_rollback, S, bool(body.get("restore_db")))
 
     @app.post("/api/app/unskip")
@@ -1109,10 +1115,13 @@ def create_app(app_state) -> FastAPI:
         if pw and len(pw) < 6:
             raise HTTPException(400, "Heslo musí mít alespoň 6 znaků.")
         host_env = os.environ.get("VIDDOWN_HOST", "")
-        exposed = S.settings.get("network_access") or (host_env not in ("", "127.0.0.1", "localhost", "::1") and not env_flag("VIDDOWN_ALLOW_NO_PASSWORD"))
+        listen = str(getattr(S, "listen_host", "") or "")                 # adresa, na které server skutečně poslouchá (nastaví daemon)
+        wide = listen not in ("", "127.0.0.1", "localhost", "::1")
+        allow_open = env_flag("VIDDOWN_ALLOW_NO_PASSWORD")
+        exposed = (wide and not allow_open) or S.settings.get("network_access") or (host_env not in ("", "127.0.0.1", "localhost", "::1") and not allow_open)
         if not pw and exposed:
             raise HTTPException(400, "Při přístupu ze sítě je heslo povinné.")
-        S.secrets.set_password(pw)
+        await asyncio.to_thread(S.secrets.set_password, pw)
         r = JSONResponse(settings_out())
         if pw:
             r.set_cookie("vd_session", token(), httponly=True, samesite="strict", max_age=60 * 60 * 24 * 30)
@@ -1267,13 +1276,15 @@ def create_app(app_state) -> FastAPI:
         """Přejmenuje složku na disku a přepíše cesty v historii, frontě a odběrech. Nejde o kořen nastavení, o složku
         s probíhajícím stahováním ani o složku obsahující nastavené složky aplikace."""
         body = await req.json()
-        src = Path(str(body.get("path") or "")).expanduser()
+        src = _norm_path(body.get("path"))                          # jen textová normalizace ('..'); bez čtení z disku v smyčce
         name = _fs_name(str(body.get("name") or ""))
-        protected = [Path(str(S.settings.get(k) or "")).expanduser() for k in ("download_dir", "temp_dir", "auto_backup_dir", "catalog_thumbs_dir")]
-        protected = [str(p) for p in protected if str(p) not in ("", ".")] + [str(S.data), str(Path.home())]
+        protected = [str(_norm_path(S.settings.get(k))) for k in ("download_dir", "temp_dir", "auto_backup_dir", "catalog_thumbs_dir") if S.settings.get(k)]
+        protected = protected + [str(_norm_path(S.data)), str(_norm_path(Path.home()))]
         busy = S.db.query("select filepath, target_dir from jobs where status in ('running', 'cancelling')")
 
         def ren() -> dict:
+            if src.is_symlink():
+                raise HTTPException(400, "Symbolický odkaz nelze přejmenovat jako složku.")
             if not src.is_absolute() or not src.is_dir() or src == Path(src.anchor):
                 raise HTTPException(400, "Tuhle složku nelze přejmenovat.")
             _fs_on_volume(src)

@@ -13,9 +13,28 @@ from urllib.parse import unquote, urlparse
 _BG_TASKS: set = set()
 
 
+_MAIN_LOOP: asyncio.AbstractEventLoop | None = None   # hlavní smyčka (nastavuje set_main_loop při startu)
+
+
+def set_main_loop(loop: asyncio.AbstractEventLoop) -> None:
+    global _MAIN_LOOP
+    _MAIN_LOOP = loop
+
+
 def spawn(aw):
-    """Spustí úlohu na pozadí a drží na ni odkaz, aby ji GC uprostřed práce neuklidil."""
-    t = asyncio.ensure_future(aw)
+    """Spustí úlohu na pozadí a drží na ni odkaz, aby ji GC uprostřed práce neuklidil.
+    Volá-li se z pracovního vlákna (např. upozornění z `_place`), předá se hlavní smyčce."""
+    global _MAIN_LOOP
+    try:
+        loop = asyncio.get_running_loop()
+        _MAIN_LOOP = loop
+        t = asyncio.ensure_future(aw)
+    except RuntimeError:
+        loop = _MAIN_LOOP
+        if loop is None or loop.is_closed():
+            aw.close()                                  # žádná smyčka: korutina se nespustí (jinak by hlásila „never awaited“)
+            return None
+        t = asyncio.run_coroutine_threadsafe(aw, loop)
     _BG_TASKS.add(t)
     t.add_done_callback(_BG_TASKS.discard)
     return t
@@ -354,4 +373,14 @@ def is_http_url(url: str) -> bool:
 
 def mask_proxy(url: str) -> str:
     """Adresa proxy bez hesla (`socks5://uzivatel:heslo@host` → `socks5://uzivatel:***@host`) pro logy a export nastavení."""
-    return re.sub(r"(://[^/@:\s]*:)[^/@\s]+@", r"\1***@", url or "")
+    url = url or ""
+    scheme = ""
+    if "://" in url:
+        scheme, url = url.split("://", 1)
+        scheme += "://"
+    netloc, sep, rest = url.partition("/")
+    if "@" not in netloc:
+        return scheme + url
+    userinfo, _, host = netloc.rpartition("@")               # poslední „@“ odděluje údaje od hostitele (heslo může obsahovat „@“)
+    user = userinfo.split(":", 1)[0]
+    return f"{scheme}{user}:***@{host}" + (sep + rest if sep else "")

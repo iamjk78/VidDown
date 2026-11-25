@@ -33,6 +33,19 @@ _PLACE_LOCK = threading.Lock()
 TARGET_TIMEOUT = 10.0                  # nejdéle tak dlouho čeká kontrola cílové složky
 TARGET_FAILS_BEFORE_PAUSE = 3          # frontu pozastaví až tolik neúspěšných kontrol v řadě (jedna pomalá odpověď NASu ji nezastaví)
 PENDING = ytdlp.PENDING  # hotové stažení čekající na přesun do cílové složky
+
+
+def _pending_info(pend: Path) -> dict | None:
+    """Stav čekajícího přesunu (čte se ve vlákně: složka může být na zaseknutém NAS). None = nic nečeká."""
+    if not pend.exists():
+        return None
+    try:
+        d = json.loads(pend.read_text())
+        f = Path(d["file"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return {"file": str(f), "exists": f.is_file(), "unreachable": not f.parent.exists(),
+            "thumb": d.get("thumb"), "method": d.get("method"), "log": d.get("log", "")}
 PART_SUFFIX = ".viddown-part"  # rozdělané přejmenování v cíli (viz _place)
 MEDIA_EXT = {".mp4", ".mkv", ".webm", ".m4v", ".mov", ".mp3", ".m4a", ".opus", ".ogg", ".flac", ".wav", ".aac", ".ts", ".avi", ".flv", ".gif"}
 
@@ -172,7 +185,7 @@ class Runner:
     def _cleanup_staging(self) -> None:
         """Dokončí zrušení úloh, které zůstaly ve stavu 'cancelling', a uklidí osiřelé dočasné složky."""
         for j in self.db.query("select id from jobs where status='cancelling'"):
-            shutil.rmtree(self.staging(j["id"]), ignore_errors=True)
+            self._rm(self.staging(j["id"]))
             self.db.update(j["id"], status="cancelled", finished_at=time.time(), speed=None, eta=None)
         base = self.staging(0).parent
         if base.exists():
@@ -703,16 +716,15 @@ class Runner:
             result = None
             used = None
             pend = staging / PENDING
-            if pend.exists():  # dříve stažené video čeká jen na přesun do cílové složky
-                try:
-                    d = json.loads(pend.read_text())
-                    if Path(d["file"]).exists():
-                        result = {"file": Path(d["file"]), "thumb": Path(d["thumb"]) if d.get("thumb") else None,
-                                  "log": d.get("log", "")}
-                        used = d.get("method")
-                        methods = []
-                except (OSError, ValueError, KeyError):
-                    pass
+            pinfo = await asyncio.to_thread(_pending_info, pend)     # dříve stažené video čeká jen na přesun do cílové složky
+            if pinfo is not None:
+                if pinfo["exists"]:
+                    result = {"file": Path(pinfo["file"]), "thumb": Path(pinfo["thumb"]) if pinfo["thumb"] else None,
+                              "log": pinfo["log"]}
+                    used = pinfo["method"]
+                    methods = []
+                elif pinfo["unreachable"]:                            # cílová složka není připojená: video nezmizelo, jen čeká
+                    raise ResolveError(f"Cílová složka není dostupná, hotové video čeká na přesun ({pinfo['file']})", "target")
             for m in methods:
                 holder.check()
                 try:
@@ -729,7 +741,7 @@ class Runner:
                     log.info("úloha %s metoda %s: %s (%s)", jid, m, e, e.kind)
                     if not fallback_allowed(e.kind) or is_rate_limited(str(e)):         # při omezení webu další metoda (prohlížeč) jen zatěžuje web
                         break
-                    shutil.rmtree(staging, ignore_errors=True)  # pravidlo: smazat polotovary předchozí metody
+                    await asyncio.to_thread(shutil.rmtree, staging, True)  # pravidlo: smazat polotovary předchozí metody (dřív než začne další)
             if result is None:
                 if not errors:
                     raise ResolveError("žádná metoda neuspěla", "other")
@@ -746,7 +758,7 @@ class Runner:
             cur = self.db.get(jid)
             if reason == "cancel" or (cur and cur["status"] == "cancelling"):
                 self._scrub_sniff(jid)
-                shutil.rmtree(staging, ignore_errors=True)
+                self._rm(staging)
                 thumbs.drop(self.data, jid)
                 self.db.update(jid, status="cancelled", finished_at=time.time(), speed=None, eta=None)
             else:
@@ -962,7 +974,7 @@ class Runner:
         if staging.is_dir() and any(p.is_file() and p.suffix.lower() in MEDIA_EXT for p in staging.iterdir()):
             log.warning("úloha %s: archiv hlásí dříve staženo, ale v dočasné složce zůstal soubor – nemaže se", jid)
             return True
-        shutil.rmtree(staging, ignore_errors=True)
+        self._rm(staging)
         return True
 
     def _place(self, jid: int, result: dict, method: str, staging: Path) -> Path:
@@ -992,6 +1004,7 @@ class Runner:
                     else:
                         dest = unique_target(target_dir, stem, sfx)
                     part = src
+                    moved = True                                           # jediná kopie už je v `part`: při další chybě se nesmí smazat
                 else:
                     dest = unique_target(target_dir, src.stem, src.suffix)
                     part = dest.with_name(dest.name + PART_SUFFIX)
@@ -1064,7 +1077,7 @@ class Runner:
             log.warning("log úlohy %s nelze zapsat: %s", jid, e)
         self.db.update(jid, status="done", filepath=str(dest), filesize=size, finished_at=time.time(), progress=1.0,
                        downloaded=size, total=size, speed=None, eta=None, method=method, error=None, error_kind=None)
-        shutil.rmtree(staging, ignore_errors=True)
+        self._rm(staging)
         done = self.db.get(jid)
         ph = self.phases.get(jid) or {}
         if ph.get("end"):
@@ -1081,15 +1094,24 @@ class Runner:
         self._complete(jid, self._place(jid, result, method, staging), result, method, staging)
 
     async def _finalize_async(self, jid: int, result: dict, method: str, staging: Path) -> None:
-        if self._skip_result(jid, result, method, staging):
+        if await asyncio.to_thread(self._skip_result, jid, result, method, staging):
             return
         dest = await asyncio.to_thread(self._place, jid, result, method, staging)
-        self._complete(jid, dest, result, method, staging)
+        await asyncio.to_thread(self._complete, jid, dest, result, method, staging)
+
+    def _rm(self, path: Path) -> None:
+        """Smaže dočasnou složku. Ve smyčce událostí na pozadí (zaseknutý NAS nesmí zmrazit GUI), jinak přímo."""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            shutil.rmtree(path, ignore_errors=True)
+            return
+        spawn(asyncio.to_thread(shutil.rmtree, path, True))
 
     def _failed(self, jid: int, msg: str, kind: str, staging: Path) -> None:
         job = self.db.get(jid)
         if not job or job["status"] in ("cancelling", "cancelled"):      # uživatel úlohu mezitím zrušil: chyba ji nesmí oživit
-            shutil.rmtree(staging, ignore_errors=True)
+            self._rm(staging)
             if job:
                 self.db.update(jid, status="cancelled", finished_at=time.time(), speed=None, eta=None)
             return
@@ -1130,7 +1152,7 @@ class Runner:
             self.db.update(jid, status="queued", attempts=attempts, not_before=time.time() + delay,
                            error=msg, error_kind=kind, speed=None, eta=None)
             return
-        shutil.rmtree(staging, ignore_errors=True)
+        self._rm(staging)
         self.db.update(jid, status="failed", attempts=attempts, error=msg, error_kind=kind,
                        finished_at=time.time(), speed=None, eta=None)
         self._scrub_sniff(jid)
@@ -1174,7 +1196,7 @@ class Runner:
             if j["status"] == "running":
                 self.db.update(j["id"], status="cancelling")
             elif j["status"] in ("new", "probing", "confirm", "queued", "expanded"):
-                shutil.rmtree(self.staging(j["id"]), ignore_errors=True)
+                self._rm(self.staging(j["id"]))
                 self._scrub_sniff(j["id"])                               # cookies ze sniffu se nesmí nechat v databázi ani u zrušené úlohy
                 self.db.update(j["id"], status="cancelled", finished_at=time.time())
                 if j["status"] == "probing" and j["id"] in self.probing:

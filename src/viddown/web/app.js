@@ -1787,7 +1787,7 @@ function catSetOne(id, on) {
   const k = $('[data-csel]', card); if (k) k.checked = on;
 }
 function catGridDown(e) {
-  if (e.button !== 0 || !CAT.data || catInteractive(e.target)) return;
+  if (App.view !== 'catalog' || e.button !== 0 || !CAT.data || catInteractive(e.target)) return;   // handler zůstává i po odchodu z katalogu
   if (matchMedia('(hover: none)').matches) return;                              // dotyk: výběr zaškrtávátkem, bez tažení
   e.preventDefault();                                                           // jinak by prohlížeč začal označovat text nebo táhnout obrázek
   if (document.activeElement && document.activeElement.blur) document.activeElement.blur();   // klik do mřížky ukončí psaní v hledání

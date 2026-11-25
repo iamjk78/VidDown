@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import signal
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -60,17 +62,31 @@ class ProcHolder:
         self.stopped = True
         p = self.proc
         if p and p.returncode is None:
-            try:
-                p.terminate()
-            except ProcessLookupError:
-                return
+            _signal_group(p, signal.SIGTERM)
             try:
                 await asyncio.wait_for(p.wait(), 8)
             except asyncio.TimeoutError:
+                _signal_group(p, signal.SIGKILL)
                 try:
-                    p.kill()
-                except ProcessLookupError:
+                    await p.wait()
+                except Exception:  # noqa: BLE001
                     pass
+        _signal_group(p, signal.SIGKILL, leftovers_only=True) if p else None   # potomci (ffmpeg pod yt-dlp) nesmí zůstat běžet
+
+
+def _signal_group(p, sig, leftovers_only: bool = False) -> None:
+    """Pošle signál celé skupině procesů podprocesu (na POSIX: podproces má vlastní skupinu, viz spawn_proc)."""
+    if sys.platform == "win32":
+        if not leftovers_only and p.returncode is None:
+            try:
+                (p.kill() if sig == signal.SIGKILL else p.terminate())
+            except ProcessLookupError:
+                pass
+        return
+    try:
+        os.killpg(p.pid, sig)
+    except (ProcessLookupError, PermissionError):
+        pass
 
 
 async def spawn_proc(*cmd, **kw):
@@ -79,6 +95,8 @@ async def spawn_proc(*cmd, **kw):
     if sys.platform == "win32":
         import subprocess
         kw.setdefault("creationflags", subprocess.CREATE_NO_WINDOW | cpu.win_flags())
+    if sys.platform != "win32":
+        kw.setdefault("start_new_session", True)     # vlastní skupina procesů: při zastavení se ukončí i potomci
     proc = await asyncio.create_subprocess_exec(*cmd, **kw)
     cpu.apply_nice(proc.pid)
     return proc

@@ -156,6 +156,7 @@ def serve(open_browser: bool = False, host: str | None = None, port: int | None 
         return 2
     lock.write({"pid": os.getpid(), "port": port, "host": host, "started": time.time(), "version": __version__})
     log.info("VidDown %s – data: %s – GUI: http://%s:%s/", __version__, data, "127.0.0.1" if host == "0.0.0.0" else host, port)
+    st.listen_host = host                              # skutečná adresa serveru (kontroly hesla)
     try:
         asyncio.run(_main(st, host, port, open_browser))
     except KeyboardInterrupt:
@@ -191,6 +192,9 @@ def serve(open_browser: bool = False, host: str | None = None, port: int | None 
 
 async def _main(st: AppState, host: str, port: int, open_browser: bool) -> None:
     import uvicorn
+
+    from . import util as _util
+    _util.set_main_loop(asyncio.get_running_loop())   # upozornění z pracovních vláken se doručí do této smyčky
 
     from .server import create_app
     from .telegram import TelegramBot

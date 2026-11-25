@@ -656,9 +656,9 @@ def test_refill_searches_the_video_pages_again_and_status_counts_pending_scans(s
         c.execute("update catalog_items set anim_file='7.anim.gif', anim_url='https://c/c.gif' where key='youtube c'")
     w = cd.DetailWorker(st)
     assert w.status()["anim_scan"] == 0 and w.status()["anim_pending"] == 0                         # '' není čekající animace
-    assert cd.refill_anims(st.db) == {"details": 2, "retry": 0, "pages": 2}              # hledání na stránce se vrátí a podrobnosti se zopakují (storyboard)
+    assert cd.refill_anims(st.db) == {"details": 0, "retry": 0, "pages": 2}              # hledání na stránce se vrátí; podrobnosti se kvůli tomu znovu nezjišťují
     assert {k: r["anim_url"] for k, r in anim_rows(st).items()} == {"youtube a": None, "youtube b": None, "youtube c": "https://c/c.gif"}
-    assert {k: r["detail_state"] for k, r in anim_rows(st).items()}["youtube a"] == "pending"
+    assert {k: r["detail_state"] for k, r in anim_rows(st).items()}["youtube a"] == "done"
 
 
 def test_empty_animation_url_is_never_downloaded(st, fake, info, web):

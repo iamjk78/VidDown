@@ -255,12 +255,11 @@ class DetailWorker:
         dokud zbývají položky k doplnění."""
         if self.paused():
             return False
+        if self.manual and not self._manual_left():
+            self.manual = False                              # ruční doplnění dokončeno: dál platí jen rozvrh
         if schedule.allowed(self.st.settings.all(), "catalog", db=self.db):
             return True
-        if self.manual and self._manual_left():
-            return True
-        self.manual = False
-        return False
+        return self.manual
 
     def request_manual(self) -> None:
         """Tlačítka „Doplnit animace“ a „Doplnit data“ spustí doplnění hned, i mimo okno rozvrhu (do vyřízení položek)."""
@@ -890,11 +889,11 @@ def refill_anims(db, source: int | None = None) -> dict:
     vis = " and state in ('new','queued')"
     with db.conn() as c:
         c.execute("begin immediate")
+        d = c.execute("update catalog_items set detail_state='pending', detail_error=null where detail_state='done' "
+                      "and anim_url is null and anim_file is null" + vis + where, args).rowcount
         g = c.execute("update catalog_items set anim_url=null where anim_url='' and anim_file is null and detail_state='done'" + vis + where, args).rowcount
         r = c.execute("update catalog_items set anim_file=null, anim_url=null, detail_state='pending', detail_error=null "
                       "where anim_file='' and detail_state='done'" + vis + where, args).rowcount
-        d = c.execute("update catalog_items set detail_state='pending', detail_error=null where detail_state='done' "
-                      "and anim_url is null and anim_file is null" + vis + where, args).rowcount
         c.execute("commit")
     return {"details": d, "retry": r, "pages": g}
 

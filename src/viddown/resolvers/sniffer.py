@@ -6,6 +6,7 @@ Nalezený stream stáhne a spojí ffmpeg (-c copy).
 from __future__ import annotations
 
 import asyncio
+import signal
 import logging
 import re
 import time
@@ -14,7 +15,7 @@ from urllib.parse import urljoin, urlparse
 
 from .. import netsafe
 from ..util import classify_error, is_hls_response
-from . import Cancelled, Ctx, ProcHolder, ResolveError, cookiepolicy, spawn_proc
+from . import Cancelled, Ctx, ProcHolder, ResolveError, _signal_group, cookiepolicy, spawn_proc
 
 log = logging.getLogger("viddown.sniffer")
 
@@ -363,6 +364,56 @@ async def _get(context, u: str, referer: str):
 MAX_REDIRECTS = 5
 
 
+MAX_PLAYLISTS = 12
+MAX_PLAYLIST_URIS = 20000
+
+
+async def hls_hosts_ok(url: str, referer: str, depth: int = 0, headers: dict | None = None, proxy: str | None = None) -> bool:
+    """Ffmpeg sám stahuje segmenty a varianty z playlistu, takže se každá adresa v něm ověří předem (jen hostitelé jiní než
+    hostitel playlistu; ten se ověřil u kandidáta). Vnořené playlisty se procházejí do malé hloubky."""
+    if depth > 2:
+        return False
+    try:
+        res = await asyncio.to_thread(netsafe.fetch_limited, url, {"Referer": referer, "User-Agent": UA, **(headers or {})}, 5 * 1024 * 1024, proxy, 30.0)
+    except Exception:  # noqa: BLE001 - síťová chyba jen vyřadí tohoto kandidáta, ne celé stahování
+        return False
+    if res is None or res[0] >= 400:
+        return False
+    text = res[2].decode("utf-8", "replace")
+    own = (urlparse(url).hostname or "").lower()
+    uris: list[str] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("#"):
+            uris += re.findall(r'URI="([^"]+)"', line)
+        else:
+            uris.append(line)
+    if len(uris) > MAX_PLAYLIST_URIS:
+        return False
+    hosts: set[str] = set()
+    subs: list[str] = []
+    for u in uris:
+        absu = urljoin(url, u)
+        if not absu.lower().startswith(("http://", "https://")):
+            return False                                    # jiné schéma (file:, data:…) v playlistu nepatří do stahování
+        h = (urlparse(absu).hostname or "").lower()
+        if h and h != own:
+            hosts.add(h)
+        if ".m3u8" in absu.lower().split("?")[0]:
+            subs.append(absu)
+    for h in hosts:                                         # každý jiný hostitel se ověří jednou (DNS se nekupí)
+        if not await asyncio.to_thread(netsafe.host_ok, f"https://{h}/"):
+            return False
+    if len(subs) > MAX_PLAYLISTS:
+        return False
+    for sp in subs:
+        if not await hls_hosts_ok(sp, referer, depth + 1, headers, proxy):
+            return False
+    return True
+
+
 async def candidate_ok(url: str, referer: str) -> bool:
     """Adresa kandidáta pro ffmpeg: jen http(s) a veřejný hostitel (nebo stejný web, jaký uživatel zadal)."""
     try:
@@ -586,7 +637,7 @@ async def _duration(ctx: Ctx, url: str, headers: str) -> float | None:
     except Exception:  # noqa: BLE001
         if proc is not None and proc.returncode is None:               # zaseknutý ffprobe by jinak zůstal běžet jako sirotek
             try:
-                proc.kill()
+                _signal_group(proc, signal.SIGKILL)
                 await proc.wait()
             except (ProcessLookupError, OSError):
                 pass
@@ -610,6 +661,19 @@ async def download(sn: dict, ctx: Ctx, staging: Path, name: str, on_progress, ho
         hdr_lines = [f"Referer: {sn['referer']}"]
         if not await candidate_ok(cand["url"], sn["referer"]) or (cand.get("audio") and not await candidate_ok(cand["audio"], sn["referer"])):
             last_err = "adresa videa míří mimo veřejný internet"
+            continue
+        ref_host = (urlparse(sn["referer"]).hostname or "").lower()
+        playlists = [u for u in [cand["url"], cand.get("audio")] if u and (cand.get("kind") == "hls" or ".m3u8" in u.lower())]
+        # playlist na hostiteli, který uživatel zadal (stejný jako stránka), se nekontroluje: jeho obsah ffmpeg stahuje sám
+        unsafe = False
+        for u in playlists:
+            ck_u = _cookie_header(sn.get("cookies"), u)          # CDN může vyžadovat stejné cookies jako prohlížeč
+            hdrs = {"Cookie": ck_u} if ck_u else None
+            if (urlparse(u).hostname or "").lower() != ref_host and not await hls_hosts_ok(u, sn["referer"], 0, hdrs, ctx.settings.get("proxy") or None):
+                unsafe = True
+                break
+        if unsafe:
+            last_err = "playlist odkazuje na adresy mimo veřejný internet"
             continue
         ck = _cookie_header(sn.get("cookies"), cand["url"])
         if ck:

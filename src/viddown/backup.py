@@ -105,6 +105,8 @@ def create(data: Path, out: Path | None = None, include_thumbs: bool = False, en
     # nešifrovaný ZIP se skládá lokálně; do cílové složky (často síťové) jde jen hotový šifrovaný soubor
     part = (tmp / "backup.zip") if encrypt else out.with_name(out.name + ".part")
     try:
+        part.unlink(missing_ok=True)
+        part.touch(mode=0o600)               # nešifrovaná záloha nese hesla a tokeny: jen pro vlastníka (jinak 644 podle umask)
         snap = tmp / "viddown.db"
         schema = _snapshot(db, snap)
         man = {"format": FORMAT, "created": int(time.time()), "app_version": __version__, "schema_version": schema,

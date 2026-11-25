@@ -243,15 +243,22 @@ class Settings:
             st = self.path.stat()
         except FileNotFoundError:
             return {}
+        except OSError:
+            self._io_error = True
+            return self._cache if self._cache is not None else {}
         if self._cache is not None and self._mtime == st.st_mtime_ns:
             return self._cache
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
             if not isinstance(raw, dict):
                 raise ValueError("nastavení nejsou objekt")
-        except (ValueError, OSError):
+        except ValueError:
             _keep_corrupt(self.path)
             raw = {}
+        except OSError:                       # přechodná chyba čtení: poslední známé hodnoty, zápisy se odmítnou (viz update)
+            self._io_error = True
+            return self._cache if self._cache is not None else {}
+        self._io_error = False
         self._cache, self._mtime = raw, st.st_mtime_ns
         return raw
 
@@ -297,6 +304,8 @@ class Settings:
         """Uloží změny. Vrací nové nastavení. Neznámé nebo neplatné hodnoty vyhodí ValueError."""
         with _lock:
             current = dict(self._read_file())
+            if getattr(self, "_io_error", False):
+                raise ValueError("Nastavení se teď nepodařilo přečíst (chyba souboru). Zkuste to znovu, ať se nepřepíšou výchozími hodnotami.")
             for k, v in changes.items():
                 if k not in DEFAULTS:
                     raise ValueError(f"unknown setting: {k}")

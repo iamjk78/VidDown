@@ -184,7 +184,9 @@ class Monitor:
                 delta = None if self._last_cpu is None else used - self._last_cpu
                 self._last_cpu = used
             elif psutil:
-                delta = self._psutil_total() if self._last_cpu is not None else None
+                first = self._last_cpu is None
+                total_now = self._psutil_total()             # při prvním měření jen uloží výchozí stav (jinak by byl celý dosavadní čas špička)
+                delta = None if first else total_now
                 self._last_cpu = 0.0
             else:
                 delta = None
